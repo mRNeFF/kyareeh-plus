@@ -1785,7 +1785,12 @@
     if (!state.user) return loginHTML();
     const deals = state.deals ?? [];
     const filter = String(state.settings.dealsRarity || 'all');
-    const visible = filter === 'all' ? deals : deals.filter((d) => String(d.rarity || 'C') === filter);
+    const typeFilter = String(state.settings.dealsType || 'all');
+    const visible = deals.filter(
+      (d) =>
+        (filter === 'all' || String(d.rarity || 'C') === filter) &&
+        (typeFilter === 'all' || String(d.type || 'fixed') === typeFilter)
+    );
 
     const mineAll = Array.isArray(state.mine?.listings)
       ? state.mine.listings
@@ -1811,7 +1816,6 @@
       })
     ].join('');
 
-    const typeFilter = String(state.settings.dealsType || 'all');
     const meta = state.dealsMeta;
 
     return `
@@ -1840,7 +1844,7 @@
         </label>
       </div>
 
-      <div class="kp-rarities">
+      <div class="kp-rarities ${typeFilter !== 'all' ? 'is-focus' : ''}">
         ${[
           ['all', 'Tout'],
           ['fixed', 'Prix fixe'],
@@ -1862,7 +1866,7 @@
         ${state.dealsError ? ` · <span style="color:var(--kp-bad)">${esc(state.dealsError)}</span>` : ''}
       </div>
 
-      ${deals.length ? `<div class="kp-rarities">${rarityBar}</div>` : ''}
+      ${deals.length ? `<div class="kp-rarities ${filter !== 'all' ? 'is-focus' : ''}">${rarityBar}</div>` : ''}
 
       ${
         state.deals === null
@@ -1875,7 +1879,7 @@
                      const card = d.c ?? state.characters.get(d.characterId) ?? null;
                      const ri = rarityInfo(card?.rarity);
                      return `
-                     <div class="kp-deal" data-act="open-card" data-id="${esc(d.characterId)}">
+                     <div class="kp-deal" data-act="open-listing" data-listing="${esc(d.listingId ?? '')}" data-type="${esc(d.type)}" data-name="${esc(card?.name ?? '')}" title="Ouvrir cette vente sur kyara.games ›">
                        <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
                        <div>
                          <div class="kp-deal-name">${esc(card?.name ?? `Carte #${d.characterId}`)}</div>
@@ -1886,6 +1890,7 @@
                        <div class="kp-deal-price">
                          <b>◆ ${fmt(d.price)}</b>
                          <small>-${d.pct} % · ${fmt(d.saving)} ◆</small>
+                         <span class="kp-deal-open">ouvrir ↗</span>
                        </div>
                      </div>`;
                    })
@@ -1911,7 +1916,7 @@
                      const hoursLeft =
                        end && Number.isFinite(end.getTime()) ? Math.max(0, Math.round((end.getTime() - Date.now()) / 3600000)) : null;
                      return `
-                   <div class="kp-row" data-act="open-card" data-id="${esc(card?.id ?? l.characterId ?? '')}">
+                   <div class="kp-row kp-is-clickable" data-act="open-listing" data-listing="${esc(l.id ?? '')}" data-type="${esc(l.type ?? 'fixed')}" data-name="${esc(card?.name ?? '')}" title="Ouvrir cette vente sur kyara.games ›">
                      <span></span>
                      <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
                      <div class="kp-row-main">
@@ -3343,6 +3348,19 @@
       case 'open-card': {
         const id = el.getAttribute('data-id');
         if (id) window.open(`https://kyara.games/wiki/${encodeURIComponent(id)}`, '_blank', 'noopener');
+        break;
+      }
+      case 'open-listing': {
+        // Ouvre le marché du site directement sur cette annonce :
+        // `annonce` = identifiant de la vente (le site ouvre sa fiche), `q` = repli si elle a disparu.
+        const listing = el.getAttribute('data-listing');
+        const type = el.getAttribute('data-type');
+        const name = el.getAttribute('data-name');
+        const params = new URLSearchParams();
+        params.set('onglet', type === 'auction' ? 'encheres' : 'acheter');
+        if (listing) params.set('annonce', listing);
+        if (name) params.set('q', name);
+        window.open(`https://kyara.games/marche?${params.toString()}`, '_blank', 'noopener');
         break;
       }
       case 'calc-prices': {
