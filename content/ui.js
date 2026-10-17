@@ -9,7 +9,7 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.5.1';
+  const VERSION = '0.6.0';
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -125,6 +125,7 @@
       error: null,
       user: null,
       value: null,
+      progress: null,
       view: 'self'
     }
   };
@@ -1320,6 +1321,31 @@
       </div>`;
   }
 
+  function selfProfileHead() {
+    const u = state.user;
+    if (!u) return '';
+    const avatar = u.avatar || u.discord?.avatar || null;
+    const title = u.title && typeof u.title === 'object' ? u.title.label ?? u.title.name ?? null : u.title ?? null;
+    const points = toNum(u.rank?.points ?? u.points);
+    const rankLabel = u.rank?.label ?? null;
+
+    return `
+      <div class="kp-profile-head">
+        ${
+          avatar
+            ? `<img class="kp-avatar-lg" src="${esc(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
+            : `<div class="kp-avatar-lg kp-avatar-fallback">◆</div>`
+        }
+        <div class="kp-profile-id">
+          <b>${esc(u.pseudo ?? 'Moi')}</b>
+          <small>${esc(rankLabel ?? '—')}${points != null ? ` · ${fmt(points)} pts` : ''}</small>
+          ${title ? `<span class="kp-title-badge">${esc(title)}</span>` : ''}
+        </div>
+        <a class="kp-link" href="https://kyara.games/profil/${encodeURIComponent(u.id ?? '')}" target="_blank" rel="noopener">Voir sur le site ↗</a>
+      </div>
+    `;
+  }
+
   function viewAccount() {
     if (state.profile.view === 'other') return viewOtherAccount();
     if (state.profile.view === 'search') return viewProfileSearch();
@@ -1376,7 +1402,8 @@
 
     return `
       ${profileSearchBar()}
-      <div class="kp-hero">
+      ${selfProfileHead()}
+      <div class="kp-hero" style="margin-top:10px">
         <div class="kp-hero-label">Valeur estimée du compte</div>
         <div class="kp-hero-value">◆ ${fmt(stats.total)}</div>
         <div class="kp-hero-sub">
@@ -1820,48 +1847,141 @@
     return out;
   }
 
-  async function searchProfile() {
-    const query = state.profile.query.trim();
-    if (!query) return;
+  /** Liste réelle des cartes possédées par un joueur (endpoint public d'échange). */
+  async function fetchOwnedIds(id) {
+    const data = await api(`/api/trades/owned/${encodeURIComponent(id)}`, { timeout: 25000 }).catch(() => null);
+    if (!data) return null;
+    const list = Array.isArray(data) ? data : Array.isArray(data.ids) ? data.ids : Array.isArray(data.cards) ? data.cards : null;
+    if (!list) return null;
+    const ids = [];
+    for (const entry of list) {
+      const value =
+        entry && typeof entry === 'object' ? entry.characterId ?? entry.id ?? entry.cardId : entry;
+      if (value != null) ids.push(String(value));
+    }
+    return ids.length ? [...new Set(ids)] : null;
+  }
 
-    state.profile.view = 'search';
-    state.profile.searching = true;
-    state.profile.error = null;
-    state.profile.results = null;
-    state.profile.user = null;
-    state.profile.value = null;
-    render();
+  /** Prix officiels « fair-play » pour une liste d'ids (par lots de 200, comme le site). */
+  async function fetchFairPrices(ids, onProgress) {
+    const out = new Map();
+    const total = ids.length;
+    let done = 0;
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200);
+      const data = await api(`/api/fair-play/prices?ids=${chunk.join(',')}`, { timeout: 25000 }).catch(() => null);
+      if (data && typeof data === 'object') {
+        if (Array.isArray(data)) {
+          chunk.forEach((id, index) => {
+            const raw = data[index];
+            const value = toNum(raw && typeof raw === 'object' ? raw.price ?? raw.value : raw);
+            if (value != null) out.set(id, value);
+          });
+        } else {
+          for (const [key, raw] of Object.entries(data)) {
+            const value = toNum(raw && typeof raw === 'object' ? raw.price ?? raw.value : raw);
+            if (value != null) out.set(String(key), value);
+          }
+        }
+      }
+      done += chunk.length;
+      if (onProgress) onProgress(done, total);
+    }
+    return out;
+  }
+
+  let searchTimer = null;
+  let searchSeq = 0;
+
+  async function runProfileSearch(query) {
+    const cleaned = String(query ?? '').trim();
+    if (!cleaned) return;
+
+    const seq = ++searchSeq;
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
+
+    if (state.profile.view !== 'search') {
+      state.profile.view = 'search';
+      state.profile.user = null;
+      state.profile.value = null;
+      state.profile.results = null;
+      state.profile.error = null;
+      state.profile.searching = true;
+      render();
+      focusProfileSearch();
+    } else {
+      state.profile.searching = true;
+      patchProfileResults();
+    }
 
     try {
-      const data = await api(`/api/leaderboard/ladder?by=collection&q=${encodeURIComponent(query)}`, { timeout: 20000 });
+      const data = await api(`/api/leaderboard/ladder?by=collection&q=${encodeURIComponent(cleaned)}`, { timeout: 20000 });
+      if (seq !== searchSeq) return;
       const found = Array.isArray(data?.found) ? data.found : [];
       state.profile.results = found.slice(0, 12);
-      if (!found.length) state.profile.error = `Aucun joueur nommé « ${query} ».`;
+      state.profile.error = found.length ? null : `Aucun joueur nommé « ${cleaned} ».`;
     } catch (err) {
+      if (seq !== searchSeq) return;
       state.profile.error = friendlyError(err);
+      state.profile.results = null;
     } finally {
-      state.profile.searching = false;
-      render();
+      if (seq === searchSeq) {
+        state.profile.searching = false;
+        patchProfileResults();
+      }
     }
   }
 
+  function searchProfile() {
+    return runProfileSearch(state.profile.query);
+  }
+
+  function scheduleProfileSearch() {
+    const query = state.profile.query.trim();
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
+
+    if (query.length < 2) {
+      if (state.profile.view === 'search') {
+        state.profile.results = null;
+        state.profile.error = null;
+        state.profile.searching = false;
+        patchProfileResults();
+      }
+      return;
+    }
+
+    searchTimer = setTimeout(() => runProfileSearch(query), 300);
+  }
+
   function resetProfile() {
+    searchSeq += 1;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
     state.profile.view = 'self';
     state.profile.user = null;
     state.profile.value = null;
     state.profile.results = null;
     state.profile.error = null;
     state.profile.loading = false;
+    state.profile.searching = false;
     render();
   }
 
   async function loadProfile(id) {
     if (!id) return;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
+
     state.profile.view = 'other';
     state.profile.loading = true;
     state.profile.error = null;
     state.profile.user = null;
     state.profile.value = null;
+    state.profile.progress = { done: 0, total: 0 };
     render();
 
     try {
@@ -1874,55 +1994,120 @@
       state.profile.user = user ? { ...(stub || {}), ...user } : stub;
       if (!user) state.profile.error = 'Profil introuvable ou privé : seules les infos publiques sont affichées.';
 
-      // Prix des meilleures cartes du joueur (max 8), pour une estimation ancrée.
       const best = Array.isArray(user?.best) ? user.best.slice(0, 8) : [];
-      const averages = rarityAverages();
-      const missing = best.map((c) => String(c.id)).filter((cardId) => !priceFresh(state.prices[cardId]));
-      if (missing.length) await loadPrices(missing).catch(() => null);
+
+      // 1) Valorisation exacte : on récupère les cartes réellement possédées,
+      //    puis les prix officiels via /fair-play/prices.
+      const ownedIds = await fetchOwnedIds(id);
+      let value = null;
+
+      if (ownedIds && ownedIds.length) {
+        state.profile.progress = { done: 0, total: ownedIds.length };
+        render();
+
+        const prices = await fetchFairPrices(ownedIds, (done, total) => {
+          state.profile.progress = { done, total };
+          if (done % 400 === 0 || done === total) render();
+        });
+
+        const byRarity = {};
+        const rarityValue = {};
+        let total = 0;
+        let priced = 0;
+        let unknown = 0;
+
+        for (const cardId of ownedIds) {
+          const rarity = String(state.characters.get(cardId)?.rarity ?? '').toUpperCase();
+          if (rarity) byRarity[rarity] = (byRarity[rarity] ?? 0) + 1;
+          const price = prices.get(cardId);
+          if (price == null || price <= 0) {
+            unknown += 1;
+            continue;
+          }
+          total += price;
+          priced += 1;
+          if (rarity) rarityValue[rarity] = (rarityValue[rarity] ?? 0) + price;
+        }
+
+        value = {
+          exact: true,
+          total,
+          priced,
+          unknown,
+          uniques: ownedIds.length,
+          byRarity,
+          rarityValue,
+          prices,
+          hasCollection: true
+        };
+      }
+
+      // 2) Repli : estimation par rareté si la liste n'est pas accessible.
+      if (!value && user?.byRarity) {
+        const averages = rarityAverages();
+        let estimate = 0;
+        let unknown = 0;
+        let sample = 0;
+        const rarityValue = {};
+        for (const [code, count] of Object.entries(user.byRarity)) {
+          const quantity = Number(count) || 0;
+          if (!quantity) continue;
+          const avg = averages.get(String(code).toUpperCase());
+          if (!avg) {
+            unknown += quantity;
+            continue;
+          }
+          sample += avg.sample;
+          estimate += avg.median * quantity;
+          rarityValue[String(code).toUpperCase()] = avg.median * quantity;
+        }
+        value = {
+          exact: false,
+          total: estimate,
+          priced: 0,
+          unknown,
+          uniques: Object.values(user.byRarity).reduce((sum, n) => sum + (Number(n) || 0), 0),
+          byRarity: user.byRarity,
+          rarityValue,
+          sample,
+          hasCollection: true
+        };
+      }
+
+      // 3) Prix exacts des meilleures cartes (affichage).
+      if (best.length) {
+        const missing = best.map((c) => String(c.id)).filter((cardId) => !value?.prices?.has(cardId) && !priceFresh(state.prices[cardId]));
+        if (missing.length) await loadPrices(missing).catch(() => null);
+      }
 
       let bestValue = 0;
       const bestRows = best.map((card) => {
-        const price = priceOf(card.id);
+        const price = value?.prices?.get(String(card.id)) ?? priceOf(card.id);
         if (price != null) bestValue += price;
         return { card, price };
       });
 
-      const byRarity = user?.byRarity ?? null;
-      let estimate = bestValue;
-      let sample = 0;
-      let unknown = 0;
-
-      if (byRarity) {
-        const bestIds = new Set(best.map((c) => String(c.id)));
-        for (const [code, count] of Object.entries(byRarity)) {
-          const total = Number(count) || 0;
-          if (!total) continue;
-          const avg = averages.get(String(code).toUpperCase());
-          // Les meilleures cartes sont déjà comptées à leur prix exact.
-          const remaining = Math.max(0, total - [...bestIds].filter((cardId) => String(state.characters.get(cardId)?.rarity ?? '').toUpperCase() === String(code).toUpperCase()).length);
-          if (!avg) {
-            unknown += remaining;
-            continue;
-          }
-          sample += avg.sample;
-          estimate += avg.median * remaining;
-        }
+      if (!value) {
+        value = {
+          exact: false,
+          total: bestValue,
+          priced: 0,
+          unknown: 0,
+          uniques: null,
+          byRarity: null,
+          hasCollection: false
+        };
       }
 
-      state.profile.value = {
-        total: estimate,
-        bestValue,
-        sample,
-        unknown,
-        byRarity,
-        best: bestRows,
-        hasCollection: Boolean(byRarity),
-        private: Boolean(user?.locked?.includes('collection'))
-      };
+      value.best = bestRows;
+      value.bestValue = bestValue;
+      value.private = Boolean(user?.locked?.includes('collection'));
+      state.profile.value = value;
     } catch (err) {
       state.profile.error = friendlyError(err);
     } finally {
       state.profile.loading = false;
+      state.profile.progress = null;
       render();
     }
   }
@@ -1931,7 +2116,7 @@
     const p = state.profile;
     return `
       <div class="kp-searchbar">
-        <input class="kp-input" type="search" data-role="profile-search" placeholder="Pseudo d'un joueur…" value="${esc(p.query)}" aria-label="Rechercher un compte">
+        <input class="kp-input" type="search" data-role="profile-search" placeholder="Pseudo d'un joueur…" value="${esc(p.query)}" aria-label="Rechercher un compte" autocomplete="off" spellcheck="false">
         <button class="kp-btn is-primary" type="button" data-act="profile-search" ${p.searching ? 'disabled' : ''}>${
           p.searching ? '…' : 'Chercher'
         }</button>
@@ -1958,10 +2143,53 @@
       </div>`;
   }
 
-  function viewProfileSearch() {
+  function profileResultsHTML() {
     const p = state.profile;
     const results = Array.isArray(p.results) ? p.results : null;
 
+    if (p.searching && !results) {
+      return `<div class="kp-empty"><span class="kp-spinner"></span> Recherche…</div>`;
+    }
+
+    if (p.error && !results) {
+      return `<div class="kp-alert is-bad" style="margin-top:10px">${esc(p.error)}</div>`;
+    }
+
+    if (results && results.length) {
+      return `
+        <div class="kp-section-title" style="margin-top:12px">
+          ${results.length > 1 ? `${results.length} joueurs trouvés` : '1 joueur trouvé'}
+          ${p.searching ? '<span class="kp-spinner"></span>' : ''}
+        </div>
+        ${profileResultsTable(results)}`;
+    }
+
+    return `<div class="kp-empty"><b>Cherche un joueur</b>Les comptes s'affichent au fur et à mesure de la saisie.</div>`;
+  }
+
+  function patchProfileResults() {
+    if (!shadow) return;
+    const box = qs('#kp-results');
+    if (!box) {
+      render();
+      return;
+    }
+    box.innerHTML = profileResultsHTML();
+  }
+
+  function focusProfileSearch() {
+    const input = qs('[data-role="profile-search"]');
+    if (!input) return;
+    try {
+      input.focus();
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function viewProfileSearch() {
     return `
       <div class="kp-navbar">
         <button class="kp-back" type="button" data-act="profile-back">← Mon compte</button>
@@ -1969,21 +2197,7 @@
       </div>
 
       ${profileSearchBar()}
-
-      ${p.error ? `<div class="kp-alert is-bad" style="margin-top:10px">${esc(p.error)}</div>` : ''}
-
-      ${
-        p.searching
-          ? `<div class="kp-empty"><span class="kp-spinner"></span> Recherche…</div>`
-          : results && results.length
-            ? `<div class="kp-section-title" style="margin-top:14px">${
-                results.length > 1 ? `${results.length} joueurs trouvés` : '1 joueur trouvé'
-              }</div>
-               ${profileResultsTable(results)}`
-            : p.error
-              ? ''
-              : `<div class="kp-empty"><b>Cherche un joueur</b>Entre un pseudo pour voir la valeur estimée de son compte.</div>`
-      }
+      <div id="kp-results">${profileResultsHTML()}</div>
     `;
   }
 
@@ -2016,17 +2230,19 @@
     const rarityRows = v?.byRarity
       ? (() => {
           const codes = RARITY_ORDER.filter((code) => Number(v.byRarity[code]) > 0);
-          const maxCount = Math.max(1, ...codes.map((code) => Number(v.byRarity[code])));
-          const averages = rarityAverages();
+          const maxValue = Math.max(1, ...codes.map((code) => Number(v.rarityValue?.[code]) || 0));
+          const totalCount = Math.max(1, ...codes.map((code) => Number(v.byRarity[code]) || 0));
+          const exact = Boolean(v.exact && v.rarityValue);
           return codes.map((code) => {
             const info = rarityInfo(code);
             const count = Number(v.byRarity[code]);
-            const avg = averages.get(code);
+            const value = Number(v.rarityValue?.[code]) || 0;
+            const ratio = exact ? value / maxValue : count / totalCount;
             return `
               <div class="kp-bar-row">
                 <span>${esc(info.label)} · ${fmt(count)}</span>
-                <div class="kp-bar"><i style="width:${Math.max(2, Math.round((count / maxCount) * 100))}%;--kp-bar-color:${info.color}"></i></div>
-                <b>${avg ? `◆ ${fmt(avg.median)}` : '—'}</b>
+                <div class="kp-bar"><i style="width:${Math.max(2, Math.round(ratio * 100))}%;--kp-bar-color:${info.color}"></i></div>
+                <b>${value > 0 ? `◆ ${fmt(value)}` : '—'}</b>
               </div>`;
           });
         })()
@@ -2045,26 +2261,41 @@
       </div>
 
       <div class="kp-hero" style="margin-top:10px">
-        <div class="kp-hero-label">Valeur estimée du compte</div>
+        <div class="kp-hero-label">Valeur du compte</div>
         <div class="kp-hero-value">◆ ${fmt(v?.total ?? 0)}</div>
         <div class="kp-hero-sub">
           ${
-            v?.hasCollection
-              ? `Top cartes valorisées ◆ ${fmt(v.bestValue)}${v.unknown ? ` · ${fmt(v.unknown)} carte(s) sans référence` : ''}`
-              : 'Collection privée : seules les infos publiques sont disponibles.'
+            p.progress && p.progress.total
+              ? `Valorisation en cours… ${fmt(p.progress.done)}/${fmt(p.progress.total)}`
+              : v?.exact
+                ? `${fmt(v.uniques)} cartes uniques · ${fmt(v.priced)} avec prix${v.unknown ? ` · ${fmt(v.unknown)} sans prix` : ''}`
+                : v?.hasCollection
+                  ? `Estimation par rareté${v.unknown ? ` · ${fmt(v.unknown)} carte(s) sans référence` : ''}`
+                  : 'Collection privée : seules les infos publiques sont disponibles.'
           }
         </div>
+        ${
+          p.progress && p.progress.total
+            ? `<div class="kp-progress">
+                 <div class="kp-progress-bar"><i style="width:${Math.round((p.progress.done / p.progress.total) * 100)}%"></i></div>
+               </div>`
+            : ''
+        }
       </div>
 
       <div class="kp-chips" style="margin-top:8px">
         <span class="kp-chip"><em>Rang</em> ${esc(u.rank?.label ?? '—')}</span>
         ${u.pos != null || u.position != null ? `<span class="kp-chip"><em>Classement</em> #${fmt(u.pos ?? u.position)}</span>` : ''}
         ${u.points != null ? `<span class="kp-chip"><em>Points</em> ${fmt(u.points)}</span>` : ''}
-        ${u.owned != null ? `<span class="kp-chip"><em>Cartes</em> ${fmt(u.owned)}</span>` : ''}
+        ${v?.uniques != null ? `<span class="kp-chip"><em>Cartes uniques</em> ${fmt(v.uniques)}</span>` : ''}
+        ${v?.bestValue ? `<span class="kp-chip"><em>Top 8</em> ◆ ${fmt(v.bestValue)}</span>` : ''}
         ${u.mythics != null ? `<span class="kp-chip"><em>Mythiques</em> ${fmt(u.mythics)}</span>` : ''}
+        <span class="kp-chip"><em>Source</em> ${v?.exact ? 'prix du jeu' : 'estimation'}</span>
       </div>
 
-      ${rarityRows.length ? `<div class="kp-section-title" style="margin-top:14px">Répartition par rareté</div><div class="kp-bars">${rarityRows.join('')}</div>` : ''}
+      ${rarityRows.length ? `<div class="kp-section-title" style="margin-top:14px">Répartition par rareté${
+        v?.exact ? '' : ' (estimée)'
+      }</div><div class="kp-bars">${rarityRows.join('')}</div>` : ''}
 
       ${
         v?.best?.length
@@ -2463,6 +2694,11 @@
     if (!target || typeof target.closest !== 'function') return;
     if (target.closest('[data-role="profile-search"]')) {
       event.preventDefault();
+      const results = state.profile.results;
+      if (Array.isArray(results) && results.length === 1) {
+        loadProfile(results[0].id);
+        return;
+      }
       searchProfile();
     }
   }
@@ -2474,16 +2710,7 @@
     const profileSearch = target.closest('[data-role="profile-search"]');
     if (profileSearch) {
       state.profile.query = profileSearch.value;
-      render();
-      const again = qs('[data-role="profile-search"]');
-      if (again) {
-        again.focus();
-        try {
-          again.setSelectionRange(again.value.length, again.value.length);
-        } catch {
-          /* ignore */
-        }
-      }
+      scheduleProfileSearch();
       return;
     }
 

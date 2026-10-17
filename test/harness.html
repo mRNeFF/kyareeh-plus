@@ -85,7 +85,18 @@
         }
         if (url.includes('/api/me/bootstrap')) {
           return json({
-            me: { id: 'u-axel', pseudo: 'Axel', chakra: 12345, freePacks: 7, freePacksMax: 10, bonusPacks: 2, pity: 120 },
+            me: {
+              id: 'u-axel',
+              pseudo: 'Axel',
+              avatar: null,
+              title: 'Collectionneur',
+              rank: { id: 'expert', label: 'Expert', points: 9819 },
+              chakra: 12345,
+              freePacks: 7,
+              freePacksMax: 10,
+              bonusPacks: 2,
+              pity: 120
+            },
             wishlist: []
           });
         }
@@ -101,6 +112,18 @@
             ],
             buyOrders: []
           });
+        }
+        if (url.includes('/api/trades/owned/')) {
+          return json([127691, 999001, 10668, 282077, 21122, 999002, 127691]);
+        }
+        if (url.includes('/api/fair-play/prices')) {
+          const ids = new URL(url, location.href).searchParams.get('ids').split(',');
+          const out = {};
+          for (const id of ids) {
+            const p = PRICES[id];
+            out[id] = p ? p.median7d : 0;
+          }
+          return json(out);
         }
         if (url.includes('/api/leaderboard/ladder')) {
           return json({

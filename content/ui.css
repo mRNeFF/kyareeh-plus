@@ -1247,6 +1247,30 @@ img.kp-avatar {
   font-size: 10px;
 }
 
+.kp-title-badge {
+  display: inline-block;
+  max-width: 100%;
+  margin-top: 3px;
+  padding: 1px 7px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 179, 32, 0.35);
+  border-radius: 999px;
+  background: rgba(255, 179, 32, 0.12);
+  color: #fbbf24;
+  font-size: 9px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kp-avatar-fallback {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #ff5a36, #c92a10);
+  color: #fff;
+  font-size: 18px;
+}
+
 .kp-deal {
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr) auto;

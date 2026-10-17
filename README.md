@@ -4,9 +4,10 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.5.0)
+## Fonctionnalités (v0.6.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
+- **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
 - **Valeur des doublons** : brut, net après taxe de vente (5 %) et frais de dépôt (2 %, min 1 ◆), plus la valeur de recyclage.
 - **Top cartes**, **répartition de la valeur par rareté** et **complétion par série**.
 - **Ressources** : chakra, boosters gratuits / max, bonus, pity, accès au marché.
@@ -15,7 +16,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Mise en enchère** : au lieu du prix fixe, mise à prix calculée à *médiane − X %* (réglable par lot, 15 % par défaut), avec achat immédiat facultatif à *+ Y %*.
 - **Marché** : scan des 150 annonces les plus basses, filtrable par rareté (mêmes puces que la collection du site), classé par économie réelle par rapport à la médiane 7 jours.
 - **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
-- **Valeur d'un autre compte** : barre de recherche en haut de l'onglet Compte. Chercher un pseudo ouvre une page dédiée (résultats, puis profil complet : valeur estimée, répartition par rareté, plus belles cartes), avec un bouton **← Mon compte** pour revenir. La bande de stats du haut suit le profil consulté.
+- **Valeur d'un autre compte** : recherche instantanée au fil de la saisie, puis page dédiée avec valeur exacte (prix du jeu), répartition par rareté, plus belles cartes, et bouton **← Mon compte**.
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
 - **Mise à jour** : bouton **Recharger l'extension** dans les Réglages (et dans la popup) qui relit le dossier local et rafraîchit la page — aucun téléchargement.
 - **Debug** : journal des requêtes, clés renvoyées par l'API, diagnostic copiable.
@@ -87,9 +88,15 @@ Mise à prix d'une enchère : `médiane × (1 − X %)`, jamais sous la valeur d
 
 ### Valeur d'un autre compte
 
-La recherche passe par `GET /api/leaderboard/ladder?by=collection&q=pseudo` (public), qui renvoie la position, le rang, le nombre de cartes, de mythiques et les points. Le détail vient de `GET /api/users/:id` (session requise) : `byRarity`, `best` et les blocs publics.
+La recherche est **instantanée** : dès 2 caractères, `GET /api/leaderboard/ladder?by=collection&q=pseudo` est interrogé (debounce 300 ms) et les comptes s'affichent au fil de la saisie. Un clic ouvre le profil en pleine page.
 
-La valeur affichée est une **estimation** : les meilleures cartes (`best`) sont valorisées à leur médiane exacte, le reste est estimé avec la médiane des médianes de chaque rareté, calculée sur les cartes déjà valorisées dans ton cache. Le nombre de cartes sans référence est indiqué. Si le joueur a masqué sa collection, seules les infos publiques du classement s'affichent.
+La valorisation est **exacte**, pas estimée :
+
+1. `GET /api/trades/owned/:id` donne la liste des cartes réellement possédées (ids uniques) ;
+2. les prix officiels sont récupérés par lots de 200 via `GET /api/fair-play/prices?ids=…`, l'endpoint utilisé par le site pour estimer un échange ;
+3. la valeur est la somme des prix, et la répartition par rareté est recalculée à partir du catalogue — elle s'additionne exactement au total.
+
+Si la liste n'est pas accessible (profil restreint, endpoint modifié), l'extension retombe sur une **estimation** par rareté (médiane des médianes du cache), clairement libellée « estimée », avec le nombre de cartes sans référence.
 
 ## Sécurité et limites
 
