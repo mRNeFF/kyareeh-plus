@@ -1,8 +1,8 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="fr">
   <head>
     <meta charset="utf-8" />
-    <title>Kyara+ harness</title>
+    <title>Kyareeh+ harness</title>
     <style>
       html, body { margin: 0; min-height: 100%; background: #0b0c10; color: #fff; font-family: system-ui, sans-serif; }
       body { padding: 24px; }
@@ -12,7 +12,7 @@
     </style>
   </head>
   <body>
-    <h1>Kyara+ — harness de test</h1>
+    <h1>Kyareeh+ — harness de test</h1>
     <p>Page locale avec API simulée. Le panneau doit s'ouvrir automatiquement (Alt+K).</p>
     <div id="log"></div>
 
@@ -79,6 +79,10 @@
         if (!url.includes('/api/')) return realFetch(input, init);
         log('API ' + (init?.method || 'GET') + ' ' + url);
 
+        if (url.includes('/api/me/collection/prices')) {
+          const ids = new URL(url, location.href).searchParams.get('ids').split(',');
+          return json(ids.map((id) => ({ characterId: Number(id), ...(PRICES[id] || {}) })));
+        }
         if (url.includes('/api/me/bootstrap')) {
           return json({
             me: { id: 'u-axel', pseudo: 'Axel', chakra: 12345, freePacks: 7, freePacksMax: 10, bonusPacks: 2, pity: 120 },

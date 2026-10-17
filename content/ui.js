@@ -1,4 +1,4 @@
-/* Kyara+ — content script
+﻿/* Kyareeh+ — content script
  * Tableau de bord de compte, valorisation en chakra et vente assistée.
  * Tout passe par la session existante de l'utilisateur : aucun identifiant stocké.
  */
@@ -9,7 +9,7 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.2.0';
+  const VERSION = '0.3.0';
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -20,7 +20,10 @@
     maxBatch: 20,
     discountPct: 0,
     dryRun: false,
-    autoPrices: true
+    autoPrices: true,
+    saleType: 'fixed',
+    auctionPct: 15,
+    buyoutPct: 0
   };
 
   const RARITY = {
@@ -37,6 +40,7 @@
 
   const nf = new Intl.NumberFormat('fr-FR');
   const fmt = (v) => (v == null || !Number.isFinite(Number(v)) ? '—' : nf.format(Math.round(Number(v))));
+  const plural = (n, word, suffix = '') => `${fmt(n)} ${word}${Number(n) > 1 ? 's' : ''}${suffix}`;
   const esc = (s) =>
     String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -145,14 +149,14 @@
 
     shadow.innerHTML = `
       <style>${css}</style>
-      <button class="kp-fab" type="button" data-act="toggle" title="Kyara+ (Alt+K)">
-        <span class="kp-diamond">◆</span><span>Kyara+</span>
+      <button class="kp-fab" type="button" data-act="toggle" title="Kyareeh+ (Alt+K)">
+        <span class="kp-diamond">◆</span><span>Kyareeh+</span>
       </button>
-      <section class="kp-panel" hidden aria-label="Kyara+">
+      <section class="kp-panel" hidden aria-label="Kyareeh+">
         <header class="kp-head">
           <div class="kp-brand">
             <span class="kp-logo">◆</span>
-            <div><b>Kyara+</b><small>chakra &amp; doublons</small></div>
+            <div><b>Kyareeh+</b><small>chakra &amp; doublons</small></div>
           </div>
           <div class="kp-head-actions">
             <button class="kp-icon-btn" type="button" data-act="refresh" title="Rafraîchir les données">⟳</button>
@@ -403,12 +407,13 @@
     }
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
-    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct']) {
+    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct']) {
       const value = Number(state.settings[key]);
       state.settings[key] = Number.isFinite(value) ? value : DEFAULT_SETTINGS[key];
     }
     state.settings.dryRun = Boolean(state.settings.dryRun);
     state.settings.autoPrices = state.settings.autoPrices !== false;
+    state.settings.saleType = state.settings.saleType === 'auction' ? 'auction' : 'fixed';
     const cached = await storageGet(PRICE_KEY, {});
     if (cached && typeof cached === 'object') {
       state.prices = cached.prices && typeof cached.prices === 'object' ? cached.prices : cached;
@@ -772,13 +777,17 @@
     };
   }
 
+  function recycleFloor(rarity) {
+    return Math.max(1, recycleOf(rarity));
+  }
+
   function suggestPrice(id, rarity) {
     const key = String(id);
     const p = state.prices[key];
     const median = p?.m7 ?? p?.m30 ?? null;
     const low = state.lowest[key] ?? null;
     const bid = state.buyOrders[key]?.price ?? null;
-    const floor = Math.max(1, recycleOf(rarity ?? state.characters.get(key)?.rarity));
+    const floor = recycleFloor(rarity ?? state.characters.get(key)?.rarity);
 
     let base = median ?? low ?? floor;
     if (low != null && low > 1) base = Math.min(base, low - 1);
@@ -786,6 +795,25 @@
     base = Math.max(floor, base);
     if (state.settings.discountPct) base = base * (1 - state.settings.discountPct / 100);
     return Math.max(1, Math.round(base));
+  }
+
+  /** Mise à prix d'une enchère : médiane (ou plus basse annonce) moins X %. */
+  function auctionStartPrice(id, rarity, pct) {
+    const key = String(id);
+    const p = state.prices[key];
+    const median = p?.m7 ?? p?.m30 ?? null;
+    const low = state.lowest[key] ?? null;
+    const floor = recycleFloor(rarity ?? state.characters.get(key)?.rarity);
+    const base = median ?? low ?? floor;
+    const share = Math.min(80, Math.max(0, Number(pct ?? state.settings.auctionPct))) / 100;
+    return Math.max(floor, Math.round(base * (1 - share)));
+  }
+
+  /** Achat immédiat facultatif, en % au-dessus de la mise à prix (0 = désactivé). */
+  function buyoutPriceFor(price, pct) {
+    const share = Number(pct ?? 0);
+    if (!Number.isFinite(share) || share <= 0) return null;
+    return Math.max(price + 1, Math.round(price * (1 + share / 100)));
   }
 
   /* ------------------------------------------------------------------ */
@@ -863,36 +891,56 @@
     render();
 
     try {
-      const data = await api('/api/market/listings?sort=price_asc&pageSize=120', { timeout: 20000 });
-      const items = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
+      const items = [];
+      for (const page of [1, 2, 3]) {
+        // Le serveur plafonne pageSize à 50 : on parcourt plusieurs pages.
+        const data = await api(`/api/market/listings?sort=price_asc&pageSize=50&page=${page}`, { timeout: 20000 });
+        const batch = Array.isArray(data?.items) ? data.items : [];
+        items.push(...batch);
+        if (batch.length < 50) break;
+      }
 
+      const seen = new Set();
       const deals = [];
+
       for (const item of items) {
         if (item.isMine) continue;
+
         const id = String(item.characterId ?? item.character?.id ?? '');
         if (!id) continue;
 
-        const price = String(item.type) === 'fixed' ? toNum(item.price) : toNum(item.buyoutPrice);
+        const isAuction = String(item.type) === 'auction';
+        // Une enchère sans achat immédiat n'est pas un bon plan « prenable » tout de suite.
+        const price = isAuction ? toNum(item.buyoutPrice) : toNum(item.price);
+        if (price == null || price <= 0) continue;
+
         const embedded = item.prices ?? null;
         const median = toNum(embedded?.median7d ?? embedded?.median30d) ?? priceOf(id);
-        if (price == null || price <= 0 || median == null || median <= 0) continue;
+        if (median == null || median <= 0) continue;
 
-        const pct = Math.round((1 - price / median) * 100);
-        if (pct < 8) continue;
+        const saving = median - price;
+        const pct = Math.round((saving / median) * 100);
+        if (pct < 10 || saving < 2) continue;
+
+        const key = item.id ?? `${id}:${price}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
 
         deals.push({
-          ...item,
+          listingId: item.id ?? null,
           characterId: id,
           price,
           median,
+          saving,
           pct,
+          type: item.type ?? 'fixed',
           sales7d: toNum(embedded?.sales7d),
-          c: item.character ?? state.characters.get(id) ?? {}
+          c: item.character ?? state.characters.get(id) ?? null
         });
       }
 
-      deals.sort((a, b) => b.pct - a.pct);
-      state.deals = deals;
+      deals.sort((a, b) => b.saving - a.saving || b.pct - a.pct);
+      state.deals = deals.slice(0, 40);
     } catch (err) {
       notify(`Scan impossible : ${friendlyError(err)}`);
       state.deals = state.deals || [];
@@ -910,17 +958,39 @@
     const rows = filteredDupes().filter((r) => state.selected.has(r.id) && r.sellable > 0);
     if (!rows.length) return;
 
+    const type = state.settings.saleType;
     const plan = rows.map((r) => ({
       characterId: apiId(r.rawId ?? r.id),
       name: r.name,
       image: r.image,
       rarity: r.rarity,
       qty: r.sellable,
-      price: suggestPrice(r.id, r.rarity)
+      median: priceOf(r.id),
+      floor: recycleFloor(r.rarity),
+      price: type === 'auction' ? auctionStartPrice(r.id, r.rarity, state.settings.auctionPct) : suggestPrice(r.id, r.rarity)
     }));
 
-    state.sell = { plan, running: false, done: false, log: [] };
+    state.sell = {
+      plan,
+      type,
+      auctionPct: state.settings.auctionPct,
+      buyoutPct: state.settings.buyoutPct,
+      running: false,
+      done: false,
+      log: []
+    };
     render();
+  }
+
+  function resetPlanPrices() {
+    const sell = state.sell;
+    if (!sell) return;
+    for (const row of sell.plan) {
+      row.price =
+        sell.type === 'auction'
+          ? auctionStartPrice(row.characterId, row.rarity, sell.auctionPct)
+          : suggestPrice(row.characterId, row.rarity);
+    }
   }
 
   function sellTotals(plan) {
@@ -950,8 +1020,18 @@
     const maxActive = cfg.maxActive;
     const active = activeListings();
     const slots = maxActive == null ? null : Math.max(0, maxActive - active);
+    const isAuction = state.sell?.type === 'auction';
 
     if (!plan.length) return 'Aucune carte sélectionnée.';
+
+    const invalid = plan.find((row) => !Number.isInteger(row.price) || row.price < Math.max(1, row.floor ?? 1));
+    if (invalid) {
+      return `${invalid.name} : le prix doit être un entier supérieur ou égal à la valeur de recyclage (${fmt(invalid.floor ?? 1)} ◆).`;
+    }
+    if (isAuction && Number(state.sell?.buyoutPct) > 0) {
+      const bad = plan.find((row) => buyoutPriceFor(row.price, state.sell.buyoutPct) == null);
+      if (bad) return "L'achat immédiat doit rester supérieur à la mise à prix.";
+    }
     if (t.copies > state.settings.maxBatch) {
       return `Lot limité à ${state.settings.maxBatch} annonces (tu en as ${t.copies}). Réduis la sélection ou augmente la limite dans Réglages.`;
     }
@@ -984,6 +1064,8 @@
 
     const cfg = getCfg();
     const duration = cfg.durations.includes(24) ? 24 : cfg.durations[0] ?? 24;
+    const saleType = state.sell.type === 'auction' ? 'auction' : 'fixed';
+    const buyoutPct = Number(state.sell.buyoutPct) || 0;
     let consecutiveErrors = 0;
 
     const log = (text, kind = 'info') => {
@@ -996,24 +1078,27 @@
         if (!state.sell.running) break;
 
         if (state.settings.dryRun) {
-          log(`(simulation) ${row.name} · ◆ ${fmt(row.price)}`, 'info');
+          const label = saleType === 'auction' ? `enchère dès ◆ ${fmt(row.price)}` : `prix fixe ◆ ${fmt(row.price)}`;
+          log(`(simulation) ${row.name} · ${label}`, 'info');
           await sleep(90);
           continue;
         }
 
         try {
+          const buyout = saleType === 'auction' ? buyoutPriceFor(row.price, buyoutPct) : null;
           const result = await api('/api/market/listings', {
             method: 'POST',
             timeout: 20000,
             body: {
               characterId: row.characterId,
-              type: 'fixed',
+              type: saleType,
               price: row.price,
-              buyoutPrice: null,
+              buyoutPrice: buyout,
               durationHours: duration
             }
           });
-          log(`✓ ${row.name} · ◆ ${fmt(row.price)}${result?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
+          const label = saleType === 'auction' ? `enchère dès ◆ ${fmt(row.price)}` : `prix fixe ◆ ${fmt(row.price)}`;
+          log(`✓ ${row.name} · ${label}${result?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
           consecutiveErrors = 0;
         } catch (err) {
           log(`✗ ${row.name} · ${friendlyError(err)}`, 'err');
@@ -1127,7 +1212,7 @@
     return `
       <div class="kp-empty">
         <b>Connecte-toi à Kyara</b>
-        Kyara+ utilise ta session existante, sans jamais voir ton mot de passe.<br>
+        Kyareeh+ utilise ta session existante, sans jamais voir ton mot de passe.<br>
         Connecte-toi avec Discord sur kyara.games, puis clique sur « Rafraîchir ».
         <div style="margin-top:14px">
           <button class="kp-btn is-primary" type="button" data-act="open-site">Ouvrir kyara.games</button>
@@ -1224,14 +1309,14 @@
       ${state.user.ban ? `<div class="kp-alert is-bad" style="margin-top:10px">Compte en pause : ${esc(state.user.banReason ?? 'contacte le support')}</div>` : ''}
 
       <div class="kp-grid">
-        <div class="kp-card-stat"><span>Doublons (brut)</span><b>◆ ${fmt(stats.dupGross)}</b><small>${stats.dupCopies} exemplaires vendables</small></div>
+        <div class="kp-card-stat"><span>Doublons (brut)</span><b>◆ ${fmt(stats.dupGross)}</b><small>${plural(stats.dupCopies, 'exemplaire')} vendable${stats.dupCopies > 1 ? 's' : ''}</small></div>
         <div class="kp-card-stat"><span>Net si vendus</span><b>◆ ${fmt(stats.dupNet)}</b><small>après taxe ${getCfg().taxPct} % + frais</small></div>
         <div class="kp-card-stat"><span>Cartes</span><b>${fmt(stats.unique)} <small>/ ${fmt(stats.totalCards)}</small></b><small>uniques / total</small></div>
         <div class="kp-card-stat"><span>Chakra</span><b>${fmt(toNum(state.user.chakra))}</b><small>solde actuel</small></div>
       </div>
 
       <div class="kp-section">
-        <div class="kp-section-title">Ressources <span class="kp-link" data-act="tab" data-tab="dupes">${dupeCount} doublons →</span></div>
+        <div class="kp-section-title">Ressources <span class="kp-link" data-act="tab" data-tab="dupes">${plural(dupeCount, 'doublon')} →</span></div>
         <div class="kp-chips">
           <span class="kp-chip"><em>Boosters</em> ${booster}${boosterMax != null ? ` / ${boosterMax}` : ''}</span>
           ${bonus ? `<span class="kp-chip"><em>Bonus</em> ${bonus}</span>` : ''}
@@ -1383,7 +1468,7 @@
           ${state.dealsScanning ? '<span class="kp-spinner"></span> Scan…' : 'Scanner les bons plans'}
         </button>
       </div>
-      <div class="kp-hint">Compare les annonces au prix médian des 7 derniers jours.</div>
+      <div class="kp-hint">Compare les annonces actives (150 max) au prix médian des 7 derniers jours. Seuil : −10 % et au moins 2 ◆ d'écart.</div>
 
       ${
         state.deals === null
@@ -1393,17 +1478,20 @@
                  ${deals
                    .slice(0, 40)
                    .map((d) => {
-                     const ri = rarityInfo(d.c?.rarity);
+                     const card = d.c ?? state.characters.get(d.characterId) ?? null;
+                     const ri = rarityInfo(card?.rarity);
                      return `
                      <div class="kp-deal" data-act="open-card" data-id="${esc(d.characterId)}">
-                       <img src="${esc(imgSrc(d.c))}" alt="" loading="lazy">
+                       <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
                        <div>
-                         <div class="kp-deal-name">${esc(d.c?.name ?? `Carte #${d.characterId}`)}</div>
-                         <div class="kp-deal-meta">${esc(ri.label)}${d.type ? ` · ${esc(d.type)}` : ''}${d.sales7d != null ? ` · ${d.sales7d} vente(s)/7j` : ''}</div>
+                         <div class="kp-deal-name">${esc(card?.name ?? `Carte #${d.characterId}`)}</div>
+                         <div class="kp-deal-meta">${esc(ri.label)} · méd. ◆ ${fmt(d.median)}${
+                           d.type === 'auction' ? ' · achat imm.' : ''
+                         }${d.sales7d != null ? ` · ${d.sales7d}/7j` : ''}</div>
                        </div>
                        <div class="kp-deal-price">
                          <b>◆ ${fmt(d.price)}</b>
-                         <small>${d.type === 'auction' ? 'achat imm. ' : ''}-${d.pct} %</small>
+                         <small>-${d.pct} % · ${fmt(d.saving)} ◆</small>
                        </div>
                      </div>`;
                    })
@@ -1482,6 +1570,21 @@
           <span>Décote appliquée<small>Prix proposé = médiane − X %</small></span>
           <input class="kp-input" type="number" min="0" max="30" step="1" data-setting="discountPct" value="${state.settings.discountPct}">
         </label>
+        <label class="kp-field">
+          <span>Type de vente<small>Appliqué par défaut au prochain lot</small></span>
+          <select class="kp-select" data-setting="saleType">
+            <option value="fixed" ${state.settings.saleType === 'fixed' ? 'selected' : ''}>Prix fixe</option>
+            <option value="auction" ${state.settings.saleType === 'auction' ? 'selected' : ''}>Enchère</option>
+          </select>
+        </label>
+        <label class="kp-field">
+          <span>Mise à prix<small>Enchère : médiane − X %</small></span>
+          <input class="kp-input" type="number" min="0" max="80" step="1" data-setting="auctionPct" value="${state.settings.auctionPct}">
+        </label>
+        <label class="kp-field">
+          <span>Achat immédiat<small>Enchère : + X % · 0 = désactivé</small></span>
+          <input class="kp-input" type="number" min="0" max="300" step="5" data-setting="buyoutPct" value="${state.settings.buyoutPct}">
+        </label>
         <label class="kp-toggle">
           <span>Mode simulation<small>Affiche le plan sans créer d’annonce</small></span>
           <input type="checkbox" data-setting="dryRun" ${state.settings.dryRun ? 'checked' : ''}>
@@ -1548,29 +1651,51 @@
     }
 
     const plan = state.sell.plan;
+    const isAuction = state.sell.type === 'auction';
     const totals = sellTotals(plan);
     const blocker = sellBlocker(plan);
     const chakra = toNum(state.user?.chakra) ?? 0;
     const running = state.sell.running;
     const done = state.sell.done;
+    const buyoutPreview = isAuction
+      ? buyoutPriceFor(plan[0]?.price ?? 0, state.sell.buyoutPct)
+      : null;
 
     ui.modal.hidden = false;
     ui.modalCard.innerHTML = `
       <div class="kp-modal-head">
-        <b>Vente assistée · ${plan.length} carte(s)</b>
+        <b>${isAuction ? 'Mise en enchère' : 'Vente assistée'} · ${plan.length} carte(s)</b>
         <button class="kp-icon-btn" type="button" data-act="sell-close" ${running ? 'disabled' : ''}>✕</button>
       </div>
       <div class="kp-modal-body">
+        <div class="kp-seg">
+          <button class="kp-seg-btn ${isAuction ? '' : 'is-active'}" type="button" data-act="sell-type" data-type="fixed" ${running ? 'disabled' : ''}>Prix fixe</button>
+          <button class="kp-seg-btn ${isAuction ? 'is-active' : ''}" type="button" data-act="sell-type" data-type="auction" ${running ? 'disabled' : ''}>Enchère</button>
+        </div>
+
+        ${
+          isAuction
+            ? `<div class="kp-opt-row">
+                 <div>Mise à prix sous la médiane<small>Ex. ${state.sell.auctionPct} % : une carte à 100 ◆ démarre à ${Math.max(1, 100 - state.sell.auctionPct)} ◆</small></div>
+                 <input type="number" min="0" max="80" step="1" value="${state.sell.auctionPct}" data-sell-auction-pct ${running ? 'disabled' : ''}>
+               </div>
+               <div class="kp-opt-row">
+                 <div>Achat immédiat<small>0 = aucun · ${buyoutPreview != null ? `soit ◆ ${fmt(buyoutPreview)}` : 'désactivé'}</small></div>
+                 <input type="number" min="0" max="300" step="5" value="${state.sell.buyoutPct}" data-sell-buyout-pct ${running ? 'disabled' : ''}>
+               </div>`
+            : ''
+        }
+
         <div class="kp-summary">
-          <div><span>Brut</span><b>◆ ${fmt(totals.gross)}</b></div>
-          <div><span>Net estimé</span><b>◆ ${fmt(totals.net)}</b></div>
+          <div><span>${isAuction ? 'Mise à prix' : 'Brut'}</span><b>◆ ${fmt(totals.gross)}</b></div>
+          <div><span>${isAuction ? 'Net si adjugé' : 'Net estimé'}</span><b>◆ ${fmt(totals.net)}</b></div>
           <div><span>Frais de dépôt</span><b>◆ ${fmt(totals.fees)}</b></div>
           <div><span>Taxe de vente</span><b>◆ ${fmt(totals.tax)}</b></div>
         </div>
 
-        <div class="kp-hint">${totals.copies} annonce(s) au total · chakra dispo ◆ ${fmt(chakra)} · ${esc(
+        <div class="kp-hint">${totals.copies} ${isAuction ? 'enchère(s)' : 'annonce(s)'} · chakra dispo ◆ ${fmt(chakra)} · ${esc(
           state.settings.dryRun ? 'mode simulation' : `délai ${state.settings.gapMs} ms`
-        )}</div>
+        )}${isAuction ? ' · le prix final dépend des enchérisseurs' : ''}</div>
 
         ${blocker ? `<div class="kp-alert is-bad">${esc(blocker)}</div>` : ''}
 
@@ -1579,8 +1704,8 @@
             .map(
               (row) => `
             <div class="kp-plan-row">
-              <div class="kp-name">${esc(row.name)} <small>×${row.qty}</small></div>
-              <input class="kp-input" type="number" min="1" step="1" value="${row.price}" data-sell-price="${esc(row.characterId)}" ${running ? 'disabled' : ''}>
+              <div class="kp-name">${esc(row.name)} <small>×${row.qty}${row.median != null ? ` · méd. ◆ ${fmt(row.median)}` : ''}</small></div>
+              <input type="number" min="${Math.max(1, row.floor ?? 1)}" step="1" value="${row.price}" data-sell-price="${esc(row.characterId)}" ${running ? 'disabled' : ''}>
               <div class="kp-net">◆ ${fmt(netOf(row.price) * row.qty)}</div>
             </div>`
             )
@@ -1596,7 +1721,9 @@
             ? `<button class="kp-btn is-danger" type="button" data-act="sell-stop">Arrêter</button>`
             : done
               ? `<button class="kp-btn is-primary" type="button" data-act="sell-close">Fermer</button>`
-              : `<button class="kp-btn is-primary" type="button" data-act="sell-run" ${blocker ? 'disabled' : ''}>Vendre ${totals.copies} annonce(s)</button>`
+              : `<button class="kp-btn is-primary" type="button" data-act="sell-run" ${blocker ? 'disabled' : ''}>${
+                  isAuction ? `Mettre ${totals.copies} enchère(s)` : `Vendre ${totals.copies} annonce(s)`
+                }</button>`
         }
       </div>
     `;
@@ -1701,6 +1828,17 @@
       case 'sell-run':
         executeSell();
         break;
+      case 'sell-type': {
+        if (!state.sell || state.sell.running) break;
+        const type = el.getAttribute('data-type') === 'auction' ? 'auction' : 'fixed';
+        if (state.sell.type === type) break;
+        state.sell.type = type;
+        state.settings.saleType = type;
+        persistSettings();
+        resetPlanPrices();
+        render();
+        break;
+      }
       case 'sell-stop':
         if (state.sell) {
           state.sell.running = false;
@@ -1781,11 +1919,33 @@
       const key = setting.getAttribute('data-setting');
       let value;
       if (setting.type === 'checkbox') value = setting.checked;
+      else if (key === 'saleType') value = String(setting.value);
       else value = Number(setting.value);
       if (typeof value === 'number' && !Number.isFinite(value)) return;
       state.settings[key] = value;
       persistSettings();
       if (key === 'ttlH') schedulePriceRun();
+      render();
+      return;
+    }
+
+    const auctionPctInput = target.closest('[data-sell-auction-pct]');
+    if (auctionPctInput && state.sell) {
+      const pct = Math.min(80, Math.max(0, Math.round(Number(auctionPctInput.value) || 0)));
+      state.sell.auctionPct = pct;
+      state.settings.auctionPct = pct;
+      persistSettings();
+      resetPlanPrices();
+      render();
+      return;
+    }
+
+    const buyoutPctInput = target.closest('[data-sell-buyout-pct]');
+    if (buyoutPctInput && state.sell) {
+      const pct = Math.min(300, Math.max(0, Math.round(Number(buyoutPctInput.value) || 0)));
+      state.sell.buyoutPct = pct;
+      state.settings.buyoutPct = pct;
+      persistSettings();
       render();
       return;
     }
@@ -1860,7 +2020,9 @@
       },
       prepareSell,
       executeSell,
-      loadData
+      loadData,
+      scanMarket,
+      loadPrices
     };
   }
 
@@ -1872,5 +2034,5 @@
     }
   }, 90000);
 
-  console.info(`[Kyara+] v${VERSION} chargé`);
+  console.info(`[Kyareeh+] v${VERSION} chargé`);
 })();

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Kyara+",
-  "version": "0.2.0",
-  "description": "Tableau de bord de compte, valorisation en chakra et vente assistée des doublons pour kyara.games.",
+  "name": "Kyareeh+",
+  "version": "0.3.0",
+  "description": "Tableau de bord de compte, valorisation en chakra, vente et mise en enchère des doublons pour kyara.games.",
   "browser_specific_settings": {
     "gecko": {
       "id": "kyara-plus@axel.dev",
@@ -28,7 +28,7 @@
     }
   ],
   "action": {
-    "default_title": "Kyara+",
+    "default_title": "Kyareeh+",
     "default_popup": "popup/popup.html",
     "default_icon": {
       "48": "icons/icon-48.png",

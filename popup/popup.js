@@ -1,4 +1,4 @@
-const ext = globalThis.browser ?? globalThis.chrome;
+﻿const ext = globalThis.browser ?? globalThis.chrome;
 
 const statusEl = document.getElementById('status');
 const openBtn = document.getElementById('open');
@@ -80,7 +80,7 @@ async function init() {
   activeTab = await getActiveTab();
 
   if (!activeTab || !activeTab.url || !activeTab.url.includes('kyara.games')) {
-    statusEl.textContent = 'Ouvre kyara.games pour activer Kyara+.';
+    statusEl.textContent = 'Ouvre kyara.games pour activer Kyareeh+.';
     openBtn.textContent = 'Aller sur kyara.games';
     openBtn.addEventListener('click', () => {
       ext.tabs.create({ url: 'https://kyara.games/collection' });
@@ -96,7 +96,7 @@ async function init() {
   }
 
   if (!status || !status.ok) {
-    statusEl.textContent = 'Kyara+ est installé mais la page doit être rechargée (F5) pour s’activer.';
+    statusEl.textContent = 'Kyareeh+ est installé mais la page doit être rechargée (F5) pour s’activer.';
     openBtn.textContent = 'Recharger la page';
     openBtn.addEventListener('click', async () => {
       await ext.tabs.reload(activeTab.id);

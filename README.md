@@ -1,19 +1,20 @@
-# Kyara+
+# Kyareeh+
 
-Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de compte, valorisation de la collection en chakra et vente assistée des doublons.
+Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de compte, valorisation de la collection en chakra, vente assistée et mise en enchère des doublons.
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.2.0)
+## Fonctionnalités (v0.3.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **Valeur des doublons** : brut, net après taxe de vente (5 %) et frais de dépôt (2 %, min 1 ◆), plus la valeur de recyclage.
-- **Top cartes** et **répartition de la valeur par rareté**.
+- **Top cartes**, **répartition de la valeur par rareté** et **complétion par série**.
 - **Ressources** : chakra, boosters gratuits / max, bonus, pity, accès au marché.
 - **Onglet Doublons** : quantité, exemplaires vendables, prix médian, annonce la plus basse, meilleur ordre d'achat, liquidité (ventes 7 j), valeur de recyclage.
-- **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → validation → création des annonces au prix du marché, avec délai configurable, arrêt d'urgence et mode simulation.
-- **Marché** : scan des annonces à -8 % ou plus sous la médiane (prix fixe ou achat immédiat d'une enchère).
-- **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, mode simulation.
+- **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → validation → création des annonces, avec délai configurable, arrêt d'urgence et mode simulation.
+- **Mise en enchère** : au lieu du prix fixe, mise à prix calculée à *médiane − X %* (réglable par lot, 15 % par défaut), avec achat immédiat facultatif à *+ Y %*.
+- **Marché** : scan des 150 annonces les plus basses, classées par économie réelle par rapport à la médiane 7 jours.
+- **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
 - **Mise à jour** : bouton **Recharger l'extension** dans les Réglages (et dans la popup) qui relit le dossier local et rafraîchit la page — aucun téléchargement.
 - **Debug** : journal des requêtes, clés renvoyées par l'API, diagnostic copiable.
 
@@ -23,7 +24,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 2. Clique sur **Charger un module complémentaire temporaire…**.
 3. Sélectionne le fichier `manifest.json` de ce dossier.
 4. Va sur `https://kyara.games`, connecte-toi avec Discord.
-5. Un bouton **◆ Kyara+** apparaît en bas à droite. Raccourci : `Alt+K`.
+5. Un bouton **◆ Kyareeh+** apparaît en bas à droite. Raccourci : `Alt+K`.
 
 L'add-on temporaire disparaît au redémarrage de Firefox. Pour une installation permanente, il faut signer le `.xpi` sur [addons.mozilla.org](https://addons.mozilla.org/developers/) (gratuit, en non listé) :
 
@@ -37,7 +38,7 @@ npx web-ext build
 L'extension est chargée **directement depuis ce dossier** : il n'y a rien à retélécharger ni à réinstaller.
 
 1. Récupère les changements (`git pull`, ou une modification faite sur cette machine).
-2. Ouvre le panneau Kyara+ → onglet **Réglages** → **Recharger l'extension** → **Confirmer**.
+2. Ouvre le panneau Kyareeh+ → onglet **Réglages** → **Recharger l'extension** → **Confirmer**.
    (ou icône de la barre d'outils → **Mettre à jour l'extension**)
 3. La page se rafraîchit et le nouveau code est actif. La version affichée dans le pied du panneau change.
 
@@ -60,12 +61,14 @@ git config core.hooksPath .githooks
 
 L'extension interroge l'endpoint groupé `GET /api/me/collection/prices?ids=…` (par lots de 500) et récupère `median7d` / `median30d` pour chaque carte possédée. Les résultats sont mis en cache (`storage.local`, 6 h par défaut). La valeur du compte est la somme `quantité × médiane`. Les cartes sans prix sont exclues et comptées à part.
 
-Prix de vente proposé :
+Prix de vente proposé (prix fixe) :
 
 1. le meilleur ordre d'achat s'il est à moins de 15 % sous la médiane (vente immédiate) ;
 2. sinon le plus bas prix d'annonce moins 1 ◆ ;
 3. sinon la médiane ;
 4. plancher = valeur de recyclage de la rareté.
+
+Mise à prix d'une enchère : `médiane × (1 − X %)`, jamais sous la valeur de recyclage. L'achat immédiat facultatif vaut `mise à prix × (1 + Y %)`.
 
 ## Sécurité et limites
 
