@@ -125,6 +125,46 @@
           }
           return json(out);
         }
+        if (url.includes('/api/packs')) {
+          const mk = (id, name, color, price, slots, perRarity) => ({
+            id,
+            name,
+            color,
+            price: 0,
+            chakraPrice: price,
+            usesFreePacks: true,
+            goldenEligible: true,
+            slots,
+            rates: {
+              poolSize: 6457,
+              cardsByRarity: { C: 1418, U: 1671, R: 1684, E: 1010, L: 471, M: 203 },
+              slots: slots.map((min, i) => ({
+                min,
+                pct:
+                  i === 0
+                    ? { C: 62, U: 25, R: 11.4, E: 1.4, L: 0.15, M: 0.025 }
+                    : i === 1
+                      ? { C: 0, U: 65.8, R: 30.1, E: 3.68, L: 0.39, M: 0.065 }
+                      : { C: 0, U: 0, R: 87.8, E: 10.79, L: 1.15, M: 0.19 }
+              })),
+              perBooster: perRarity
+            }
+          });
+          return json([
+            mk('all', 'Shōnen Mix', '#F5C518', 150, ['C', 'C', 'R'], {
+              C: { perCardPct: 0.13 },
+              E: { perCardPct: 0.018 },
+              L: { perCardPct: 0.004 },
+              M: { perCardPct: 0.0016 }
+            }),
+            mk('premium', 'Premium Deluxe', '#ff4d2e', 600, ['R', 'R', 'E'], {
+              C: { perCardPct: 0 },
+              E: { perCardPct: 0.09 },
+              L: { perCardPct: 0.02 },
+              M: { perCardPct: 0.008 }
+            })
+          ]);
+        }
         if (url.includes('/api/leaderboard/ladder')) {
           return json({
             by: 'collection',

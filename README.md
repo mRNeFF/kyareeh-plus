@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.6.0)
+## Fonctionnalités (v0.7.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -14,7 +14,8 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Onglet Doublons** : quantité, exemplaires vendables, prix médian, annonce la plus basse, meilleur ordre d'achat, liquidité (ventes 7 j), valeur de recyclage.
 - **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → **durée de l'annonce (12 h par défaut, 12/24/48)** → validation → création des annonces, avec délai configurable, arrêt d'urgence et mode simulation.
 - **Mise en enchère** : au lieu du prix fixe, mise à prix calculée à *médiane − X %* (réglable par lot, 15 % par défaut), avec achat immédiat facultatif à *+ Y %*.
-- **Marché** : scan des 150 annonces les plus basses, filtrable par rareté (mêmes puces que la collection du site), classé par économie réelle par rapport à la médiane 7 jours.
+- **Marché** : scan configurable (tri prix croissant/décroissant/plus récentes/fin proche, jusqu'à 20 pages de 50 annonces, seuil de remise réglable, filtre prix fixe/enchères), classé par économie réelle par rapport à la médiane 7 jours.
+- **Cartes (nouvel onglet)** : espérance de chakra par booster calculée sur les taux réels de `/api/packs` et les prix moyens par rareté (échantillon de 50 cartes par rareté via les prix du jeu, golden inclus), plus un *chasse à la carte* qui donne la probabilité par booster, le nombre de boosters attendus et le coût pour une carte précise.
 - **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
 - **Valeur d'un autre compte** : recherche instantanée au fil de la saisie, puis page dédiée avec valeur exacte (prix du jeu), répartition par rareté, plus belles cartes, et bouton **← Mon compte**.
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
@@ -97,6 +98,16 @@ La valorisation est **exacte**, pas estimée :
 3. la valeur est la somme des prix, et la répartition par rareté est recalculée à partir du catalogue — elle s'additionne exactement au total.
 
 Si la liste n'est pas accessible (profil restreint, endpoint modifié), l'extension retombe sur une **estimation** par rareté (médiane des médianes du cache), clairement libellée « estimée », avec le nombre de cartes sans référence.
+
+### Espérance des boosters
+
+`GET /api/packs` renvoie, pour chaque booster, la composition des slots (`rates.slots[].pct`) et les taux par carte (`rates.perBooster`). L'espérance vaut :
+
+\[ EV = (1 - p_{golden}) \times \sum_{slots} \sum_{rareté} pct \times prixMoyen_{rareté} + p_{golden} \times EV_{golden} \]
+
+Les prix moyens par rareté sont obtenus par échantillonnage : 50 cartes tirées au hasard par rareté dans le catalogue, valorisées via `GET /api/fair-play/prices` (2 requêtes), puis mises en cache 24 h. Le « retour » affiché est \(EV / prix\) : au-dessus de 100 %, le booster rapporte en moyenne plus qu'il ne coûte.
+
+La chasse à la carte utilise `rates.perBooster[rareté].perCardPct` : probabilité par booster, nombre de boosters attendus et coût moyen pour la carte visée.
 
 ## Sécurité et limites
 
