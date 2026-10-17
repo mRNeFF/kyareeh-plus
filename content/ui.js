@@ -9,11 +9,12 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.7.0';
+  const VERSION = '0.8.0';
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
   const PACK_AVG_KEY = 'kyareeh.packavg.v1';
+  const PACK_POOLS_KEY = 'kyareeh.packpools.v1';
 
   const DEFAULT_SETTINGS = {
     ttlH: 6,
@@ -134,8 +135,12 @@
     selfProfileTried: null,
     packs: null,
     packsLoading: false,
+    packsError: null,
     packAverages: null,
     packAveragesLoading: false,
+    packPools: null,
+    packPoolsLoading: false,
+    packPoolProgress: null,
     packQuery: '',
     packTarget: null,
     packSearching: false,
@@ -1935,40 +1940,181 @@
     };
   }
 
-  function packChance(pack, rarity) {
-    const per = pack?.rates?.perBooster?.[rarity];
-    if (per?.perCardPct != null) return Number(per.perCardPct);
-    const rates = pack?.rates;
-    const total = rates?.cardsByRarity?.[rarity];
-    if (!rates || !total) return null;
-    let pct = 0;
-    for (const slot of rates.slots ?? []) {
-      pct += (Number(slot?.pct?.[rarity]) || 0) / 100;
+  /** Pool exact d'un booster : la liste des cartes qu'il peut réellement tirer. */
+  async function loadPackPools(force = false) {
+    if (state.packPoolsLoading) return;
+    if (state.packPools && !force) return;
+    if (!state.packs?.length) return;
+
+    if (!state.packPools && !force) {
+      const cached = await storageGet(PACK_POOLS_KEY, null);
+      if (cached && cached.byPack && cached.at && Date.now() - cached.at < 24 * 3600 * 1000) {
+        state.packPools = buildPoolIndex(cached.byPack);
+        render();
+        return;
+      }
     }
-    return (pct / total) * 100;
+
+    state.packPoolsLoading = true;
+    state.packPoolProgress = { done: 0, total: state.packs.length };
+    render();
+
+    const byPack = {};
+    let cursor = 0;
+    const list = state.packs.map((p) => p.id);
+
+    const worker = async () => {
+      while (cursor < list.length) {
+        const id = list[cursor++];
+        try {
+          const data = await api(`/api/packs/${encodeURIComponent(id)}/characters`, { timeout: 30000 });
+          const ids = Array.isArray(data)
+            ? data
+            : Array.isArray(data?.characters)
+              ? data.characters
+              : Array.isArray(data?.items)
+                ? data.items
+                : [];
+          byPack[id] = ids.map((entry) => (entry && typeof entry === 'object' ? entry.id : entry)).filter((v) => v != null);
+        } catch {
+          byPack[id] = null;
+        }
+        state.packPoolProgress = { done: (state.packPoolProgress?.done ?? 0) + 1, total: list.length };
+        render();
+      }
+    };
+
+    await Promise.all([worker(), worker()]);
+    state.packPools = buildPoolIndex(byPack);
+    state.packPoolsLoading = false;
+    state.packPoolProgress = null;
+    storageSet(PACK_POOLS_KEY, { at: Date.now(), byPack });
+    render();
+  }
+
+  function buildPoolIndex(byPack) {
+    const out = new Map();
+    for (const [packId, ids] of Object.entries(byPack)) {
+      if (!Array.isArray(ids)) {
+        out.set(packId, null);
+        continue;
+      }
+      const set = new Set(ids.map(String));
+      const counts = {};
+      for (const id of set) {
+        const rarity = String(state.characters.get(id)?.rarity ?? '').toUpperCase();
+        if (rarity) counts[rarity] = (counts[rarity] ?? 0) + 1;
+      }
+      out.set(packId, { set, counts, size: set.size });
+    }
+    return out;
+  }
+
+  /**
+   * Probabilité par booster d'obtenir précisément `card` dans `pack`.
+   * Modèle : pour chaque slot, la rareté tombe avec pct/100 ; la carte est ensuite
+   * tirée uniformément dans le pool de cette rareté. Les vedettes (rateUp) captent
+   * `share` des tirages de leurs raretés. Le pack doré (1 booster sur N) est intégré.
+   */
+  function packCardChance(pack, card) {
+    if (!pack || !card) return null;
+    const rarity = String(card.rarity ?? '').toUpperCase();
+    if (!rarity) return null;
+
+    const pool = state.packPools?.get(String(pack.id));
+    const officialPoolSize = toNum(pack.rates?.poolSize);
+    // Une liste dont la taille ne correspond pas au poolSize annoncé est périmée :
+    // on ne s'en sert pas pour exclure une carte (faux négatifs).
+    const trustedPool =
+      pool && (officialPoolSize == null || Math.abs(pool.size - officialPoolSize) <= Math.max(2, officialPoolSize * 0.01));
+
+    if (trustedPool && !pool.set.has(String(card.id))) {
+      return { p: 0, pNormal: 0, inPool: false, poolCount: 0, featured: false, trusted: true };
+    }
+
+    const poolCount = toNum(pack.rates?.cardsByRarity?.[rarity]) ?? pool?.counts?.[rarity] ?? 0;
+    if (!poolCount) return { p: 0, pNormal: 0, inPool: true, poolCount: 0, featured: false, trusted: false };
+
+    const featuredIds = (pack.rateUp?.characterIds ?? []).map(String);
+    const featuredRarities = (pack.rateUp?.rarities ?? []).map(String);
+    const featured = featuredIds.includes(String(card.id)) && featuredRarities.includes(rarity);
+    const share = featuredRarities.length ? Math.min(1, Math.max(0, toNum(pack.rateUp?.share) ?? 0)) : 0;
+    const featuredCount = featured
+      ? Math.max(
+          1,
+          featuredIds.filter((id) => String(state.characters.get(id)?.rarity ?? '').toUpperCase() === rarity).length
+        )
+      : 0;
+
+    // Espérance de cartes de cette rareté par booster, pour une liste de slots donnée.
+    const expected = (slots) => {
+      let total = 0;
+      for (const slot of slots ?? []) {
+        const pct = toNum(slot?.pct?.[rarity]);
+        if (pct == null || pct <= 0) continue;
+        total += pct / 100;
+      }
+      return total;
+    };
+
+    const chanceFor = (slots) => {
+      const n = expected(slots);
+      if (!n) return 0;
+      if (!featuredRarities.includes(rarity)) return n / poolCount;
+      const general = ((1 - share) * n) / poolCount;
+      const featuredPart = featured ? (share * n) / featuredCount : 0;
+      return general + featuredPart;
+    };
+
+    const pNormal = chanceFor(pack.rates?.slots);
+    const goldenSlots = pack.goldenEligible ? pack.rates?.golden?.slots : null;
+    const goldenEvery = Math.max(1, toNum(state.config?.golden?.every) ?? 10);
+    const goldenChance = goldenSlots ? 1 / goldenEvery : 0;
+    const pGolden = goldenSlots ? chanceFor(goldenSlots) : pNormal;
+    const p = pNormal * (1 - goldenChance) + pGolden * goldenChance;
+
+    return {
+      p,
+      pNormal,
+      pGolden,
+      inPool: true,
+      poolCount,
+      featured,
+      share,
+      goldenChance,
+      trusted: Boolean(trustedPool),
+      expectedPerBooster: p > 0 ? 1 / p : null
+    };
+  }
+
+  function formatPct(value) {
+    if (value == null || !Number.isFinite(value)) return '—';
+    if (value <= 0) return '0 %';
+    if (value >= 10) return `${Math.round(value * 10) / 10} %`;
+    if (value >= 1) return `${Math.round(value * 100) / 100} %`;
+    if (value >= 0.1) return `${Math.round(value * 1000) / 1000} %`;
+    if (value >= 0.01) return `${Math.round(value * 10000) / 10000} %`;
+    const s = value.toFixed(5);
+    return `${s.replace(/0+$/, '').replace(/\.$/, '')} %`;
   }
 
   function packName(pack) {
     return pack?.name ?? pack?.id ?? 'Booster';
   }
 
-  function formatPct(value) {
-    if (value == null) return '—';
-    if (value >= 10) return `${Math.round(value * 10) / 10} %`;
-    if (value >= 1) return `${Math.round(value * 100) / 100} %`;
-    return `${Math.round(value * 1000) / 1000} %`;
-  }
 
   function viewCards() {
     if (!state.user) return loginHTML();
 
     if (!state.packs && !state.packsLoading) loadPacks();
     if (!state.packAverages && !state.packAveragesLoading) computePackAverages();
+    if (!state.packPools && !state.packPoolsLoading && state.packs?.length) loadPackPools();
 
     const packs = state.packs ?? [];
     const averages = state.packAverages ?? [];
     const target = state.packTarget;
     const query = state.packQuery.trim().toLowerCase();
+    const poolsReady = Boolean(state.packPools);
 
     const suggestions =
       query.length >= 2
@@ -1977,84 +2123,69 @@
             .slice(0, 8)
         : [];
 
-    const rows = packs
-      .map((pack) => {
-        const ev = packEV(pack);
-        const chanceM = packChance(pack, 'M');
-        const chanceL = packChance(pack, 'L');
-        const chanceE = packChance(pack, 'E');
-        return { pack, ev, chanceM, chanceL, chanceE };
-      })
-      .filter((row) => row.ev)
-      .sort((a, b) => (b.ev.ratio ?? 0) - (a.ev.ratio ?? 0));
+    // --- Chasse à la carte : probabilités exactes sur tous les boosters ---
+    const chase = target
+      ? packs
+          .map((pack) => ({ pack, chance: packCardChance(pack, target.card) }))
+          .filter((row) => row.chance)
+          .sort((a, b) => {
+            // Les boosters accessibles d'abord, du plus probable au moins probable.
+            if (a.pack.grantOnly !== b.pack.grantOnly) return a.pack.grantOnly ? 1 : -1;
+            return b.chance.p - a.chance.p;
+          })
+      : [];
+
+    const reachable = chase.filter((row) => row.chance.p > 0);
+    const best = reachable[0] ?? null;
+    const affordable = reachable.filter((row) => {
+      const price = toNum(row.pack.chakraPrice);
+      return price != null && price > 0;
+    });
+    const bestPaid = affordable[0] ?? best;
+
+    // --- Espérance par booster ---
+    const evRows = packs
+      .map((pack) => ({
+        pack,
+        ev: packEV(pack),
+        pool: state.packPools?.get(String(pack.id)) ?? null
+      }))
+      .sort((a, b) => {
+        if (a.pack.grantOnly !== b.pack.grantOnly) return a.pack.grantOnly ? 1 : -1;
+        return (b.ev?.ratio ?? -1) - (a.ev?.ratio ?? -1);
+      });
+
+    const chaseRow = ({ pack, chance }) => {
+      const price = toNum(pack.chakraPrice);
+      const expected = chance.expectedPerBooster;
+      const cost = price != null && price > 0 && expected != null ? price * expected : null;
+      const tags = [];
+      if (chance.featured) tags.push(`<span class="kp-tag is-hot">vedette ${Math.round((chance.share ?? 0) * 100)} %</span>`);
+      if (!chance.inPool) tags.push('<span class="kp-tag">hors pool</span>');
+      if (pack.grantOnly) tags.push('<span class="kp-tag">récompense</span>');
+      if (pack.schedule) tags.push('<span class="kp-tag">limité</span>');
+
+      const goldenDiff = chance.pNormal > 0 && Math.abs(chance.p - chance.pNormal) / chance.pNormal > 0.02;
+
+      return `
+        <div class="kp-pack ${chance.p > 0 ? '' : 'is-dim'}">
+          <div class="kp-pack-head">
+            <b style="color:${esc(pack.color ?? '#f3f4f7')}">${esc(packName(pack))}</b>
+            <span class="kp-pack-price">${chance.p > 0 ? formatPct(chance.p * 100) : '—'}</span>
+          </div>
+          <div class="kp-pack-meta">
+            <span>${price != null && price > 0 ? `◆ ${fmt(price)}` : pack.usesFreePacks ? 'gratuit' : '—'}</span>
+            ${expected != null ? `<span>≈ ${fmt(expected)} boosters</span>` : ''}
+            ${cost != null ? `<span>coût ◆ ${fmt(cost)}</span>` : ''}
+            ${chance.poolCount ? `<span>pool ${fmt(chance.poolCount)}</span>` : ''}
+            ${goldenDiff ? `<span title="hors pack doré">hors golden ${formatPct(chance.pNormal * 100)}</span>` : ''}
+            ${tags.join('')}
+          </div>
+        </div>`;
+    };
 
     return `
-      <div class="kp-hint">
-        Espérance calculée à partir des taux réels de <code>/api/packs</code> et des prix moyens par rareté
-        (échantillon de 50 cartes par rareté via les prix du jeu).
-      </div>
-
-      <div class="kp-toolbar">
-        <button class="kp-btn" type="button" data-act="packs-averages" ${state.packAveragesLoading ? 'disabled' : ''}>
-          ${state.packAveragesLoading ? '<span class="kp-spinner"></span> Calcul…' : 'Recalculer les moyennes'}
-        </button>
-        <button class="kp-btn" type="button" data-act="packs-refresh" ${state.packsLoading ? 'disabled' : ''}>Rafraîchir les boosters</button>
-      </div>
-
-      ${
-        state.packsError ? `<div class="kp-alert is-bad" style="margin-bottom:8px">${esc(state.packsError)}</div>` : ''
-      }
-
-      ${
-        averages.length
-          ? `<div class="kp-section-title">Prix moyen par rareté</div>
-             <div class="kp-chips" style="margin-bottom:10px">
-               ${averages
-                 .map((row) => {
-                   const info = rarityInfo(row.rarity);
-                   return `<span class="kp-chip" style="--rc:${info.color}"><em>${esc(info.label)}</em> ◆ ${fmt(row.avg)}</span>`;
-                 })
-                 .join('')}
-             </div>`
-          : ''
-      }
-
-      <div class="kp-section-title">Espérance par booster</div>
-      ${
-        rows.length
-          ? `<div class="kp-table">
-               ${rows
-                 .map((row) => {
-                   const { pack, ev, chanceM, chanceL, chanceE } = row;
-                   const price = ev.price;
-                   const good = ev.ratio != null && ev.ratio >= 1;
-                   return `
-                   <div class="kp-pack">
-                     <div class="kp-pack-head">
-                       <b style="color:${esc(pack.color ?? '#f3f4f7')}">${esc(packName(pack))}</b>
-                       <span class="kp-pack-price">${
-                         price != null && price > 0 ? `◆ ${fmt(price)}` : pack.usesFreePacks ? 'gratuit' : '—'
-                       }</span>
-                     </div>
-                     <div class="kp-pack-meta">
-                       <span>EV <b class="${good ? 'is-good' : ''}">◆ ${fmt(ev.ev)}</b></span>
-                       ${ev.ratio != null ? `<span>retour <b class="${good ? 'is-good' : ''}">${Math.round(ev.ratio * 100)} %</b></span>` : ''}
-                       <span>E ${formatPct(chanceE)}</span>
-                       <span>L ${formatPct(chanceL)}</span>
-                       <span>M ${formatPct(chanceM)}</span>
-                     </div>
-                   </div>`;
-                 })
-                 .join('')}
-             </div>`
-          : `<div class="kp-empty">${
-              state.packsLoading || state.packAveragesLoading
-                ? '<span class="kp-spinner"></span> Calcul en cours…'
-                : 'Aucun booster chargé.'
-            }</div>`
-      }
-
-      <div class="kp-section" style="margin-top:16px">
+      <div class="kp-section" style="margin-top:0">
         <div class="kp-section-title">Chasse à la carte</div>
         <div class="kp-searchbar">
           <input class="kp-input" type="search" data-role="pack-search" placeholder="Nom de la carte…" value="${esc(state.packQuery)}" autocomplete="off">
@@ -2084,36 +2215,110 @@
         }
 
         ${
-          target
-            ? `<div class="kp-hero" style="margin-top:10px">
-                 <div class="kp-hero-label">${esc(target.card.name)} · ${esc(rarityInfo(target.card.rarity).label)}</div>
-                 <div class="kp-hero-value">${formatPct(packChance(packs.find((p) => true), target.card.rarity))}</div>
-                 <div class="kp-hero-sub">par booster (meilleur booster ci-dessous)</div>
-               </div>
-               <div class="kp-table" style="margin-top:8px">
-                 ${packs
-                   .map((pack) => ({ pack, pct: packChance(pack, target.card.rarity) }))
-                   .filter((row) => row.pct != null && row.pct > 0)
-                   .sort((a, b) => b.pct - a.pct)
-                   .slice(0, 8)
-                   .map(({ pack, pct }) => {
-                     const price = toNum(pack.chakraPrice);
-                     const expected = pct > 0 ? 100 / pct : null;
-                     return `
-                     <div class="kp-pack">
-                       <div class="kp-pack-head">
-                         <b style="color:${esc(pack.color ?? '#f3f4f7')}">${esc(packName(pack))}</b>
-                         <span class="kp-pack-price">${formatPct(pct)}</span>
-                       </div>
-                       <div class="kp-pack-meta">
-                         <span>≈ ${expected != null ? fmt(expected) : '—'} boosters</span>
-                         ${price != null && price > 0 && expected != null ? `<span>soit ◆ ${fmt(price * expected)}</span>` : ''}
-                       </div>
-                     </div>`;
+          !target
+            ? `<div class="kp-hint" style="margin-top:8px">Choisis une carte pour voir sa probabilité exacte sur <b>tous</b> les boosters.</div>`
+            : !poolsReady
+              ? `<div class="kp-empty"><span class="kp-spinner"></span> Chargement des pools de boosters… ${
+                  state.packPoolProgress ? `${state.packPoolProgress.done}/${state.packPoolProgress.total}` : ''
+                }</div>`
+              : `<div class="kp-profile-head" style="margin-top:10px">
+                   <img class="kp-avatar-lg" src="${esc(imgSrc(target.card))}" alt="" loading="lazy" style="object-fit:cover;border-radius:8px">
+                   <div class="kp-profile-id">
+                     <b>${esc(target.card.name)}</b>
+                     <small>${esc(rarityInfo(target.card.rarity).label)}${target.card.series ? ` · ${esc(target.card.series)}` : ''}</small>
+                   </div>
+                   ${target.card.id ? `<a class="kp-link" href="https://kyara.games/wiki/${encodeURIComponent(target.card.id)}" target="_blank" rel="noopener">Fiche ↗</a>` : ''}
+                 </div>
+
+                 <div class="kp-hero" style="margin-top:8px">
+                   <div class="kp-hero-label">Meilleure chance par booster</div>
+                   <div class="kp-hero-value">${best ? formatPct(best.chance.p * 100) : '0 %'}</div>
+                   <div class="kp-hero-sub">
+                     ${
+                       best
+                         ? `${esc(packName(best.pack))} · ≈ ${fmt(best.chance.expectedPerBooster)} boosters en moyenne<br>
+                            au moins une sur 100 boosters : ${formatPct((1 - Math.pow(1 - best.chance.p, 100)) * 100)}`
+                         : 'Cette carte ne sort d’aucun booster actuellement.'
+                     }
+                     ${
+                       bestPaid && bestPaid !== best && bestPaid.chance.expectedPerBooster
+                         ? `<br>meilleur achetable : ${esc(packName(bestPaid.pack))} · coût moyen ◆ ${fmt(
+                             (toNum(bestPaid.pack.chakraPrice) ?? 0) * bestPaid.chance.expectedPerBooster
+                           )}`
+                         : ''
+                     }
+                   </div>
+                 </div>
+
+                 <div class="kp-section-title" style="margin-top:12px">Tous les boosters (${chase.length})</div>
+                 <div class="kp-table">${chase.map(chaseRow).join('')}</div>`
+        }
+      </div>
+
+      <div class="kp-section" style="margin-top:16px">
+        <div class="kp-section-title">Espérance par booster</div>
+        <div class="kp-hint">
+          Espérance calculée sur les taux réels de <code>/api/packs</code> (golden 1 sur ${esc(
+            String(toNum(state.config?.golden?.every) ?? 10)
+          )}) et les prix moyens par rareté.
+        </div>
+
+        <div class="kp-toolbar" style="margin-top:8px">
+          <button class="kp-btn" type="button" data-act="packs-averages" ${state.packAveragesLoading ? 'disabled' : ''}>
+            ${state.packAveragesLoading ? '<span class="kp-spinner"></span> Calcul…' : 'Recalculer les moyennes'}
+          </button>
+          <button class="kp-btn" type="button" data-act="packs-refresh" ${
+            state.packsLoading || state.packPoolsLoading ? 'disabled' : ''
+          }>Rafraîchir les boosters</button>
+        </div>
+
+        ${state.packsError ? `<div class="kp-alert is-bad" style="margin:8px 0">${esc(state.packsError)}</div>` : ''}
+
+        ${
+          averages.length
+            ? `<div class="kp-chips" style="margin:8px 0">
+                 ${averages
+                   .map((row) => {
+                     const info = rarityInfo(row.rarity);
+                     return `<span class="kp-chip" style="--rc:${info.color}"><em>${esc(info.label)}</em> ◆ ${fmt(row.avg)}</span>`;
                    })
                    .join('')}
                </div>`
-            : `<div class="kp-hint" style="margin-top:8px">Choisis une carte pour voir sa chance par booster.</div>`
+            : ''
+        }
+
+        ${
+          evRows.length
+            ? `<div class="kp-table">
+                 ${evRows
+                   .map(({ pack, ev }) => {
+                     const price = ev?.price ?? toNum(pack.chakraPrice);
+                     const good = ev?.ratio != null && ev.ratio >= 1;
+                     const tags = [];
+                     if (pack.grantOnly) tags.push('<span class="kp-tag">récompense</span>');
+                     if (pack.schedule) tags.push('<span class="kp-tag">limité</span>');
+                     return `
+                   <div class="kp-pack ${ev ? '' : 'is-dim'}">
+                     <div class="kp-pack-head">
+                       <b style="color:${esc(pack.color ?? '#f3f4f7')}">${esc(packName(pack))}</b>
+                       <span class="kp-pack-price">${
+                         price != null && price > 0 ? `◆ ${fmt(price)}` : pack.usesFreePacks ? 'gratuit' : '—'
+                       }</span>
+                     </div>
+                     <div class="kp-pack-meta">
+                       <span>EV ${ev ? `<b class="${good ? 'is-good' : ''}">◆ ${fmt(ev.ev)}</b>` : '—'}</span>
+                       ${ev?.ratio != null ? `<span>retour <b class="${good ? 'is-good' : ''}">${Math.round(ev.ratio * 100)} %</b></span>` : ''}
+                       ${tags.join('')}
+                     </div>
+                   </div>`;
+                   })
+                   .join('')}
+               </div>`
+            : `<div class="kp-empty">${
+                state.packsLoading || state.packAveragesLoading
+                  ? '<span class="kp-spinner"></span> Calcul en cours…'
+                  : 'Aucun booster chargé.'
+              }</div>`
         }
       </div>
     `;
@@ -2999,6 +3204,7 @@
       }
       case 'packs-refresh':
         loadPacks(true);
+        loadPackPools(true);
         break;
       case 'packs-averages':
         computePackAverages(true);

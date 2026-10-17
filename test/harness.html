@@ -126,7 +126,13 @@
           return json(out);
         }
         if (url.includes('/api/packs')) {
-          const mk = (id, name, color, price, slots, perRarity) => ({
+          const packChars = url.match(/\/api\/packs\/([^/]+)\/characters/);
+          if (packChars) {
+            const id = packChars[1];
+            const pool = id === 'premium' ? [127691, 999001, 45627] : [127691, 999001, 10668, 282077, 21122, 999002, 45627, 40];
+            return json(pool);
+          }
+          const mk = (id, name, color, price, slots, perRarity, extra = {}) => ({
             id,
             name,
             color,
@@ -134,10 +140,14 @@
             chakraPrice: price,
             usesFreePacks: true,
             goldenEligible: true,
+            grantOnly: false,
             slots,
+            rateUp: null,
+            schedule: null,
+            pool: {},
             rates: {
-              poolSize: 6457,
-              cardsByRarity: { C: 1418, U: 1671, R: 1684, E: 1010, L: 471, M: 203 },
+              poolSize: 8,
+              cardsByRarity: { C: 3, U: 0, R: 0, E: 1, L: 1, M: 1 },
               slots: slots.map((min, i) => ({
                 min,
                 pct:
@@ -147,21 +157,23 @@
                       ? { C: 0, U: 65.8, R: 30.1, E: 3.68, L: 0.39, M: 0.065 }
                       : { C: 0, U: 0, R: 87.8, E: 10.79, L: 1.15, M: 0.19 }
               })),
-              perBooster: perRarity
-            }
+              perBooster: perRarity,
+              golden: {
+                slots: [
+                  { min: 'C', pct: { C: 62, U: 25, R: 11.4, E: 1.4, L: 0.15, M: 0.025 } },
+                  { min: 'C', pct: { C: 62, U: 25, R: 11.4, E: 1.4, L: 0.15, M: 0.025 } },
+                  { min: 'U', pct: { C: 0, U: 65.8, R: 30.1, E: 3.68, L: 0.39, M: 0.065 } },
+                  { min: 'R', pct: { C: 0, U: 0, R: 87.8, E: 10.79, L: 1.15, M: 0.19 } },
+                  { min: 'E', pct: { C: 0, U: 0, R: 0, E: 88.9, L: 9.52, M: 1.59 } }
+                ]
+              }
+            },
+            ...extra
           });
           return json([
-            mk('all', 'Shōnen Mix', '#F5C518', 150, ['C', 'C', 'R'], {
-              C: { perCardPct: 0.13 },
-              E: { perCardPct: 0.018 },
-              L: { perCardPct: 0.004 },
-              M: { perCardPct: 0.0016 }
-            }),
-            mk('premium', 'Premium Deluxe', '#ff4d2e', 600, ['R', 'R', 'E'], {
-              C: { perCardPct: 0 },
-              E: { perCardPct: 0.09 },
-              L: { perCardPct: 0.02 },
-              M: { perCardPct: 0.008 }
+            mk('all', 'Shōnen Mix', '#F5C518', 150, ['C', 'C', 'R'], { M: { perCardPct: 0.15 } }),
+            mk('premium', 'Premium Deluxe', '#ff4d2e', 600, ['R', 'R', 'E'], { M: { perCardPct: 0.4 } }, {
+              rateUp: { characterIds: [127691, 45627], rarities: ['M'], share: 0.5 }
             })
           ]);
         }

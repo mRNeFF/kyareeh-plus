@@ -1,12 +1,13 @@
 {
   "name": "kyareeh-plus",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Extension Firefox : tableau de bord et vente assistée pour kyara.games",
   "scripts": {
     "start": "web-ext run --source-dir .",
     "lint": "web-ext lint --source-dir .",
-    "build": "web-ext build --source-dir . --filename kyareeh-plus-0.7.0.zip --overwrite-dest"
+    "build": "web-ext build --source-dir . --filename kyareeh-plus-0.8.0.zip --overwrite-dest",
+    "verify:odds": "node test/verify-odds.mjs"
   },
   "devDependencies": {
     "web-ext": "^8.3.0"

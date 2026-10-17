@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.7.0)
+## Fonctionnalités (v0.8.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -15,7 +15,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → **durée de l'annonce (12 h par défaut, 12/24/48)** → validation → création des annonces, avec délai configurable, arrêt d'urgence et mode simulation.
 - **Mise en enchère** : au lieu du prix fixe, mise à prix calculée à *médiane − X %* (réglable par lot, 15 % par défaut), avec achat immédiat facultatif à *+ Y %*.
 - **Marché** : scan configurable (tri prix croissant/décroissant/plus récentes/fin proche, jusqu'à 20 pages de 50 annonces, seuil de remise réglable, filtre prix fixe/enchères), classé par économie réelle par rapport à la médiane 7 jours.
-- **Cartes (nouvel onglet)** : espérance de chakra par booster calculée sur les taux réels de `/api/packs` et les prix moyens par rareté (échantillon de 50 cartes par rareté via les prix du jeu, golden inclus), plus un *chasse à la carte* qui donne la probabilité par booster, le nombre de boosters attendus et le coût pour une carte précise.
+- **Cartes (nouvel onglet)** : en tête, la *chasse à la carte* — probabilité exacte par booster, pour **tous** les boosters disponibles (pool réel, vedettes et pack doré inclus), nombre de boosters attendus, coût moyen et chance d'au moins une sur 100 boosters. En dessous, l'espérance de chakra par booster (retour en %) et les prix moyens par rareté.
 - **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
 - **Valeur d'un autre compte** : recherche instantanée au fil de la saisie, puis page dédiée avec valeur exacte (prix du jeu), répartition par rareté, plus belles cartes, et bouton **← Mon compte**.
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
@@ -109,7 +109,19 @@ Les prix moyens par rareté sont obtenus par échantillonnage : 50 cartes tirée
 
 La chasse à la carte utilise `rates.perBooster[rareté].perCardPct` : probabilité par booster, nombre de boosters attendus et coût moyen pour la carte visée.
 
-## Sécurité et limites
+### Probabilité exacte d'une carte précise
+
+Pour un booster donné, `GET /api/packs/:id/characters` donne le **pool réel** (liste d'ids), et `rates.cardsByRarity` le dénominateur officiel. La probabilité par booster d'obtenir une carte de rareté \(r\) vaut :
+
+\[ p = \frac{1}{N} \sum_{slots} \frac{pct_{slot}(r)}{100} \]
+
+où \(N\) est le nombre de cartes de rareté \(r\) dans le pool. Pour une **vedette** (`rateUp`), elle capte une fraction `share` des tirages de ses raretés :
+
+\[ p = \sum_{slots} \frac{pct_{slot}(r)}{100} \times \left( \frac{share}{N_{vedettes}} + \frac{1-share}{N} \right) \]
+
+Le **pack doré** (1 booster sur `config.golden.every`) est mélangé : `p = (1 - 1/every) × p_normal + (1/every) × p_golden`. La ligne affiche aussi la valeur hors golden pour comparaison directe avec le site.
+
+Validation : `npm run verify:odds` compare la formule aux `perBooster.perCardPct` officiels sur les 18 boosters et 6 raretés. **96 des 97 valeurs correspondent au chiffre près.** Le seul écart (`season-2026-fall`, rareté R) vient du serveur lui-même : son `perCardPct` (7,43 %) est incompatible avec son propre `cardsByRarity` (20 cartes pour une espérance de 1,52), qui donnerait 7,60 %.## Sécurité et limites
 
 - Aucune donnée ne quitte le navigateur. Aucun mot de passe ni token n'est stocké.
 - Les requêtes utilisent la session existante du site. L'extension relit à chaque appel le jeton `kyara_token` déjà présent dans le `localStorage` de kyara.games et le renvoie dans l'en-tête `Authorization`, comme le fait le site lui-même. Elle ne l'écrit jamais, ne le conserve pas et ne l'envoie qu'à `kyara.games`. L'identifiant d'appareil `kyara_device` est transmis de la même façon pour rester cohérent avec l'anti-cheat du site.
