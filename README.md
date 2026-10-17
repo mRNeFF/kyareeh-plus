@@ -4,16 +4,18 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.3.0)
+## Fonctionnalités (v0.4.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **Valeur des doublons** : brut, net après taxe de vente (5 %) et frais de dépôt (2 %, min 1 ◆), plus la valeur de recyclage.
 - **Top cartes**, **répartition de la valeur par rareté** et **complétion par série**.
 - **Ressources** : chakra, boosters gratuits / max, bonus, pity, accès au marché.
 - **Onglet Doublons** : quantité, exemplaires vendables, prix médian, annonce la plus basse, meilleur ordre d'achat, liquidité (ventes 7 j), valeur de recyclage.
-- **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → validation → création des annonces, avec délai configurable, arrêt d'urgence et mode simulation.
+- **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → **durée de l'annonce (12 h par défaut, 12/24/48)** → validation → création des annonces, avec délai configurable, arrêt d'urgence et mode simulation.
 - **Mise en enchère** : au lieu du prix fixe, mise à prix calculée à *médiane − X %* (réglable par lot, 15 % par défaut), avec achat immédiat facultatif à *+ Y %*.
-- **Marché** : scan des 150 annonces les plus basses, classées par économie réelle par rapport à la médiane 7 jours.
+- **Marché** : scan des 150 annonces les plus basses, filtrable par rareté (mêmes puces que la collection du site), classé par économie réelle par rapport à la médiane 7 jours.
+- **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
+- **Valeur d'un autre compte** : recherche par pseudo via le classement, puis estimation de la valeur de sa collection, de sa répartition par rareté et de ses plus belles cartes.
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
 - **Mise à jour** : bouton **Recharger l'extension** dans les Réglages (et dans la popup) qui relit le dossier local et rafraîchit la page — aucun téléchargement.
 - **Debug** : journal des requêtes, clés renvoyées par l'API, diagnostic copiable.
@@ -69,6 +71,12 @@ Prix de vente proposé (prix fixe) :
 4. plancher = valeur de recyclage de la rareté.
 
 Mise à prix d'une enchère : `médiane × (1 − X %)`, jamais sous la valeur de recyclage. L'achat immédiat facultatif vaut `mise à prix × (1 + Y %)`.
+
+### Valeur d'un autre compte
+
+La recherche passe par `GET /api/leaderboard/ladder?by=collection&q=pseudo` (public), qui renvoie la position, le rang, le nombre de cartes, de mythiques et les points. Le détail vient de `GET /api/users/:id` (session requise) : `byRarity`, `best` et les blocs publics.
+
+La valeur affichée est une **estimation** : les meilleures cartes (`best`) sont valorisées à leur médiane exacte, le reste est estimé avec la médiane des médianes de chaque rareté, calculée sur les cartes déjà valorisées dans ton cache. Le nombre de cartes sans référence est indiqué. Si le joueur a masqué sa collection, seules les infos publiques du classement s'affichent.
 
 ## Sécurité et limites
 

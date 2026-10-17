@@ -9,7 +9,7 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -23,7 +23,9 @@
     autoPrices: true,
     saleType: 'fixed',
     auctionPct: 15,
-    buyoutPct: 0
+    buyoutPct: 0,
+    durationHours: 12,
+    dealsRarity: 'all'
   };
 
   const RARITY = {
@@ -37,6 +39,9 @@
   };
 
   const SERIES_COLORS = ['#ff8a6d', '#ffb020', '#4ade80', '#60a5fa', '#c084fc', '#f472b6', '#22d3ee', '#a3e635'];
+
+  // Ordre officiel des raretés sur le site (du plus commun au plus rare).
+  const RARITY_ORDER = ['C', 'U', 'R', 'E', 'L', 'M', 'H'];
 
   const nf = new Intl.NumberFormat('fr-FR');
   const fmt = (v) => (v == null || !Number.isFinite(Number(v)) ? '—' : nf.format(Math.round(Number(v))));
@@ -109,7 +114,16 @@
     noticeTimer: null,
     version: VERSION,
     reloadArmed: false,
-    reloadTimer: null
+    reloadTimer: null,
+    profile: {
+      query: '',
+      searching: false,
+      results: null,
+      loading: false,
+      error: null,
+      user: null,
+      value: null
+    }
   };
 
   /* ------------------------------------------------------------------ */
@@ -407,13 +421,14 @@
     }
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
-    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct']) {
+    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours']) {
       const value = Number(state.settings[key]);
       state.settings[key] = Number.isFinite(value) ? value : DEFAULT_SETTINGS[key];
     }
     state.settings.dryRun = Boolean(state.settings.dryRun);
     state.settings.autoPrices = state.settings.autoPrices !== false;
     state.settings.saleType = state.settings.saleType === 'auction' ? 'auction' : 'fixed';
+    state.settings.dealsRarity = String(state.settings.dealsRarity || 'all');
     const cached = await storageGet(PRICE_KEY, {});
     if (cached && typeof cached === 'object') {
       state.prices = cached.prices && typeof cached.prices === 'object' ? cached.prices : cached;
@@ -639,7 +654,6 @@
       durations
     };
   }
-
   function feeOf(price) {
     const cfg = getCfg();
     return Math.max(cfg.feeMin, Math.ceil((price * cfg.feePct) / 100));
@@ -934,6 +948,7 @@
           saving,
           pct,
           type: item.type ?? 'fixed',
+          rarity: String(item.character?.rarity ?? state.characters.get(id)?.rarity ?? 'C').toUpperCase(),
           sales7d: toNum(embedded?.sales7d),
           c: item.character ?? state.characters.get(id) ?? null
         });
@@ -1063,7 +1078,9 @@
     render();
 
     const cfg = getCfg();
-    const duration = cfg.durations.includes(24) ? 24 : cfg.durations[0] ?? 24;
+    const duration = cfg.durations.includes(Number(state.settings.durationHours))
+      ? Number(state.settings.durationHours)
+      : cfg.durations[0] ?? 12;
     const saleType = state.sell.type === 'auction' ? 'auction' : 'fixed';
     const buyoutPct = Number(state.sell.buyoutPct) || 0;
     let consecutiveErrors = 0;
@@ -1386,6 +1403,8 @@
              </div>`
           : ''
       }
+
+      ${profileHTML()}
     `;
   }
 
@@ -1460,7 +1479,32 @@
   function viewMarket() {
     if (!state.user) return loginHTML();
     const deals = state.deals ?? [];
-    const mine = Array.isArray(state.mine?.listings) ? state.mine.listings : Array.isArray(state.mine) ? state.mine : [];
+    const filter = String(state.settings.dealsRarity || 'all');
+    const visible = filter === 'all' ? deals : deals.filter((d) => String(d.rarity || 'C') === filter);
+
+    const mineAll = Array.isArray(state.mine?.listings)
+      ? state.mine.listings
+      : Array.isArray(state.mine)
+        ? state.mine
+        : [];
+    const mine = mineAll.filter((l) => !l.status || l.status === 'active');
+    const mineOther = mineAll.length - mine.length;
+
+    const counts = new Map();
+    for (const d of deals) {
+      const key = String(d.rarity || 'C');
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const rarityBar = [
+      `<button class="kp-rchip ${filter === 'all' ? 'is-active' : ''}" type="button" data-act="deals-rarity" data-rarity="all">Toutes <em>${deals.length}</em></button>`,
+      ...RARITY_ORDER.map((code) => {
+        const info = rarityInfo(code);
+        const n = counts.get(code) ?? 0;
+        return `<button class="kp-rchip ${filter === code ? 'is-active' : ''}" type="button" data-act="deals-rarity" data-rarity="${code}" style="--rc:${info.color}" ${
+          n ? '' : 'disabled'
+        }>${esc(info.label)} <em>${n}</em></button>`;
+      })
+    ].join('');
 
     return `
       <div class="kp-toolbar">
@@ -1470,12 +1514,14 @@
       </div>
       <div class="kp-hint">Compare les annonces actives (150 max) au prix médian des 7 derniers jours. Seuil : −10 % et au moins 2 ◆ d'écart.</div>
 
+      ${deals.length ? `<div class="kp-rarities">${rarityBar}</div>` : ''}
+
       ${
         state.deals === null
           ? `<div class="kp-empty"><b>Aucun scan</b>Lance un scan pour voir les annonces sous la médiane.</div>`
-          : deals.length
+          : visible.length
             ? `<div class="kp-table">
-                 ${deals
+                 ${visible
                    .slice(0, 40)
                    .map((d) => {
                      const card = d.c ?? state.characters.get(d.characterId) ?? null;
@@ -1497,28 +1543,38 @@
                    })
                    .join('')}
                </div>`
-            : `<div class="kp-empty"><b>Rien sous la médiane</b>Les annonces actuelles sont au prix du marché (ou au-dessus).</div>`
+            : `<div class="kp-empty"><b>${
+                deals.length ? 'Aucune annonce dans cette rareté' : 'Rien sous la médiane'
+              }</b>${deals.length ? 'Change de filtre ou relance un scan.' : 'Les annonces actuelles sont au prix du marché (ou au-dessus).'}</div>`
       }
 
       ${
         mine.length
           ? `<div class="kp-section">
-               <div class="kp-section-title">Mes annonces (${mine.length})</div>
+               <div class="kp-section-title">Mes annonces actives (${mine.length})${
+                 mineOther > 0 ? `<span>+${mineOther} terminée(s)</span>` : ''
+               }</div>
                <div class="kp-table">
                  ${mine
                    .slice(0, 20)
-                   .map(
-                     (l) => `
-                   <div class="kp-row" data-act="open-card" data-id="${esc(l.characterId)}">
+                   .map((l) => {
+                     const card = l.character ?? state.characters.get(String(l.characterId)) ?? null;
+                     const end = l.endsAt ? new Date(l.endsAt) : null;
+                     const hoursLeft =
+                       end && Number.isFinite(end.getTime()) ? Math.max(0, Math.round((end.getTime() - Date.now()) / 3600000)) : null;
+                     return `
+                   <div class="kp-row" data-act="open-card" data-id="${esc(card?.id ?? l.characterId ?? '')}">
                      <span></span>
-                     <img src="${esc(imgSrc(state.characters.get(String(l.characterId))))}" alt="" loading="lazy">
+                     <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
                      <div class="kp-row-main">
-                       <div class="kp-row-name">${esc(state.characters.get(String(l.characterId))?.name ?? `Carte #${l.characterId}`)}</div>
-                       <div class="kp-row-meta">${esc(l.type ?? 'fixed')} · ${esc(l.status ?? 'active')}</div>
+                       <div class="kp-row-name">${esc(card?.name ?? `Carte #${l.characterId ?? '?'}`)}</div>
+                       <div class="kp-row-meta">${l.type === 'auction' ? 'enchère' : 'prix fixe'}${
+                         l.type === 'auction' && l.bidCount ? ` · ${l.bidCount} mise(s)` : ''
+                       }${hoursLeft != null ? ` · ${hoursLeft} h restantes` : ''}</div>
                      </div>
-                     <div class="kp-row-price"><b>◆ ${fmt(l.price)}</b></div>
-                   </div>`
-                   )
+                     <div class="kp-row-price"><b>◆ ${fmt(l.finalPrice ?? l.currentBid ?? l.price)}</b></div>
+                   </div>`;
+                   })
                    .join('')}
                </div>
              </div>`
@@ -1585,6 +1641,14 @@
           <span>Achat immédiat<small>Enchère : + X % · 0 = désactivé</small></span>
           <input class="kp-input" type="number" min="0" max="300" step="5" data-setting="buyoutPct" value="${state.settings.buyoutPct}">
         </label>
+        <label class="kp-field">
+          <span>Durée par défaut<small>Prix fixe et enchère</small></span>
+          <select class="kp-select" data-setting="durationHours">
+            ${getCfg()
+              .durations.map((h) => `<option value="${h}" ${Number(state.settings.durationHours) === Number(h) ? 'selected' : ''}>${h} h</option>`)
+              .join('')}
+          </select>
+        </label>
         <label class="kp-toggle">
           <span>Mode simulation<small>Affiche le plan sans créer d’annonce</small></span>
           <input type="checkbox" data-setting="dryRun" ${state.settings.dryRun ? 'checked' : ''}>
@@ -1639,6 +1703,236 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Profil d'un autre joueur                                            */
+  /* ------------------------------------------------------------------ */
+
+  /** Médiane des médianes par rareté, calculée sur les cartes déjà valorisées. */
+  function rarityAverages() {
+    const buckets = new Map();
+    for (const [id, entry] of Object.entries(state.prices)) {
+      const value = entry?.m7 ?? entry?.m30;
+      if (value == null || value <= 0) continue;
+      const rarity = String(state.characters.get(String(id))?.rarity ?? '').toUpperCase();
+      if (!rarity) continue;
+      const list = buckets.get(rarity) ?? [];
+      list.push(Number(value));
+      buckets.set(rarity, list);
+    }
+    const out = new Map();
+    for (const [rarity, list] of buckets) {
+      list.sort((a, b) => a - b);
+      const mid = Math.floor(list.length / 2);
+      out.set(rarity, {
+        median: list.length % 2 ? list[mid] : (list[mid - 1] + list[mid]) / 2,
+        sample: list.length
+      });
+    }
+    return out;
+  }
+
+  async function searchProfile() {
+    const query = state.profile.query.trim();
+    if (!query) return;
+
+    state.profile.searching = true;
+    state.profile.error = null;
+    state.profile.results = null;
+    state.profile.user = null;
+    state.profile.value = null;
+    render();
+
+    try {
+      const data = await api(`/api/leaderboard/ladder?by=collection&q=${encodeURIComponent(query)}`, { timeout: 20000 });
+      const found = Array.isArray(data?.found) ? data.found : [];
+      state.profile.results = found.slice(0, 8);
+      if (!found.length) state.profile.error = `Aucun joueur nommé « ${query} ».`;
+    } catch (err) {
+      state.profile.error = friendlyError(err);
+    } finally {
+      state.profile.searching = false;
+      render();
+    }
+  }
+
+  async function loadProfile(id) {
+    if (!id) return;
+    state.profile.loading = true;
+    state.profile.error = null;
+    state.profile.user = null;
+    state.profile.value = null;
+    render();
+
+    try {
+      const stub = (state.profile.results ?? []).find((r) => String(r.id) === String(id)) ?? null;
+      const user = await api(`/api/users/${encodeURIComponent(id)}`, { timeout: 20000 }).catch((err) => {
+        if (err.status === 400 || err.status === 404) return null;
+        throw err;
+      });
+
+      state.profile.user = user ? { ...(stub || {}), ...user } : stub;
+      if (!user) state.profile.error = 'Profil introuvable ou privé : seules les infos publiques sont affichées.';
+
+      // Prix des meilleures cartes du joueur (max 8), pour une estimation ancrée.
+      const best = Array.isArray(user?.best) ? user.best.slice(0, 8) : [];
+      const averages = rarityAverages();
+      const missing = best.map((c) => String(c.id)).filter((cardId) => !priceFresh(state.prices[cardId]));
+      if (missing.length) await loadPrices(missing).catch(() => null);
+
+      let bestValue = 0;
+      const bestRows = best.map((card) => {
+        const price = priceOf(card.id);
+        if (price != null) bestValue += price;
+        return { card, price };
+      });
+
+      const byRarity = user?.byRarity ?? null;
+      let estimate = bestValue;
+      let sample = 0;
+      let unknown = 0;
+
+      if (byRarity) {
+        const bestIds = new Set(best.map((c) => String(c.id)));
+        for (const [code, count] of Object.entries(byRarity)) {
+          const total = Number(count) || 0;
+          if (!total) continue;
+          const avg = averages.get(String(code).toUpperCase());
+          // Les meilleures cartes sont déjà comptées à leur prix exact.
+          const remaining = Math.max(0, total - [...bestIds].filter((cardId) => String(state.characters.get(cardId)?.rarity ?? '').toUpperCase() === String(code).toUpperCase()).length);
+          if (!avg) {
+            unknown += remaining;
+            continue;
+          }
+          sample += avg.sample;
+          estimate += avg.median * remaining;
+        }
+      }
+
+      state.profile.value = {
+        total: estimate,
+        bestValue,
+        sample,
+        unknown,
+        byRarity,
+        best: bestRows,
+        hasCollection: Boolean(byRarity),
+        private: Boolean(user?.locked?.includes('collection'))
+      };
+    } catch (err) {
+      state.profile.error = friendlyError(err);
+    } finally {
+      state.profile.loading = false;
+      render();
+    }
+  }
+
+  function profileHTML() {
+    const p = state.profile;
+    const lines = [];
+
+    lines.push(`
+      <div class="kp-section" style="margin-top:16px">
+        <div class="kp-section-title">Valeur d'un autre compte</div>
+        <div class="kp-toolbar">
+          <input class="kp-input" type="search" data-role="profile-search" placeholder="Pseudo du joueur…" value="${esc(p.query)}">
+          <button class="kp-mini-btn" type="button" data-act="profile-search" ${p.searching ? 'disabled' : ''}>${
+            p.searching ? '…' : 'Chercher'
+          }</button>
+        </div>
+        ${p.error ? `<div class="kp-alert is-bad" style="margin-top:8px">${esc(p.error)}</div>` : ''}
+      </div>
+    `);
+
+    if (Array.isArray(p.results) && p.results.length) {
+      lines.push(`
+        <div class="kp-table" style="margin-top:8px">
+          ${p.results
+            .map(
+              (r) => `
+            <div class="kp-row" data-act="profile-open" data-id="${esc(r.id)}" data-pseudo="${esc(r.pseudo)}">
+              <span></span>
+              <img src="${esc(r.avatar || '/brand/favicon/icon-192.png')}" alt="" loading="lazy" style="border-radius:50%;object-fit:cover">
+              <div class="kp-row-main">
+                <div class="kp-row-name">${esc(r.pseudo)}</div>
+                <div class="kp-row-meta">${esc(r.rank?.label ?? '—')} · ${fmt(r.owned)} cartes · ${fmt(r.mythics)} mythique(s)</div>
+              </div>
+              <div class="kp-row-price"><b>#${fmt(r.pos)}</b><small>${fmt(r.points)} pts</small></div>
+            </div>`
+            )
+            .join('')}
+        </div>
+      `);
+    }
+
+    if (p.loading) {
+      lines.push(`<div class="kp-empty"><span class="kp-spinner"></span> Chargement du profil…</div>`);
+    }
+
+    const u = p.user;
+    const v = p.value;
+    if (u) {
+      const rarityRows = v?.byRarity
+        ? (() => {
+            const codes = RARITY_ORDER.filter((code) => Number(v.byRarity[code]) > 0);
+            const maxCount = Math.max(1, ...codes.map((code) => Number(v.byRarity[code])));
+            const averages = rarityAverages();
+            return codes.map((code) => {
+              const info = rarityInfo(code);
+              const count = Number(v.byRarity[code]);
+              const avg = averages.get(code);
+              return `
+              <div class="kp-bar-row">
+                <span>${esc(info.label)} · ${fmt(count)}</span>
+                <div class="kp-bar"><i style="width:${Math.max(2, Math.round((count / maxCount) * 100))}%;--kp-bar-color:${info.color}"></i></div>
+                <b>${avg ? `◆ ${fmt(avg.median)}` : '—'}</b>
+              </div>`;
+            });
+          })()
+        : [];
+
+      lines.push(`
+        <div class="kp-hero" style="margin-top:12px">
+          <div class="kp-hero-label">Valeur estimée de ${esc(u.pseudo)}</div>
+          <div class="kp-hero-value">◆ ${fmt(v?.total ?? 0)}</div>
+          <div class="kp-hero-sub">
+            ${
+              v?.hasCollection
+                ? `Estimation · top cartes valorisées ◆ ${fmt(v.bestValue)}${v.unknown ? ` · ${fmt(v.unknown)} carte(s) sans référence` : ''}`
+                : 'Collection privée : seules les infos publiques sont disponibles.'
+            }
+          </div>
+        </div>
+        <div class="kp-chips" style="margin-top:8px">
+          <span class="kp-chip"><em>Rang</em> ${esc(u.rank?.label ?? '—')}</span>
+          ${u.pos || u.position ? `<span class="kp-chip"><em>Classement</em> #${fmt(u.pos ?? u.position)}</span>` : ''}
+          ${u.points != null ? `<span class="kp-chip"><em>Points</em> ${fmt(u.points)}</span>` : ''}
+          ${u.owned != null ? `<span class="kp-chip"><em>Cartes</em> ${fmt(u.owned)}</span>` : ''}
+          ${u.mythics != null ? `<span class="kp-chip"><em>Mythiques</em> ${fmt(u.mythics)}</span>` : ''}
+        </div>
+        ${rarityRows.length ? `<div class="kp-section-title" style="margin-top:12px">Répartition par rareté</div><div class="kp-bars">${rarityRows.join('')}</div>` : ''}
+        ${
+          v?.best?.length
+            ? `<div class="kp-section-title" style="margin-top:12px">Ses plus belles cartes</div>
+               <div class="kp-top">
+                 ${v.best
+                   .map(
+                     (row) => `
+                   <div class="kp-top-card" data-act="open-card" data-id="${esc(row.card.id)}" title="${esc(row.card.name)}">
+                     <img src="${esc(imgSrc(row.card))}" alt="${esc(row.card.name)}" loading="lazy">
+                     <span>${esc(row.card.name)}</span>
+                     <b>${row.price != null ? `◆ ${fmt(row.price)}` : '—'}</b>
+                   </div>`
+                   )
+                   .join('')}
+               </div>`
+            : ''
+        }
+      `);
+    }
+
+    return lines.join('');
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Modal                                                               */
   /* ------------------------------------------------------------------ */
 
@@ -1660,6 +1954,7 @@
     const buyoutPreview = isAuction
       ? buyoutPriceFor(plan[0]?.price ?? 0, state.sell.buyoutPct)
       : null;
+    const durations = getCfg().durations;
 
     ui.modal.hidden = false;
     ui.modalCard.innerHTML = `
@@ -1671,6 +1966,17 @@
         <div class="kp-seg">
           <button class="kp-seg-btn ${isAuction ? '' : 'is-active'}" type="button" data-act="sell-type" data-type="fixed" ${running ? 'disabled' : ''}>Prix fixe</button>
           <button class="kp-seg-btn ${isAuction ? 'is-active' : ''}" type="button" data-act="sell-type" data-type="auction" ${running ? 'disabled' : ''}>Enchère</button>
+        </div>
+
+        <div class="kp-opt-row">
+          <div>Durée de l'annonce<small>${
+            isAuction ? 'L’enchère se termine à la fin du compte à rebours' : 'La carte reste en vente pendant ce temps'
+          }</small></div>
+          <select class="kp-select" data-sell-duration ${running ? 'disabled' : ''}>
+            ${durations
+              .map((h) => `<option value="${h}" ${Number(state.settings.durationHours) === Number(h) ? 'selected' : ''}>${h} h</option>`)
+              .join('')}
+          </select>
         </div>
 
         ${
@@ -1693,7 +1999,9 @@
           <div><span>Taxe de vente</span><b>◆ ${fmt(totals.tax)}</b></div>
         </div>
 
-        <div class="kp-hint">${totals.copies} ${isAuction ? 'enchère(s)' : 'annonce(s)'} · chakra dispo ◆ ${fmt(chakra)} · ${esc(
+        <div class="kp-hint">${totals.copies} ${isAuction ? 'enchère(s)' : 'annonce(s)'} · durée ${
+          Number(state.settings.durationHours)
+        } h · chakra dispo ◆ ${fmt(chakra)} · ${esc(
           state.settings.dryRun ? 'mode simulation' : `délai ${state.settings.gapMs} ms`
         )}${isAuction ? ' · le prix final dépend des enchérisseurs' : ''}</div>
 
@@ -1849,6 +2157,20 @@
       case 'scan-market':
         scanMarket();
         break;
+      case 'deals-rarity': {
+        const rarity = el.getAttribute('data-rarity') || 'all';
+        state.settings.dealsRarity = rarity;
+        persistSettings();
+        render();
+        break;
+      }
+      case 'profile-search':
+        searchProfile();
+        break;
+      case 'profile-open':
+        state.profile.query = el.getAttribute('data-pseudo') || state.profile.query;
+        loadProfile(el.getAttribute('data-id'));
+        break;
       case 'clear-cache':
         state.prices = {};
         state.lowest = {};
@@ -1919,10 +2241,10 @@
       const key = setting.getAttribute('data-setting');
       let value;
       if (setting.type === 'checkbox') value = setting.checked;
-      else if (key === 'saleType') value = String(setting.value);
+      else if (key === 'saleType' || key === 'durationHours' || key === 'dealsRarity') value = String(setting.value);
       else value = Number(setting.value);
       if (typeof value === 'number' && !Number.isFinite(value)) return;
-      state.settings[key] = value;
+      state.settings[key] = key === 'durationHours' ? Number(value) : value;
       persistSettings();
       if (key === 'ttlH') schedulePriceRun();
       render();
@@ -1950,6 +2272,17 @@
       return;
     }
 
+    const durationInput = target.closest('[data-sell-duration]');
+    if (durationInput) {
+      const hours = Number(durationInput.value);
+      if (Number.isFinite(hours) && hours > 0) {
+        state.settings.durationHours = hours;
+        persistSettings();
+        renderModal();
+      }
+      return;
+    }
+
     const priceInput = target.closest('[data-sell-price]');
     if (priceInput && state.sell) {
       const id = priceInput.getAttribute('data-sell-price');
@@ -1964,6 +2297,23 @@
   function onInput(event) {
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
+
+    const profileSearch = target.closest('[data-role="profile-search"]');
+    if (profileSearch) {
+      state.profile.query = profileSearch.value;
+      render();
+      const again = qs('[data-role="profile-search"]');
+      if (again) {
+        again.focus();
+        try {
+          again.setSelectionRange(again.value.length, again.value.length);
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+
     const search = target.closest('[data-role="dupe-search"]');
     if (!search) return;
     state.query = search.value;
@@ -2022,7 +2372,9 @@
       executeSell,
       loadData,
       scanMarket,
-      loadPrices
+      loadPrices,
+      searchProfile,
+      loadProfile
     };
   }
 

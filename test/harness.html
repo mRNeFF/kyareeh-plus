@@ -92,8 +92,54 @@
         if (url.includes('/api/me/collection')) return json(COLLECTION);
         if (url.includes('/api/characters')) return json(CHARACTERS);
         if (url.includes('/api/config')) return json(CONFIG);
+        if (url.includes('/api/me/market')) {
+          return json({
+            listings: [
+              { id: 'mine-1', characterId: 10668, character: CHARACTERS[1], type: 'fixed', price: 42, status: 'active', endsAt: new Date(Date.now() + 8 * 3600e3).toISOString() },
+              { id: 'mine-2', characterId: 282077, character: CHARACTERS[2], type: 'auction', price: 5, currentBid: 7, bidCount: 2, status: 'active', endsAt: new Date(Date.now() + 3 * 3600e3).toISOString() },
+              { id: 'mine-3', characterId: 21122, character: CHARACTERS[3], type: 'fixed', price: 9, status: 'sold', endsAt: new Date(Date.now() - 3600e3).toISOString() }
+            ],
+            buyOrders: []
+          });
+        }
+        if (url.includes('/api/leaderboard/ladder')) {
+          return json({
+            by: 'collection',
+            rows: [],
+            me: null,
+            found: [
+              {
+                pos: 11704,
+                id: '62937049-55d0-4534-8b0f-7e4de3cdc278',
+                pseudo: 'neffeeh',
+                avatar: null,
+                rank: { id: 'expert', label: 'Expert' },
+                owned: 1901,
+                mythics: 6,
+                points: 9819
+              }
+            ],
+            total: 90129
+          });
+        }
+        if (/\/api\/users\/[^/]+$/.test(url)) {
+          return json({
+            id: '62937049-55d0-4534-8b0f-7e4de3cdc278',
+            pseudo: 'neffeeh',
+            rank: { id: 'expert', label: 'Expert' },
+            catalogSize: 6736,
+            byRarity: { C: 1500, U: 300, R: 80, E: 18, L: 3 },
+            best: [
+              { id: 127691, name: 'Satoru Gojou', rarity: 'M', series: 'JUJUTSU KAISEN', image: CHARACTERS[0].image },
+              { id: 999001, name: 'Naruto Uzumaki', rarity: 'L', series: 'Naruto', image: CHARACTERS[4].image }
+            ],
+            blocks: [],
+            locked: [],
+            listings: [],
+            buyOrders: []
+          });
+        }
         if (url.includes('/api/me/market/access')) return json({ allowed: true });
-        if (url.includes('/api/me/market')) return json({ listings: [] });
 
         const priceMatch = url.match(/\/api\/market\/prices\/(\d+)/);
         if (priceMatch) {
