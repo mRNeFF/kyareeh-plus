@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kyara+",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Tableau de bord de compte, valorisation en chakra et vente assistée des doublons pour kyara.games.",
   "browser_specific_settings": {
     "gecko": {

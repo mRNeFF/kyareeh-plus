@@ -1,0 +1,12 @@
+#!/bin/sh
+# Kyara+ — pousse automatiquement sur GitHub après chaque commit.
+# Silencieux et non bloquant : un échec réseau ne casse pas le commit.
+
+remote="$(git remote 2>/dev/null | head -n 1)"
+[ -z "$remote" ] && exit 0
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+[ "$branch" = "HEAD" ] && exit 0
+
+git push "$remote" "$branch" >/dev/null 2>&1 || true
+exit 0

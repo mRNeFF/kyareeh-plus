@@ -96,6 +96,30 @@ button:disabled {
   text-decoration: underline;
 }
 
+.update {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #24262e;
+}
+
+#reload {
+  font-size: 11px;
+}
+
+#reload.is-armed {
+  border-color: transparent;
+  background: linear-gradient(135deg, #ff5a36, #d92d12);
+  color: #fff;
+}
+
+#reload-hint {
+  display: block;
+  margin-top: 5px;
+  color: #717786;
+  font-size: 9px;
+  text-align: center;
+}
+
 footer {
   margin-top: 12px;
   padding-top: 10px;

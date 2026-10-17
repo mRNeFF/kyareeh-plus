@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.1.0)
+## Fonctionnalités (v0.2.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **Valeur des doublons** : brut, net après taxe de vente (5 %) et frais de dépôt (2 %, min 1 ◆), plus la valeur de recyclage.
@@ -14,6 +14,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → validation → création des annonces au prix du marché, avec délai configurable, arrêt d'urgence et mode simulation.
 - **Marché** : scan des annonces à -8 % ou plus sous la médiane (prix fixe ou achat immédiat d'une enchère).
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, mode simulation.
+- **Mise à jour** : bouton **Recharger l'extension** dans les Réglages (et dans la popup) qui relit le dossier local et rafraîchit la page — aucun téléchargement.
 - **Debug** : journal des requêtes, clés renvoyées par l'API, diagnostic copiable.
 
 ## Installation (Firefox)
@@ -29,6 +30,23 @@ L'add-on temporaire disparaît au redémarrage de Firefox. Pour une installation
 ```bash
 npx web-ext build
 # puis upload du .zip de web-ext-artifacts/ sur AMO
+```
+
+## Mettre à jour
+
+L'extension est chargée **directement depuis ce dossier** : il n'y a rien à retélécharger ni à réinstaller.
+
+1. Récupère les changements (`git pull`, ou une modification faite sur cette machine).
+2. Ouvre le panneau Kyara+ → onglet **Réglages** → **Recharger l'extension** → **Confirmer**.
+   (ou icône de la barre d'outils → **Mettre à jour l'extension**)
+3. La page se rafraîchit et le nouveau code est actif. La version affichée dans le pied du panneau change.
+
+Le bouton appelle `runtime.reload()` puis recharge l'onglet, ce qui réinjecte le content script. Aucune action dans `about:debugging` n'est nécessaire.
+
+Chaque commit de ce dépôt est poussé automatiquement sur GitHub via le hook `.githooks/post-commit` (`core.hooksPath` est déjà configuré localement). Un clone neuf doit l'activer une fois :
+
+```bash
+git config core.hooksPath .githooks
 ```
 
 ## Utilisation

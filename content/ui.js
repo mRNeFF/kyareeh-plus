@@ -9,7 +9,7 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -102,7 +102,10 @@
     debug: [],
     bootKeys: [],
     notice: '',
-    noticeTimer: null
+    noticeTimer: null,
+    version: VERSION,
+    reloadArmed: false,
+    reloadTimer: null
   };
 
   /* ------------------------------------------------------------------ */
@@ -199,10 +202,14 @@
         if (msg.type === 'kp-toggle') {
           toggle();
           sendResponse({ ok: true, open: state.open });
+        } else if (msg.type === 'kp-reload') {
+          sendResponse({ ok: true });
+          setTimeout(reloadExtension, 120);
         } else if (msg.type === 'kp-status') {
           sendResponse({
             ok: true,
             ready: state.ready,
+            version: state.version,
             user: state.user?.pseudo ?? null,
             value: computeStats(ownedRows()).total
           });
@@ -219,6 +226,23 @@
   function toggle(force) {
     state.open = typeof force === 'boolean' ? force : !state.open;
     render();
+  }
+
+  function reloadExtension() {
+    notify('Rechargement de l’extension…');
+    try {
+      ext.runtime.reload();
+    } catch {
+      /* contexte déjà détruit */
+    }
+    // Le content script est remplacé : on rafraîchit la page pour réinjecter le panneau.
+    setTimeout(() => {
+      try {
+        location.reload();
+      } catch {
+        /* ignore */
+      }
+    }, 600);
   }
 
   /* ------------------------------------------------------------------ */
@@ -372,6 +396,11 @@
   /* ------------------------------------------------------------------ */
 
   async function boot() {
+    try {
+      state.version = ext.runtime.getManifest().version || VERSION;
+    } catch {
+      state.version = VERSION;
+    }
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
     for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct']) {
@@ -1078,7 +1107,7 @@
           : 'Prêt';
     ui.foot.innerHTML = `
       <span><i class="kp-dot ${dot}"></i>${msg}</span>
-      <span>v${VERSION} · Alt+K</span>
+      <span>v${esc(state.version)} · Alt+K</span>
     `;
   }
 
@@ -1414,6 +1443,27 @@
     const cfg = getCfg();
     return `
       <div class="kp-settings">
+        <div class="kp-section" style="margin-top:0">
+          <div class="kp-section-title">Mise à jour</div>
+          <div class="kp-card-stat">
+            <span>Version chargée</span>
+            <b>v${esc(state.version)}</b>
+            <small>lue depuis le dossier local · aucun téléchargement</small>
+          </div>
+          <div class="kp-hint" style="margin-top:8px">
+            Après une modification du dossier, recharge l'extension pour appliquer le nouveau code.
+            La page sera rafraîchie automatiquement.
+          </div>
+          <div class="kp-toolbar">
+            ${
+              state.reloadArmed
+                ? `<button class="kp-btn is-primary" type="button" data-act="reload-ext">Confirmer le rechargement</button>
+                   <button class="kp-btn is-ghost" type="button" data-act="reload-cancel">Annuler</button>`
+                : `<button class="kp-btn is-primary" type="button" data-act="reload-ext">Recharger l'extension</button>`
+            }
+          </div>
+        </div>
+
         <label class="kp-field">
           <span>Cache des prix<small>Durée avant de redemander les médianes</small></span>
           <select class="kp-select" data-setting="ttlH">
@@ -1464,6 +1514,10 @@
         <div class="kp-card-stat"><span>Session</span><b>${esc(state.user?.pseudo ?? 'invité')}</b><small>id ${esc(state.user?.id ?? '—')} · ${counts} entrées collection</small></div>
         <div class="kp-card-stat"><span>Prix en cache</span><b>${pricedIds}</b><small>${Object.keys(state.prices).length} entrées · TTL ${state.settings.ttlH} h</small></div>
         <div class="kp-card-stat"><span>Bootstrap</span><b>${esc(state.bootKeys.join(', ') || '—')}</b><small>clés renvoyées par /api/me/bootstrap</small></div>
+        <div class="kp-card-stat"><span>Version</span><b>v${esc(state.version)}</b><small>content script ${VERSION}</small></div>
+        <div class="kp-toolbar">
+          <button class="kp-btn" type="button" data-act="reload-ext">Recharger l'extension</button>
+        </div>
         <div class="kp-toolbar">
           <button class="kp-btn" type="button" data-act="copy-diag">Copier le diagnostic</button>
           <button class="kp-btn" type="button" data-act="refresh">Rafraîchir</button>
@@ -1579,6 +1633,30 @@
         break;
       case 'refresh':
         loadData();
+        break;
+      case 'reload-ext': {
+        if (!state.reloadArmed) {
+          state.reloadArmed = true;
+          if (state.reloadTimer) clearTimeout(state.reloadTimer);
+          state.reloadTimer = setTimeout(() => {
+            state.reloadArmed = false;
+            state.reloadTimer = null;
+            render();
+          }, 8000);
+          render();
+          break;
+        }
+        if (state.reloadTimer) clearTimeout(state.reloadTimer);
+        state.reloadTimer = null;
+        state.reloadArmed = false;
+        reloadExtension();
+        break;
+      }
+      case 'reload-cancel':
+        if (state.reloadTimer) clearTimeout(state.reloadTimer);
+        state.reloadTimer = null;
+        state.reloadArmed = false;
+        render();
         break;
       case 'tab':
         state.tab = el.getAttribute('data-tab') || 'account';
