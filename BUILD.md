@@ -53,6 +53,26 @@ awk '{ if (length($0) > m) m = length($0) } END { print "ligne la plus longue :"
 Résultat attendu : environ 233 caractères (des gabarits HTML en `innerHTML`),
 avec une moyenne d'environ 38 caractères par ligne.
 
+## Correspondance exacte archive / paquet
+
+Les 9 fichiers du paquet ont un **contenu identique, octet pour octet**, à ceux de
+l'archive source. C'est garanti par `.gitattributes` (`* text=auto eol=lf`) : même sur un
+Windows avec `core.autocrlf=true`, `git archive` exporte du LF, comme le zip livré.
+
+Contrôle rapide des tailles (elles doivent être égales deux à deux) :
+
+```
+background/background.js   1541
+content/ui.css            36460
+content/ui.js            181581
+icons/icon-48.png          1239
+icons/icon-96.png          2000
+manifest.json              1197
+popup/popup.css            1980
+popup/popup.html           1050
+popup/popup.js             3552
+```
+
 ## Notes pour le relecteur
 
 - L'interface est construite en `innerHTML` dans un **Shadow DOM** fermé au style du site.

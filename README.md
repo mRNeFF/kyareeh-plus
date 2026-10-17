@@ -103,6 +103,30 @@ et lance `web-ext lint` (le paquet doit sortir avec **0 erreur**).
    jour automatiques ; « On your own » (non listé) ne les permet pas sans `update_url`, interdit.
 3. Envoie le `.zip`. Mozilla scanne le paquet (automatique) puis demande les métadonnées.
 
+### 3 bis. Si AMO demande le code source
+
+C'est normal dès qu'un outil de build est utilisé — ici `web-ext`, même s'il ne fait
+qu'empaqueter. **Ce n'est pas un refus**, juste une formalité. Le script génère l'archive :
+
+```bash
+npm run release -- --build-only
+# → web-ext-artifacts/kyareeh-plus-<version>.zip         (l'extension)
+# → web-ext-artifacts/kyareeh-plus-<version>-source.zip   (le code source)
+```
+
+Dans le champ **« Source code »** (ou dans les notes au relecteur), tu peux :
+
+- **joindre** `kyareeh-plus-<version>-source.zip`, ou
+- **coller l'URL** du commit publié :
+  `https://github.com/mRNeFF/kyareeh-plus/tree/v<version>`
+
+Et répondre **« non »** à la question « votre extension contient-elle du code minifié,
+concaténé ou obfusqué ? » : aucun fichier n'est transformé. `BUILD.md`, inclus dans
+l'archive, détaille la procédure de reconstruction.
+
+Les 9 fichiers du paquet sont **identiques octet pour octet** à ceux de l'archive
+(garanti par `.gitattributes`), ce qui simplifie beaucoup la revue.
+
 Métadonnées suggérées :
 
 - **Nom** : `Kyareeh+`
