@@ -157,6 +157,35 @@ select {
   cursor: default;
 }
 
+.kp-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 16px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 10px;
+  background: rgba(251, 191, 36, 0.1);
+  color: #fcd34d;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.kp-banner[hidden] {
+  display: none !important;
+}
+
+.kp-banner .kp-banner-text {
+  min-width: 0;
+}
+
+.kp-banner .kp-btn {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  font-size: 10px;
+}
+
 .kp-stats {
   display: grid;
   grid-template-columns: 1.35fr 1fr 1fr;

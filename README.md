@@ -42,9 +42,22 @@ L'extension est chargée **directement depuis ce dossier** : il n'y a rien à re
 1. Récupère les changements (`git pull`, ou une modification faite sur cette machine).
 2. Ouvre le panneau Kyareeh+ → onglet **Réglages** → **Recharger l'extension** → **Confirmer**.
    (ou icône de la barre d'outils → **Mettre à jour l'extension**)
-3. La page se rafraîchit et le nouveau code est actif. La version affichée dans le pied du panneau change.
+3. La page se rafraîchit et le nouveau code est actif.
 
-Le bouton appelle `runtime.reload()` puis recharge l'onglet, ce qui réinjecte le content script. Aucune action dans `about:debugging` n'est nécessaire.
+Le bouton envoie un message au **script de fond** (`background/background.js`), seul contexte autorisé à appeler `runtime.reload()`, puis rafraîchit l'onglet.
+
+### Si la version ne change pas
+
+Le panneau affiche deux versions dans les Réglages : **version du code** (fichiers du dossier) et **version du manifeste chargé** (ce que Firefox a en mémoire). Un bandeau jaune s'affiche si elles diffèrent.
+
+C'est le symptôme d'un add-on jamais rechargé : Firefox relit le JS à chaque page, mais garde le manifeste du chargement. Dans ce cas, le bouton ne peut pas fonctionner (le manifeste périmé n'a pas encore de script de fond). Il faut le faire une fois à la main :
+
+1. `about:debugging#/runtime/this-firefox`
+2. Repère l'entrée Kyareeh+ (ou Kyara+)
+3. Clique sur **Recharger** — si l'erreur persiste, clique sur **Retirer**, puis **Charger un module complémentaire temporaire…** et sélectionne à nouveau `manifest.json`
+4. `F5` sur kyara.games
+
+Une fois le manifeste à jour, le bouton reprend le relai pour toutes les versions suivantes.
 
 Chaque commit de ce dépôt est poussé automatiquement sur GitHub via le hook `.githooks/post-commit` (`core.hooksPath` est déjà configuré localement). Un clone neuf doit l'activer une fois :
 

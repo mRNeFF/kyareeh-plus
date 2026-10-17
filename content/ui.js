@@ -9,7 +9,7 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.5.0';
+  const VERSION = '0.5.1';
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -113,6 +113,8 @@
     notice: '',
     noticeTimer: null,
     version: VERSION,
+    manifestVersion: null,
+    manifestOutdated: false,
     reloadArmed: false,
     reloadTimer: null,
     profile: {
@@ -179,6 +181,7 @@
           </div>
         </header>
         <div class="kp-stats" id="kp-stats"></div>
+        <div class="kp-banner" id="kp-banner" hidden></div>
         <nav class="kp-tabs" id="kp-tabs"></nav>
         <div class="kp-view" id="kp-view"></div>
         <footer class="kp-foot" id="kp-foot"></footer>
@@ -193,6 +196,7 @@
       fab: qs('.kp-fab'),
       panel: qs('.kp-panel'),
       stats: qs('#kp-stats'),
+      banner: qs('#kp-banner'),
       tabs: qs('#kp-tabs'),
       view: qs('#kp-view'),
       foot: qs('#kp-foot'),
@@ -225,8 +229,7 @@
         } else if (msg.type === 'kp-reload') {
           sendResponse({ ok: true });
           setTimeout(reloadExtension, 120);
-        } else if (msg.type === 'kp-status') {
-          sendResponse({
+        } else if (msg.type === 'kp-status') {          sendResponse({
             ok: true,
             ready: state.ready,
             version: state.version,
@@ -250,19 +253,46 @@
 
   function reloadExtension() {
     notify('Rechargement de l’extension…');
+
+    const fail = (reason) => {
+      notify(`${reason} Passe par about:debugging → « Recharger ».`);
+    };
+
+    // runtime.reload() n'est pas disponible dans un content script : on passe par le fond.
+    const ask = ext.runtime.sendMessage({ type: 'kp-reload-extension' });
+    Promise.resolve(ask)
+      .then((res) => {
+        if (!res || !res.ok) throw new Error('refusé');
+        // On laisse le fond relire le manifeste avant de rafraîchir la page.
+        setTimeout(() => {
+          try {
+            location.reload();
+          } catch {
+            /* ignore */
+          }
+        }, 1200);
+      })
+      .catch(() => {
+        // Repli : tentative directe (utile si le fond n'est pas encore chargé).
+        try {
+          ext.runtime.reload();
+          setTimeout(() => location.reload(), 800);
+        } catch {
+          fail('Rechargement automatique impossible.');
+        }
+      });
+  }
+
+  async function checkManifestVersion() {
     try {
-      ext.runtime.reload();
+      state.manifestVersion = ext.runtime.getManifest().version || null;
     } catch {
-      /* contexte déjà détruit */
+      state.manifestVersion = null;
     }
-    // Le content script est remplacé : on rafraîchit la page pour réinjecter le panneau.
-    setTimeout(() => {
-      try {
-        location.reload();
-      } catch {
-        /* ignore */
-      }
-    }, 600);
+    if (state.manifestVersion && state.manifestVersion !== VERSION) {
+      state.manifestOutdated = true;
+    }
+    render();
   }
 
   /* ------------------------------------------------------------------ */
@@ -416,11 +446,20 @@
   /* ------------------------------------------------------------------ */
 
   async function boot() {
+    // Version du code présent sur le disque.
+    state.version = VERSION;
+
+    // Version du manifeste réellement chargé par Firefox en mémoire.
     try {
-      state.version = ext.runtime.getManifest().version || VERSION;
+      state.manifestVersion = ext.runtime.getManifest().version || null;
     } catch {
-      state.version = VERSION;
+      state.manifestVersion = null;
     }
+
+    // Un manifeste plus ancien que le code signifie que l'add-on n'a pas été
+    // rechargé depuis about:debugging (Firefox garde le manifeste du chargement).
+    state.manifestOutdated = Boolean(state.manifestVersion && state.manifestVersion !== VERSION);
+
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
     for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours']) {
@@ -1156,12 +1195,30 @@
 
     const view = ui.view;
     const scrollTop = view.scrollTop;
+    renderBanner();
     renderStats();
     renderTabs();
     renderView();
     renderFooter();
     renderModal();
     view.scrollTop = scrollTop;
+  }
+
+  function renderBanner() {
+    if (!ui?.banner) return;
+    if (!state.manifestOutdated) {
+      ui.banner.hidden = true;
+      ui.banner.innerHTML = '';
+      return;
+    }
+    ui.banner.hidden = false;
+    ui.banner.innerHTML = `
+      <span class="kp-banner-text">
+        Manifeste v${esc(state.manifestVersion ?? '?')} alors que le code est en v${esc(state.version)}.
+        L'add-on doit être rechargé une fois.
+      </span>
+      <button class="kp-btn is-primary" type="button" data-act="reload-ext">Recharger</button>
+    `;
   }
 
   function renderStats() {
@@ -1224,7 +1281,7 @@
           : 'Prêt';
     ui.foot.innerHTML = `
       <span><i class="kp-dot ${dot}"></i>${msg}</span>
-      <span>v${esc(state.version)} · Alt+K</span>
+      <span>v${esc(state.version)}${state.manifestOutdated ? ' · maj dispo' : ''} · Alt+K</span>
     `;
   }
 
@@ -1606,10 +1663,26 @@
       <div class="kp-settings">
         <div class="kp-section" style="margin-top:0">
           <div class="kp-section-title">Mise à jour</div>
+          ${
+            state.manifestOutdated
+              ? `<div class="kp-alert is-bad" style="margin-bottom:8px">
+                   <b>Manifeste périmé</b><br>
+                   Firefox a encore en mémoire la version ${esc(state.manifestVersion ?? '?')} du manifeste,
+                   alors que le code du dossier est en v${esc(state.version)}.
+                   Clique sur « Recharger l'extension » : si rien ne change, retire l'add-on dans
+                   <code>about:debugging</code> puis recharge-le depuis le dossier.
+                 </div>`
+              : ''
+          }
           <div class="kp-card-stat">
-            <span>Version chargée</span>
+            <span>Version du code</span>
             <b>v${esc(state.version)}</b>
             <small>lue depuis le dossier local · aucun téléchargement</small>
+          </div>
+          <div class="kp-card-stat" style="margin-top:6px">
+            <span>Version du manifeste chargé</span>
+            <b>v${esc(state.manifestVersion ?? '—')}</b>
+            <small>${state.manifestOutdated ? 'à rafraîchir' : 'à jour'}</small>
           </div>
           <div class="kp-hint" style="margin-top:8px">
             Après une modification du dossier, recharge l'extension pour appliquer le nouveau code.
@@ -1698,7 +1771,7 @@
         <div class="kp-card-stat"><span>Session</span><b>${esc(state.user?.pseudo ?? 'invité')}</b><small>id ${esc(state.user?.id ?? '—')} · ${counts} entrées collection</small></div>
         <div class="kp-card-stat"><span>Prix en cache</span><b>${pricedIds}</b><small>${Object.keys(state.prices).length} entrées · TTL ${state.settings.ttlH} h</small></div>
         <div class="kp-card-stat"><span>Bootstrap</span><b>${esc(state.bootKeys.join(', ') || '—')}</b><small>clés renvoyées par /api/me/bootstrap</small></div>
-        <div class="kp-card-stat"><span>Version</span><b>v${esc(state.version)}</b><small>content script ${VERSION}</small></div>
+        <div class="kp-card-stat"><span>Version</span><b>v${esc(state.version)}</b><small>manifeste chargé : v${esc(state.manifestVersion ?? '—')}</small></div>
         <div class="kp-toolbar">
           <button class="kp-btn" type="button" data-act="reload-ext">Recharger l'extension</button>
         </div>

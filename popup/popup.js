@@ -43,29 +43,35 @@ function doReload() {
   reloadBtn.textContent = 'Rechargement…';
   reloadHint.textContent = 'Extension rechargée depuis le dossier local.';
 
-  const finish = () => setTimeout(() => window.close(), 500);
+  const finish = () => setTimeout(() => window.close(), 600);
 
-  if (activeTab && activeTab.id != null) {
-    ext.tabs
-      .sendMessage(activeTab.id, { type: 'kp-reload' })
-      .then(finish)
-      .catch(() => {
-        try {
-          ext.runtime.reload();
-        } catch {
-          /* ignore */
+  // Le fond est le seul contexte autorisé à appeler runtime.reload().
+  const askBackground = () =>
+    ext.runtime.sendMessage({ type: 'kp-reload-extension' }).then((res) => {
+      if (!res || !res.ok) throw new Error('refusé');
+      return true;
+    });
+
+  askBackground()
+    .then(() => {
+      if (activeTab && activeTab.id != null) {
+        setTimeout(() => {
+          ext.tabs.reload(activeTab.id).catch(() => {});
+        }, 1200);
+      }
+      finish();
+    })
+    .catch(() => {
+      try {
+        ext.runtime.reload();
+        if (activeTab && activeTab.id != null) {
+          setTimeout(() => ext.tabs.reload(activeTab.id).catch(() => {}), 900);
         }
-        finish();
-      });
-    return;
-  }
-
-  try {
-    ext.runtime.reload();
-  } catch {
-    /* ignore */
-  }
-  finish();
+      } catch {
+        reloadHint.textContent = 'Échec : recharge manuellement dans about:debugging.';
+      }
+      finish();
+    });
 }
 
 reloadBtn.addEventListener('click', () => {
