@@ -43,9 +43,7 @@
     dealsType: 'all',
     autoPackIds: [],
     autoPackPicked: false,
-    autoCount: 10,
     autoMaxPerBoosterMin: 10,
-    autoLoop: false,
     autoSound: true,
     autoAllowChakra: true,
     autoRefreshMin: 10,
@@ -190,8 +188,6 @@
       running: false,
       stop: false,
       opened: 0,
-      target: 0,
-      loop: false,
       spent: 0,
       cardCount: 0,
       cards: [],
@@ -583,7 +579,7 @@
 
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
-    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours', 'dealsPages', 'dealsMinPct', 'autoCount', 'autoMaxPerBoosterMin']) {
+    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours', 'dealsPages', 'dealsMinPct', 'autoMaxPerBoosterMin']) {
       const value = Number(state.settings[key]);
       state.settings[key] = Number.isFinite(value) ? value : DEFAULT_SETTINGS[key];
     }
@@ -596,13 +592,20 @@
     state.settings.dealsSort = DEAL_SORTS.some(([value]) => value === state.settings.dealsSort) ? state.settings.dealsSort : 'price_asc';
     state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(state.settings.dealsPages)));
     state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(state.settings.dealsMinPct)));
-    state.settings.autoCount = Math.min(5000, Math.max(0, Math.round(state.settings.autoCount ?? DEFAULT_SETTINGS.autoCount)));
     state.settings.autoMaxPerBoosterMin = Math.min(
       60,
       Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin ?? DEFAULT_SETTINGS.autoMaxPerBoosterMin))
     );
-    // Anciens réglages (pause fixe, variance, séries) : remplacés par la formule min/max.
-    for (const stale of ['autoDelayMs', 'autoJitterMs', 'autoSeriesCount', 'autoSeriesSec', 'autoMaxDelaySec']) {
+    // Anciens réglages (quantité, boucle, pause fixe, variance, séries) : plus utilisés.
+    for (const stale of [
+      'autoCount',
+      'autoLoop',
+      'autoDelayMs',
+      'autoJitterMs',
+      'autoSeriesCount',
+      'autoSeriesSec',
+      'autoMaxDelaySec'
+    ]) {
       delete state.settings[stale];
     }
     state.settings.autoRefreshMin = Math.min(
@@ -617,7 +620,6 @@
         : [];
     delete state.settings.autoPackId;
     state.settings.autoPackPicked = Boolean(state.settings.autoPackPicked);
-    state.settings.autoLoop = Boolean(state.settings.autoLoop);
     state.settings.autoSound = state.settings.autoSound !== false;
     state.settings.autoAllowChakra = state.settings.autoAllowChakra !== false;
     state.settings.autoStopRare = Boolean(state.settings.autoStopRare);
@@ -2646,7 +2648,6 @@
 
   const AUTO_MIN_GAP = 10000;
   const AUTO_REMAINING_CAP = 9;
-  const AUTO_MAX_RUN = 5000;
   const AUTO_IDLE_WAIT = 30000;
   const AUTO_REFRESH_DEFAULT = 10;
 
@@ -2790,20 +2791,14 @@
   }
 
   /**
-   * Cadence des ouvertures : entre deux boosters, délai tiré au hasard entre
-   * 10 s (minimum) et « minutes par booster × boosters restants » (maximum),
-   * avec un plafond de 9 boosters restants pris en compte.
-   * En boucle, on ne connaît pas la fin : le maximum reste donc au plafond haut (9).
+   * Cadence des ouvertures : un booster à la fois, puis un délai tiré au hasard entre
+   * 10 s (minimum) et « minutes par booster × 9 » au maximum, jusqu'à ce qu'on arrête.
    */
   function autoDelayRange() {
     const perBoosterMs =
       Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10)) * 60000;
-    const a = state.autoOpen;
-    const left = a.loop
-      ? AUTO_REMAINING_CAP
-      : Math.max(1, Math.min(AUTO_REMAINING_CAP, (a.target ?? 0) - (a.opened ?? 0)));
-    const max = Math.max(AUTO_MIN_GAP, perBoosterMs * left);
-    return { min: AUTO_MIN_GAP, max, remaining: left, perBoosterMs };
+    const max = Math.max(AUTO_MIN_GAP, perBoosterMs * AUTO_REMAINING_CAP);
+    return { min: AUTO_MIN_GAP, max, perBoosterMs };
   }
 
   /** Délai aléatoire avant le prochain booster. */
@@ -2990,16 +2985,13 @@
     }
 
     const allowChakra = state.settings.autoAllowChakra !== false;
-    const loop = state.settings.autoLoop === true;
-    const total = autoPoolTotal(packs, allowChakra);
-    const asked = Math.max(0, Math.round(Number(state.settings.autoCount) || 0));
-    const target = loop ? 0 : Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, total) : total);
+    const available = autoPoolTotal(packs, allowChakra);
 
-    if (!loop && target < 1) {
+    if (available < 1) {
       notify(
         allowChakra
           ? 'Aucun booster ouvrable : ni don, ni booster gratuit, ni assez de chakra.'
-          : 'Rien à ouvrir sans chakra : décoche « utiliser le chakra » ou attends des boosters offerts.'
+          : 'Rien à ouvrir sans chakra : coche « utiliser mon chakra » ou attends des boosters offerts.'
       );
       return;
     }
@@ -3008,8 +3000,6 @@
       running: true,
       stop: false,
       opened: 0,
-      target,
-      loop,
       spent: 0,
       cardCount: 0,
       cards: [],
@@ -3019,7 +3009,7 @@
       godPacks: 0,
       error: null,
       passNeeded: false,
-      status: loop ? 'Boucle démarrée…' : `Ouverture de ${target} booster(s)…`,
+      status: 'Ouverture…',
       startedAt: Date.now(),
       nextGapMs: 0,
       nextAt: 0
@@ -3034,11 +3024,6 @@
     const a = state.autoOpen;
     let rateHits = 0;
     while (!a.stop) {
-      const loop = state.settings.autoLoop === true;
-      a.loop = loop;
-      if (!loop && a.opened >= a.target) break;
-
-
       const packs = autoSelectedPacks();
       if (!packs.length) {
         a.status = 'Arrêté : plus aucun booster sélectionné.';
@@ -3047,11 +3032,7 @@
 
       const pack = pickAutoPack(packs);
       if (!pack) {
-        if (!loop) {
-          a.status = `Terminé : plus rien à ouvrir (${a.opened} ouvert(s)).`;
-          break;
-        }
-        // En boucle : on patiente et on re-vérifie le compte régulièrement.
+        // Plus rien à ouvrir : on patiente et on re-vérifie le compte régulièrement.
         a.status = `En attente de boosters… ${a.opened} ouvert(s)`;
         render();
         await autoSleep(AUTO_IDLE_WAIT);
@@ -3097,7 +3078,7 @@
           break;
         }
 
-        a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · ${packName(pack)}`;
+        a.status = `Ouverture… ${a.opened} · ${packName(pack)}`;
         render();
       } catch (err) {
         const code = err?.code ?? (err?.message === 'pass_required' ? 'pass_required' : null);
@@ -3123,14 +3104,12 @@
         break;
       }
 
-      if (!a.stop && (a.loop || a.opened < a.target)) {
-        // 10 s minimum, 10 min × boosters restants (plafond 9) au maximum.
+      if (!a.stop) {
+        // 10 s minimum, 10 min × 9 au maximum.
         const delay = autoDelay();
         a.nextGapMs = delay;
         const range = autoDelayRange();
-        a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · prochain dans ${fmtWait(
-          delay
-        )} (max ${fmtWait(range.max)})`;
+        a.status = `Ouverture… ${a.opened} · prochain dans ${fmtWait(delay)} (max ${fmtWait(range.max)})`;
         // Le compte à rebours doit exister avant le rendu, sinon le bloc n'apparaît pas.
         a.nextAt = Date.now() + delay;
         render();
@@ -3174,21 +3153,11 @@
     const selected = autoSelectedPacks();
     const selectedIds = new Set(selected.map((pack) => String(pack.id)));
     const allowChakra = state.settings.autoAllowChakra !== false;
-    const loop = state.settings.autoLoop === true;
 
     const total = autoPoolTotal(selected, allowChakra);
-    const asked = Math.max(0, Math.round(Number(state.settings.autoCount) || 0));
-    const planned = loop ? 0 : Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, total) : total);
-    const estimate = autoEstimateCost(selected, loop ? total : planned, allowChakra);
-    const pct = a.target > 0 ? Math.min(100, Math.round((a.opened / a.target) * 100)) : 0;
+    const estimate = autoEstimateCost(selected, total, allowChakra);
     const perBoosterMin = Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10));
-    const points = loop
-      ? AUTO_REMAINING_CAP
-      : Math.max(
-          1,
-          Math.min(AUTO_REMAINING_CAP, a.running ? (a.target ?? 0) - (a.opened ?? 0) : planned)
-        );
-    const maxNowLabel = fmtWait(perBoosterMin * 60000 * points);
+    const maxLabel = fmtWait(perBoosterMin * 60000 * AUTO_REMAINING_CAP);
     const refreshMin = Math.min(120, Math.max(1, Math.round(Number(state.settings.autoRefreshMin) || 10)));
     const passPack = selected[0] ?? packs[0] ?? null;
 
@@ -3208,7 +3177,7 @@
     return `
       <div class="kp-section" style="margin-top:0">
         <div class="kp-section-title">Auto-Open <span>${
-          a.running ? (loop ? 'en boucle' : 'en cours') : a.opened ? 'dernière session' : 'prêt'
+          a.running ? 'en cours' : a.opened ? 'dernière session' : 'prêt'
         }</span></div>
 
         <div class="kp-explain">
@@ -3233,10 +3202,6 @@
         <div class="kp-explain-sub">Rythme</div>
         <div class="kp-filters">
           <label class="kp-filter">
-            <span>Boosters à ouvrir</span>
-            <input class="kp-input" type="number" min="0" max="5000" step="1" data-setting="autoCount" value="${state.settings.autoCount}" ${loop ? 'disabled' : ''}>
-          </label>
-          <label class="kp-filter">
             <span>Minutes par booster</span>
             <input class="kp-input" type="number" min="0.2" max="60" step="0.5" data-setting="autoMaxPerBoosterMin" value="${perBoosterMin}">
           </label>
@@ -3246,16 +3211,12 @@
           </label>
         </div>
         <div class="kp-hint">
-          <b>Minimum 10 s</b>, <b>maximum ${perBoosterMin} min × boosters restants</b> (jusqu'à ${AUTO_REMAINING_CAP}).
-          ${loop ? `Boucle active : entre 10 s et ${fmtWait(perBoosterMin * 60000 * AUTO_REMAINING_CAP)} par ouverture, jusqu'à ce que tu cliques sur Arrêter.` : `Ici : entre 10 s et ${maxNowLabel} par ouverture.`}
+          Un booster à la fois, puis un délai aléatoire entre <b>10 s</b> et <b>${maxLabel}</b>
+          (${perBoosterMin} min × ${AUTO_REMAINING_CAP}), jusqu'à ce que tu cliques sur <b>Arrêter</b>.
           Compte rafraîchi toutes les ${refreshMin} min.
         </div>
 
         <div class="kp-auto-checks">
-          <label class="kp-check">
-            <input type="checkbox" data-setting="autoLoop" ${loop ? 'checked' : ''}>
-            <span>Ouvrir en boucle <small>ne s'arrête pas, attend les boosters suivants</small></span>
-          </label>
           <label class="kp-check">
             <input type="checkbox" data-setting="autoAllowChakra" ${allowChakra ? 'checked' : ''}>
             <span>Utiliser mon chakra <small>sinon seulement les boosters offerts</small></span>
@@ -3291,9 +3252,7 @@
           ${
             a.running
               ? `<button class="kp-btn is-ghost" type="button" data-act="auto-stop">Arrêter</button>`
-              : `<button class="kp-btn is-primary" type="button" data-act="auto-start" ${selected.length ? '' : 'disabled'}>Démarrer${
-                  loop ? ' la boucle' : " l'auto-open"
-                }</button>`
+              : `<button class="kp-btn is-primary" type="button" data-act="auto-start" ${selected.length ? '' : 'disabled'}>Démarrer</button>`
           }
           <button class="kp-btn" type="button" data-act="auto-refresh" ${a.running ? 'disabled' : ''}>Rafraîchir</button>
           <button class="kp-btn is-ghost" type="button" data-act="auto-sound-test" title="Tester le son">♪</button>
@@ -3302,8 +3261,8 @@
         ${
           a.running || a.opened
             ? `<div class="kp-auto-progress">
-                 <div class="kp-progress ${a.running && loop ? 'is-loop' : ''}"><i style="width:${
-                   a.running && loop ? 100 : pct
+                 <div class="kp-progress ${a.running ? 'is-loop' : ''}"><i style="width:${
+                   a.running ? 100 : 0
                  }%"></i></div>
                  <div class="kp-hint">${esc(a.status)}</div>
                  ${
@@ -3334,7 +3293,7 @@
         ${
           a.opened
             ? `<div class="kp-auto-metrics">
-                 <div><span>Ouverts</span><b>${fmt(a.opened)}${a.target ? ` / ${fmt(a.target)}` : ''}</b></div>
+                 <div><span>Ouverts</span><b>${fmt(a.opened)}</b></div>
                  <div><span>Cartes</span><b>${fmt(a.cardCount)}</b></div>
                  <div><span>Chakra dépensé</span><b>◆ ${fmt(a.spent)}</b></div>
                </div>
@@ -4467,7 +4426,6 @@
       state.settings[key] = key === 'durationHours' ? Number(value) : value;
       if (key === 'dealsPages') state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(Number(value) || 6)));
       if (key === 'dealsMinPct') state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(Number(value) || 0)));
-      if (key === 'autoCount') state.settings.autoCount = Math.min(5000, Math.max(0, Math.round(Number(value) || 0)));
       if (key === 'autoMaxPerBoosterMin') {
         state.settings.autoMaxPerBoosterMin = Math.min(60, Math.max(0.2, Number(value) || 10));
       }
