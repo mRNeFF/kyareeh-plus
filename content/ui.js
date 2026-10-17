@@ -1985,37 +1985,54 @@
     return row ? row.avg : null;
   }
 
-  /** Espérance de chakra d'un booster, golden inclus. */
+  /**
+   * Ce que rapporte un booster en moyenne.
+   * Principe : chaque carte tirée a une chance par rareté ; on multiplie ces chances
+   * par le prix moyen d'une carte de cette rareté, puis on additionne.
+   */
   function packEV(pack) {
     const rates = pack?.rates;
     if (!rates || !state.packAverages?.length) return null;
 
-    const value = (slots) => {
-      let total = 0;
+    /** Cartes attendues + valeur attendue, rareté par rareté, pour une liste de slots. */
+    const breakdownFor = (slots) => {
+      const rows = new Map();
       for (const slot of slots ?? []) {
         const pct = slot?.pct ?? {};
         for (const [rarity, share] of Object.entries(pct)) {
+          const chance = Number(share) / 100;
+          if (!Number.isFinite(chance) || chance <= 0) continue;
           const avg = avgPriceOf(rarity);
-          if (avg == null) continue;
-          total += (Number(share) / 100) * avg;
+          const row = rows.get(rarity) ?? { rarity, cards: 0, avg: avg ?? null };
+          row.cards += chance;
+          rows.set(rarity, row);
         }
       }
-      return total;
+      const list = [...rows.values()]
+        .map((row) => ({ ...row, contribution: row.avg == null ? 0 : row.cards * row.avg }))
+        .sort((a, b) => b.contribution - a.contribution);
+      return { list, total: list.reduce((sum, row) => sum + row.contribution, 0) };
     };
 
-    const normal = value(rates.slots);
-    const goldenSlots = rates.golden?.slots ?? null;
-    const goldenEvery = toNum(state.config?.golden?.every) ?? 10;
-    const goldenChance = pack.goldenEligible && goldenSlots ? 1 / Math.max(1, goldenEvery) : 0;
-    const golden = goldenSlots ? value(goldenSlots) : normal;
-    const ev = normal * (1 - goldenChance) + golden * goldenChance;
-
+    const normal = breakdownFor(rates.slots);
+    const goldenSlots = pack.goldenEligible ? rates.golden?.slots ?? null : null;
+    const goldenEvery = Math.max(1, toNum(state.config?.golden?.every) ?? 10);
+    const goldenChance = goldenSlots ? 1 / goldenEvery : 0;
+    const golden = goldenSlots ? breakdownFor(goldenSlots) : normal;
+    const ev = normal.total * (1 - goldenChance) + golden.total * goldenChance;
     const price = toNum(pack.chakraPrice);
+
     return {
       ev,
+      evNormal: normal.total,
+      evGolden: golden.total,
       price,
       ratio: price && price > 0 ? ev / price : null,
-      goldenChance
+      goldenChance,
+      goldenEvery,
+      breakdown: normal.list,
+      goldenBreakdown: golden.list,
+      slots: rates.slots?.length ?? 0
     };
   }
 
@@ -2166,8 +2183,15 @@
     };
   }
 
-  function formatPct(value) {
-    if (value == null || !Number.isFinite(value)) return '—';
+  function formatCards(n) {
+    if (!Number.isFinite(n) || n <= 0) return '0 carte';
+    if (n < 0.01) return '< 0.01 carte';
+    if (n < 1) return `${n.toFixed(2)} carte`;
+    if (n < 2) return `${n.toFixed(2)} cartes`;
+    return `${n.toFixed(2)} cartes`;
+  }
+
+  function formatPct(value) {    if (value == null || !Number.isFinite(value)) return '—';
     if (value <= 0) return '0 %';
     if (value >= 10) return `${Math.round(value * 10) / 10} %`;
     if (value >= 1) return `${Math.round(value * 100) / 100} %`;
@@ -2335,16 +2359,23 @@
       </div>
 
       <div class="kp-section" style="margin-top:16px">
-        <div class="kp-section-title">Espérance par booster</div>
-        <div class="kp-hint">
-          Espérance calculée sur les taux réels de <code>/api/packs</code> (golden 1 sur ${esc(
-            String(toNum(state.config?.golden?.every) ?? 10)
-          )}) et les prix moyens par rareté.
+        <div class="kp-section-title">Combien rapporte un booster ?</div>
+
+        <div class="kp-explain">
+          <p>
+            Un booster te donne <b>quelques cartes au hasard</b>. On calcule ce qu'elles valent en moyenne :
+            pour chaque rareté, on multiplie le <b>nombre de cartes attendu</b> par le <b>prix moyen du marché</b>
+            d'une carte de cette rareté, puis on additionne.
+          </p>
+          <p>
+            Le <b>retour</b> compare cette valeur au prix du booster. <b>100 %</b> = tu récupères ta mise.
+            En dessous, tu es perdant en moyenne — ce qui est normal : les boosters sont faits pour la collection, pas pour le profit.
+          </p>
         </div>
 
-        <div class="kp-toolbar" style="margin-top:8px">
+        <div class="kp-toolbar" style="margin-top:10px">
           <button class="kp-btn" type="button" data-act="packs-averages" ${state.packAveragesLoading ? 'disabled' : ''}>
-            ${state.packAveragesLoading ? '<span class="kp-spinner"></span> Calcul…' : 'Recalculer les moyennes'}
+            ${state.packAveragesLoading ? '<span class="kp-spinner"></span> Calcul…' : 'Recalculer les prix moyens'}
           </button>
           <button class="kp-btn" type="button" data-act="packs-refresh" ${
             state.packsLoading || state.packPoolsLoading ? 'disabled' : ''
@@ -2355,7 +2386,8 @@
 
         ${
           averages.length
-            ? `<div class="kp-chips" style="margin:8px 0">
+            ? `<div class="kp-explain-sub">Prix moyen d'une carte, par rareté (échantillon de 50 cartes réelles)</div>
+               <div class="kp-chips" style="margin:6px 0 10px">
                  ${averages
                    .map((row) => {
                      const info = rarityInfo(row.rarity);
@@ -2372,23 +2404,82 @@
                  ${evRows
                    .map(({ pack, ev }) => {
                      const price = ev?.price ?? toNum(pack.chakraPrice);
-                     const good = ev?.ratio != null && ev.ratio >= 1;
+                     const free = !price || price <= 0;
+                     const gain = ev?.ratio != null && ev.ratio >= 1;
+                     const lostPct = ev?.ratio != null ? Math.round((1 - ev.ratio) * 100) : null;
+                     const gainPct = ev?.ratio != null && ev.ratio >= 1 ? Math.round((ev.ratio - 1) * 100) : null;
                      const tags = [];
                      if (pack.grantOnly) tags.push('<span class="kp-tag">récompense</span>');
                      if (pack.schedule) tags.push('<span class="kp-tag">limité</span>');
+
+                     const detailRows = (ev?.breakdown ?? [])
+                       .map(
+                         (row) => `
+                       <div class="kp-ev-row">
+                         <span style="color:${rarityInfo(row.rarity).color}">${esc(rarityInfo(row.rarity).label)}</span>
+                         <span>${formatCards(row.cards)}</span>
+                         <span>${row.avg == null ? '?' : `× ◆ ${fmt(row.avg)}`}</span>
+                         <b>${row.avg == null ? '—' : `◆ ${fmt(row.contribution)}`}</b>
+                       </div>`
+                       )
+                       .join('');
+
+                     const missingPrices = (ev?.breakdown ?? []).filter((row) => row.avg == null).length;
+
                      return `
                    <div class="kp-pack ${ev ? '' : 'is-dim'}">
                      <div class="kp-pack-head">
                        <b style="color:${esc(pack.color ?? '#f3f4f7')}">${esc(packName(pack))}</b>
-                       <span class="kp-pack-price">${
-                         price != null && price > 0 ? `◆ ${fmt(price)}` : pack.usesFreePacks ? 'gratuit' : '—'
-                       }</span>
+                       <span class="kp-pack-price">${free ? (pack.usesFreePacks ? 'gratuit' : '—') : `◆ ${fmt(price)}`}</span>
                      </div>
-                     <div class="kp-pack-meta">
-                       <span>EV ${ev ? `<b class="${good ? 'is-good' : ''}">◆ ${fmt(ev.ev)}</b>` : '—'}</span>
-                       ${ev?.ratio != null ? `<span>retour <b class="${good ? 'is-good' : ''}">${Math.round(ev.ratio * 100)} %</b></span>` : ''}
+
+                     <div class="kp-ev-main">
+                       <span>tu récupères <b>◆ ${ev ? fmt(ev.ev) : '—'}</b></span>
+                       ${
+                         free
+                           ? `<span class="kp-pill is-good">que du gain</span>`
+                           : ev?.ratio != null
+                             ? gain
+                               ? `<span class="kp-pill is-good">+${gainPct} % de retour</span>`
+                               : `<span class="kp-pill is-bad">−${lostPct} % de retour</span>`
+                             : ''
+                       }
                        ${tags.join('')}
                      </div>
+
+                     ${
+                       ev
+                         ? `<div class="kp-ev-sentence">
+                              ${ev.slots || '?'} cartes par booster · si tu en ouvres 100, tu récupères en moyenne
+                              ◆ ${fmt(ev.ev * 100)}${free ? '' : ` pour ◆ ${fmt(price * 100)} dépensés`}.
+                            </div>`
+                         : ''
+                     }
+
+                     ${
+                       ev
+                         ? `<details class="kp-ev-detail">
+                              <summary>Voir le détail du calcul</summary>
+                              <div class="kp-ev-row is-head">
+                                <span>Rareté</span><span>Cartes attendues</span><span>Prix moyen</span><span>Valeur</span>
+                              </div>
+                              ${detailRows}
+                              <div class="kp-ev-row is-total">
+                                <span>Total hors doré</span><span></span><span></span><b>◆ ${fmt(ev.evNormal)}</b>
+                              </div>
+                              <p class="kp-ev-note">
+                                ${
+                                  ev.goldenChance > 0
+                                    ? `<b>Booster doré :</b> 1 sur ${ev.goldenEvery} est doré (meilleurs taux, valeur ◆ ${fmt(
+                                        ev.evGolden
+                                      )}). La moyenne affichée (◆ ${fmt(ev.ev)}) mélange les deux cas.`
+                                    : 'Ce booster n’a pas de version dorée.'
+                                }
+                                ${missingPrices ? `<br>« ? » = aucune vente récente pour cette rareté : elle n’est pas comptée.` : ''}
+                              </p>
+                            </details>`
+                         : ''
+                     }
                    </div>`;
                    })
                    .join('')}
