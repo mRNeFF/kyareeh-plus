@@ -44,8 +44,8 @@
     autoPackIds: [],
     autoPackPicked: false,
     autoCount: 10,
-    autoDelayMs: 1200,
-    autoJitterMs: 0,
+    autoSeriesCount: 10,
+    autoSeriesSec: 300,
     autoLoop: false,
     autoSound: true,
     autoAllowChakra: true,
@@ -575,7 +575,7 @@
 
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
-    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours', 'dealsPages', 'dealsMinPct', 'autoCount', 'autoDelayMs']) {
+    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours', 'dealsPages', 'dealsMinPct', 'autoCount', 'autoSeriesCount', 'autoSeriesSec']) {
       const value = Number(state.settings[key]);
       state.settings[key] = Number.isFinite(value) ? value : DEFAULT_SETTINGS[key];
     }
@@ -588,15 +588,21 @@
     state.settings.dealsSort = DEAL_SORTS.some(([value]) => value === state.settings.dealsSort) ? state.settings.dealsSort : 'price_asc';
     state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(state.settings.dealsPages)));
     state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(state.settings.dealsMinPct)));
-    state.settings.autoCount = Math.min(500, Math.max(0, Math.round(state.settings.autoCount ?? DEFAULT_SETTINGS.autoCount)));
-    state.settings.autoDelayMs = Math.min(
-      60000,
-      Math.max(300, Math.round(state.settings.autoDelayMs ?? DEFAULT_SETTINGS.autoDelayMs))
+    state.settings.autoCount = Math.min(5000, Math.max(0, Math.round(state.settings.autoCount ?? DEFAULT_SETTINGS.autoCount)));
+    state.settings.autoSeriesCount = Math.min(
+      1000,
+      Math.max(1, Math.round(state.settings.autoSeriesCount ?? DEFAULT_SETTINGS.autoSeriesCount))
     );
-    state.settings.autoJitterMs = Math.min(
-      10000,
-      Math.max(0, Math.round(state.settings.autoJitterMs ?? DEFAULT_SETTINGS.autoJitterMs))
+    state.settings.autoSeriesSec = Math.min(
+      24 * 3600,
+      Math.max(
+        state.settings.autoSeriesCount * 10,
+        Math.round(state.settings.autoSeriesSec ?? DEFAULT_SETTINGS.autoSeriesSec)
+      )
     );
+    // Anciens réglages de pause fixe + variance : remplacés par le système de séries.
+    delete state.settings.autoDelayMs;
+    delete state.settings.autoJitterMs;
     state.settings.autoRefreshMin = Math.min(
       120,
       Math.max(1, Math.round(state.settings.autoRefreshMin ?? DEFAULT_SETTINGS.autoRefreshMin))
@@ -2636,8 +2642,7 @@
   /* Auto-Open                                                           */
   /* ------------------------------------------------------------------ */
 
-  const AUTO_MIN_DELAY = 300;
-  const AUTO_MAX_DELAY = 60000;
+  const AUTO_MIN_GAP = 10000;
   const AUTO_MAX_RUN = 5000;
   const AUTO_IDLE_WAIT = 30000;
   const AUTO_REFRESH_DEFAULT = 10;
@@ -2781,15 +2786,54 @@
     return ready[Math.floor(Math.random() * ready.length)];
   }
 
-  /** Pause configurée, avec une variance aléatoire autour de la valeur de base. */
+  /**
+   * Cadence des ouvertures, raisonnée par « série ».
+   *
+   * Une série = N boosters à ouvrir dans une fenêtre de temps donnée (N = 10 et 5 min par défaut).
+   * Entre deux boosters d'une série, on tire un délai au hasard entre :
+   *   - 10 s (plancher absolu, pour ne pas se faire remarquer),
+   *   - et « temps restant / boosters restants », c'est-à-dire le plus long délai qui permet
+   *     encore de finir la série dans la fenêtre : on ne gaspille donc jamais de temps.
+   * Si la fenêtre est déjà presque écoulée, le maximum tombe sous 10 s : on ouvre alors au plancher.
+   */
+  function autoSeriesPlan() {
+    const size = Math.min(1000, Math.max(1, Math.round(Number(state.settings.autoSeriesCount) || 10)));
+    const windowsSec = Math.min(24 * 3600, Math.max(size * 10, Math.round(Number(state.settings.autoSeriesSec) || 300)));
+    return { size, windowsMs: windowsSec * 1000, windowsSec };
+  }
+
+  function startAutoSeries() {
+    const a = state.autoOpen;
+    const plan = autoSeriesPlan();
+    a.seriesSize = plan.size;
+    a.seriesLeft = plan.size;
+    a.seriesDone = 0;
+    a.seriesDeadline = Date.now() + plan.windowsMs;
+    a.seriesIndex = (a.seriesIndex ?? 0) + 1;
+  }
+
+  /** Délai tiré au hasard pour le prochain booster de la série en cours. */
   function autoDelay() {
-    const base = Math.min(
-      AUTO_MAX_DELAY,
-      Math.max(AUTO_MIN_DELAY, Math.round(Number(state.settings.autoDelayMs) || 1200))
-    );
-    const jitter = Math.min(10000, Math.max(0, Math.round(Number(state.settings.autoJitterMs) || 0)));
-    const delay = base + (Math.random() * 2 - 1) * jitter;
-    return Math.max(AUTO_MIN_DELAY, Math.min(AUTO_MAX_DELAY, Math.round(delay)));
+    const a = state.autoOpen;
+    const plan = autoSeriesPlan();
+    if (!a.seriesDeadline) startAutoSeries();
+
+    const remainingMs = Math.max(0, (a.seriesDeadline ?? 0) - Date.now());
+    const remainingCount = Math.max(1, a.seriesLeft ?? 1);
+    const maxGap = remainingMs / remainingCount;
+
+    if (maxGap <= AUTO_MIN_GAP) return AUTO_MIN_GAP;
+    return Math.round(AUTO_MIN_GAP + Math.random() * (maxGap - AUTO_MIN_GAP));
+  }
+
+  /** Consomme un booster de la série ; on enchaîne sur une nouvelle fenêtre si elle est finie. */
+  function advanceAutoSeries() {
+    const a = state.autoOpen;
+    a.seriesLeft = Math.max(0, (a.seriesLeft ?? 1) - 1);
+    a.seriesDone = (a.seriesDone ?? 0) + 1;
+    // Série terminée : nouvelle fenêtre tout de suite, sinon le délai serait calculé
+    // sur le temps restant de l'ancienne fenêtre (et pourrait être énorme).
+    if (a.seriesLeft <= 0) startAutoSeries();
   }
 
   /* --- Son ---------------------------------------------------------- */
@@ -2993,8 +3037,13 @@
       error: null,
       passNeeded: false,
       status: loop ? 'Boucle démarrée…' : `Ouverture de ${target} booster(s)…`,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      nextGapMs: 0,
+      seriesIndex: 0,
+      seriesLeft: 0,
+      seriesDone: 0
     });
+    startAutoSeries();
     await persistSettings();
     render();
 
@@ -3009,6 +3058,7 @@
       const loop = state.settings.autoLoop === true;
       a.loop = loop;
       if (!loop && a.opened >= a.target) break;
+
 
       const packs = autoSelectedPacks();
       if (!packs.length) {
@@ -3069,6 +3119,7 @@
         }
 
         a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · ${packName(pack)}`;
+        advanceAutoSeries();
         render();
       } catch (err) {
         const code = err?.code ?? (err?.message === 'pass_required' ? 'pass_required' : null);
@@ -3094,13 +3145,19 @@
         break;
       }
 
-      if (!a.stop) {
+      if (!a.stop && (a.loop || a.opened < a.target)) {
+        // Délai tiré au hasard dans la fenêtre restante de la série (jamais moins de 10 s).
         const delay = autoDelay();
-        a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · pause ${(
+        a.nextGapMs = delay;
+        const size = a.seriesSize ?? 10;
+        // Position du booster qu'on attend (1 = premier de la série).
+        const nextPos = Math.min(size, (a.seriesDone ?? 0) + 1);
+        a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · série ${nextPos}/${size} · prochain dans ${(
           delay / 1000
         ).toFixed(1)} s`;
         render();
         await autoSleep(delay);
+        a.nextGapMs = 0;
       }
     }
 
@@ -3145,8 +3202,19 @@
     const planned = loop ? 0 : Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, total) : total);
     const estimate = autoEstimateCost(selected, loop ? total : planned, allowChakra);
     const pct = a.target > 0 ? Math.min(100, Math.round((a.opened / a.target) * 100)) : 0;
-    const base = Math.min(60, Math.max(0.3, (Number(state.settings.autoDelayMs) || 1200) / 1000));
-    const jitter = Math.min(10, Math.max(0, (Number(state.settings.autoJitterMs) || 0) / 1000));
+    const seriesCount = Math.max(1, Math.round(Number(state.settings.autoSeriesCount) || 10));
+    const seriesSec = Math.max(10 * seriesCount, Math.round(Number(state.settings.autoSeriesSec) || 300));
+    const seriesMin = Math.max(1, Math.round(seriesSec / 60));
+    const seriesLabel =
+      seriesSec < 60 ? `${seriesSec} s` : seriesSec % 60 === 0 ? `${seriesSec / 60} min` : `${(seriesSec / 60).toFixed(1)} min`;
+    // Plus long délai possible en début de série : fenêtre / nombre de boosters.
+    const maxGapSec = seriesSec / seriesCount;
+    const maxGapLabel =
+      maxGapSec > 120
+        ? `${(maxGapSec / 60).toFixed(1)} min`
+        : maxGapSec > 10
+          ? `${Math.round(maxGapSec)} s`
+          : '10 s (fenêtre trop courte)';
     const refreshMin = Math.min(120, Math.max(1, Math.round(Number(state.settings.autoRefreshMin) || 10)));
     const passPack = selected[0] ?? packs[0] ?? null;
 
@@ -3195,12 +3263,12 @@
             <input class="kp-input" type="number" min="0" max="5000" step="1" data-setting="autoCount" value="${state.settings.autoCount}" ${loop ? 'disabled' : ''}>
           </label>
           <label class="kp-filter">
-            <span>Pause (ms)</span>
-            <input class="kp-input" type="number" min="300" max="60000" step="100" data-setting="autoDelayMs" value="${state.settings.autoDelayMs}">
+            <span>Par série</span>
+            <input class="kp-input" type="number" min="1" max="1000" step="1" data-setting="autoSeriesCount" value="${state.settings.autoSeriesCount}">
           </label>
           <label class="kp-filter">
-            <span>Variance (± ms)</span>
-            <input class="kp-input" type="number" min="0" max="10000" step="100" data-setting="autoJitterMs" value="${state.settings.autoJitterMs}">
+            <span>Fenêtre (min)</span>
+            <input class="kp-input" type="number" min="1" max="1440" step="1" data-setting="autoSeriesMin" value="${seriesMin}">
           </label>
           <label class="kp-filter">
             <span>Rafraîchir (min)</span>
@@ -3208,12 +3276,10 @@
           </label>
         </div>
         <div class="kp-hint">
-          ${loop ? 'Boucle active : le nombre est ignoré.' : '0 = tout ce que le compte permet.'}
-          Pause ${
-            jitter > 0
-              ? `entre <b>${Math.max(0.3, base - jitter).toFixed(1)} s</b> et <b>${(base + jitter).toFixed(1)} s</b> environ`
-              : `fixe de <b>${base.toFixed(1)} s</b>`
-          }.
+          Série : <b>${seriesCount} booster(s)</b> en ${seriesLabel} max. Délai tiré au hasard entre <b>10 s</b> et
+          <b>${maxGapLabel}</b> ; le plafond se resserre s'il reste peu de temps, donc la série finit toujours
+          dans la fenêtre sans temps perdu.
+          ${loop ? 'Boucle active : le nombre total est ignoré.' : 'Total 0 = tout ce que le compte permet.'}
           Compte rafraîchi toutes les ${refreshMin} min.
         </div>
 
@@ -4429,8 +4495,15 @@
       if (key === 'dealsPages') state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(Number(value) || 6)));
       if (key === 'dealsMinPct') state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(Number(value) || 0)));
       if (key === 'autoCount') state.settings.autoCount = Math.min(5000, Math.max(0, Math.round(Number(value) || 0)));
-      if (key === 'autoDelayMs') state.settings.autoDelayMs = Math.min(60000, Math.max(300, Math.round(Number(value) || 1200)));
-      if (key === 'autoJitterMs') state.settings.autoJitterMs = Math.min(10000, Math.max(0, Math.round(Number(value) || 0)));
+      if (key === 'autoSeriesCount') {
+        state.settings.autoSeriesCount = Math.min(1000, Math.max(1, Math.round(Number(value) || 10)));
+        // La fenêtre ne peut pas être plus courte que 10 s par booster.
+        state.settings.autoSeriesSec = Math.max(state.settings.autoSeriesSec, state.settings.autoSeriesCount * 10);
+      }
+      if (key === 'autoSeriesMin') {
+        const minutes = Math.min(1440, Math.max(1, Math.round(Number(value) || 5)));
+        state.settings.autoSeriesSec = Math.max(minutes * 60, state.settings.autoSeriesCount * 10);
+      }
       if (key === 'autoRefreshMin') state.settings.autoRefreshMin = Math.min(120, Math.max(1, Math.round(Number(value) || 10)));
       persistSettings();
       if (key === 'ttlH') schedulePriceRun();
@@ -4595,7 +4668,11 @@
       searchProfile,
       loadProfile,
       resetProfile,
-      autoRefreshTick
+      autoRefreshTick,
+      autoDelay,
+      startAutoSeries,
+      startAutoOpen,
+      stopAutoOpen
     };
   }
 
