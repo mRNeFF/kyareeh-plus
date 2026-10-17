@@ -3690,6 +3690,48 @@
   let searchTimer = null;
   let searchSeq = 0;
 
+  /**
+   * Normalise un résultat de /api/me/friends/search.
+   * Le serveur renvoie des objets joueur avec un `status` de relation
+   * ('none' | 'outgoing' | 'incoming' | 'friends' | 'blocked').
+   */
+  function normalizeFriendHit(raw) {
+    const u = raw?.user ?? raw?.player ?? raw ?? {};
+    return {
+      id: u?.id ?? raw?.id ?? null,
+      pseudo: u?.pseudo ?? u?.name ?? '?',
+      avatar: u?.avatar ?? u?.avatarUrl ?? null,
+      rank: u?.rank ?? null,
+      owned: toNum(u?.owned ?? u?.collectionSize ?? u?.cards),
+      mythics: toNum(u?.mythics),
+      points: toNum(u?.points),
+      pos: toNum(u?.pos ?? u?.position),
+      status: typeof raw?.status === 'string' ? raw.status : null
+    };
+  }
+
+  /**
+   * Recherche par pseudo via l'endpoint que le site utilise lui-même
+   * (`/api/me/friends/search`). Contrairement au classement — qui ne renvoie
+   * que les 10 plus grosses collections correspondant à la saisie — il trouve
+   * n'importe quel joueur, même avec une petite collection.
+   */
+  async function searchFriendsByPseudo(query) {
+    const data = await api(`/api/me/friends/search?q=${encodeURIComponent(query)}`, { timeout: 20000 });
+    const list = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.users)
+        ? data.users
+        : Array.isArray(data?.items)
+          ? data.items
+          : Array.isArray(data?.found)
+            ? data.found
+            : Array.isArray(data?.results)
+              ? data.results
+              : [];
+    return list.map(normalizeFriendHit).filter((row) => row.id);
+  }
+
   async function runProfileSearch(query) {
     const cleaned = String(query ?? '').trim();
     if (!cleaned) return;
@@ -3714,21 +3756,53 @@
       patchProfileResults();
     }
 
+    // 1) Recherche par pseudo (complète). 2) Repli sur le classement si indisponible.
+    let found = [];
+    let friendSearchFailed = false;
     try {
-      const data = await api(`/api/leaderboard/ladder?by=collection&q=${encodeURIComponent(cleaned)}`, { timeout: 20000 });
-      if (seq !== searchSeq) return;
-      const found = Array.isArray(data?.found) ? data.found : [];
-      state.profile.results = found.slice(0, 12);
-      state.profile.error = found.length ? null : `Aucun joueur nommé « ${cleaned} ».`;
-    } catch (err) {
-      if (seq !== searchSeq) return;
-      state.profile.error = friendlyError(err);
-      state.profile.results = null;
-    } finally {
-      if (seq === searchSeq) {
-        state.profile.searching = false;
-        patchProfileResults();
+      found = await searchFriendsByPseudo(cleaned);
+    } catch {
+      friendSearchFailed = true;
+    }
+    if (seq !== searchSeq) return;
+
+    if (!found.length) {
+      try {
+        const data = await api(
+          `/api/leaderboard/ladder?by=collection&q=${encodeURIComponent(cleaned)}`,
+          { timeout: 20000 }
+        );
+        if (seq !== searchSeq) return;
+        const ladder = Array.isArray(data?.found) ? data.found : [];
+        const known = new Set(found.map((row) => String(row.id)));
+        found = [...found, ...ladder.map(normalizeFriendHit).filter((row) => row.id && !known.has(String(row.id)))];
+      } catch (err) {
+        if (seq !== searchSeq) return;
+        state.profile.error = friendSearchFailed ? friendlyError(err) : null;
       }
+    }
+
+    // Correspondance exacte d'abord, puis préfixe, puis le reste.
+    const needle = cleaned.toLowerCase();
+    const weight = (row) => {
+      const name = String(row.pseudo ?? '').toLowerCase();
+      if (name === needle) return 0;
+      if (name.startsWith(needle)) return 1;
+      if (name.includes(needle)) return 2;
+      return 3;
+    };
+    found.sort((a, b) => weight(a) - weight(b) || (b.owned ?? 0) - (a.owned ?? 0));
+
+    state.profile.results = found.slice(0, 12);
+    if (!found.length) {
+      state.profile.error = `Aucun joueur nommé « ${cleaned} ».`;
+    } else {
+      state.profile.error = null;
+    }
+
+    if (seq === searchSeq) {
+      state.profile.searching = false;
+      patchProfileResults();
     }
   }
 
@@ -3920,22 +3994,44 @@
       </div>`;
   }
 
+  function relationTag(status) {
+    const map = {
+      friends: ['ami', 'is-good'],
+      outgoing: ['demande envoyée', 'is-warn'],
+      incoming: ['demande reçue', 'is-warn'],
+      blocked: ['bloqué', 'is-bad'],
+      none: ['', '']
+    };
+    const [label, cls] = map[String(status ?? 'none')] ?? ['', ''];
+    return label ? `<span class="kp-rel ${cls}">${esc(label)}</span>` : '';
+  }
+
   function profileResultsTable(results) {
     return `
       <div class="kp-table">
         ${results
-          .map(
-            (r) => `
+          .map((r) => {
+            const meta = [];
+            if (r.rank?.label) meta.push(esc(r.rank.label));
+            if (r.owned != null) meta.push(`${fmt(r.owned)} cartes`);
+            if (r.mythics != null) meta.push(`${fmt(r.mythics)} mythique(s)`);
+            const right =
+              r.pos != null
+                ? `<b>#${fmt(r.pos)}</b>${r.points != null ? `<small>${fmt(r.points)} pts</small>` : ''}`
+                : r.points != null
+                  ? `<b>${fmt(r.points)}</b><small>pts</small>`
+                  : `<b>›</b>`;
+            return `
           <div class="kp-row" data-act="profile-open" data-id="${esc(r.id)}" data-pseudo="${esc(r.pseudo)}">
             <span></span>
             <img class="kp-avatar" src="${esc(r.avatar || '/brand/favicon/icon-192.png')}" alt="" loading="lazy">
             <div class="kp-row-main">
-              <div class="kp-row-name">${esc(r.pseudo)}</div>
-              <div class="kp-row-meta">${esc(r.rank?.label ?? '—')} · ${fmt(r.owned)} cartes · ${fmt(r.mythics)} mythique(s)</div>
+              <div class="kp-row-name">${esc(r.pseudo)} ${relationTag(r.status)}</div>
+              <div class="kp-row-meta">${meta.length ? meta.join(' · ') : 'ouvrir le profil'}</div>
             </div>
-            <div class="kp-row-price"><b>#${fmt(r.pos)}</b><small>${fmt(r.points)} pts</small></div>
-          </div>`
-          )
+            <div class="kp-row-price">${right}</div>
+          </div>`;
+          })
           .join('')}
       </div>`;
   }
@@ -3948,7 +4044,7 @@
       return `<div class="kp-empty"><span class="kp-spinner"></span> Recherche…</div>`;
     }
 
-    if (p.error && !results) {
+    if (p.error && (!results || !results.length)) {
       return `<div class="kp-alert is-bad" style="margin-top:10px">${esc(p.error)}</div>`;
     }
 
@@ -3959,6 +4055,10 @@
           ${p.searching ? '<span class="kp-spinner"></span>' : ''}
         </div>
         ${profileResultsTable(results)}`;
+    }
+
+    if (results) {
+      return `<div class="kp-empty"><b>Aucun résultat</b>Essaie une autre orthographe (le pseudo exact marche toujours).</div>`;
     }
 
     return `<div class="kp-empty"><b>Cherche un joueur</b>Les comptes s'affichent au fur et à mesure de la saisie.</div>`;

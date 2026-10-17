@@ -1663,6 +1663,33 @@ img.kp-avatar {
   white-space: nowrap;
 }
 
+.kp-rel {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+
+.kp-rel.is-good {
+  background: rgba(74, 222, 128, 0.16);
+  color: var(--kp-good);
+}
+
+.kp-rel.is-warn {
+  background: rgba(251, 191, 36, 0.16);
+  color: #fbbf24;
+}
+
+.kp-rel.is-bad {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fca5a5;
+}
+
 .kp-tag.is-hot {
   background: rgba(255, 77, 46, 0.18);
   color: #ff8a6d;
