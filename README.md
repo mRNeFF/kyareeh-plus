@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.9.0)
+## Fonctionnalités (v0.9.2)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -50,7 +50,7 @@ Le bouton envoie un message au **script de fond** (`background/background.js`), 
 
 ### Si la version ne change pas
 
-Le panneau affiche deux versions dans les Réglages : **version du code** (fichiers du dossier) et **version du manifeste chargé** (ce que Firefox a en mémoire). Un bandeau jaune s'affiche si elles diffèrent.
+Le panneau affiche trois versions dans les Réglages : **version du code** (celle du manifeste chargé), **manifeste sur le disque** (relu directement dans `manifest.json`, sans cache) et **manifeste chargé par Firefox**. Un bandeau s'affiche dès que le fichier du dossier est plus récent que ce que Firefox a en mémoire.
 
 C'est le symptôme d'un add-on jamais rechargé : Firefox relit le JS à chaque page, mais garde le manifeste du chargement. Dans ce cas, le bouton ne peut pas fonctionner (le manifeste périmé n'a pas encore de script de fond). Il faut le faire une fois à la main :
 

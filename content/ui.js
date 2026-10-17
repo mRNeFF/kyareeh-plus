@@ -9,7 +9,15 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.9.0';
+
+  /** Source unique de vérité : le manifeste. Évite toute désynchronisation au bump. */
+  const VERSION = (() => {
+    try {
+      return ext?.runtime?.getManifest?.().version || '0.0.0';
+    } catch {
+      return '0.0.0';
+    }
+  })();
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -142,6 +150,7 @@
     noticeTimer: null,
     version: VERSION,
     manifestVersion: null,
+    diskVersion: null,
     manifestOutdated: false,
     selfProfile: null,
     selfProfileTried: null,
@@ -325,15 +334,38 @@
       });
   }
 
-  async function checkManifestVersion() {
+  /** Version du manifeste réellement chargé par Firefox en mémoire. */
+  function loadedVersion() {
     try {
-      state.manifestVersion = ext.runtime.getManifest().version || null;
+      return ext.runtime.getManifest().version || null;
     } catch {
-      state.manifestVersion = null;
+      return null;
     }
-    if (state.manifestVersion && state.manifestVersion !== VERSION) {
-      state.manifestOutdated = true;
+  }
+
+  /**
+   * Version du manifest.json présent sur le disque.
+   * On le relit directement (sans cache) : si Firefox a gardé un vieux manifeste
+   * pour un add-on temporaire, c'est le seul moyen de voir l'écart.
+   */
+  async function readDiskVersion() {
+    try {
+      const url = ext.runtime.getURL('manifest.json');
+      const res = await fetch(`${url}?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const json = await res.json();
+      return typeof json?.version === 'string' ? json.version : null;
+    } catch {
+      return null;
     }
+  }
+
+  async function checkManifestVersion() {
+    state.manifestVersion = loadedVersion();
+    state.diskVersion = await readDiskVersion();
+    state.manifestOutdated = Boolean(
+      state.diskVersion && state.manifestVersion && state.diskVersion !== state.manifestVersion
+    );
     render();
   }
 
@@ -492,15 +524,14 @@
     state.version = VERSION;
 
     // Version du manifeste réellement chargé par Firefox en mémoire.
-    try {
-      state.manifestVersion = ext.runtime.getManifest().version || null;
-    } catch {
-      state.manifestVersion = null;
-    }
+    state.manifestVersion = loadedVersion();
 
-    // Un manifeste plus ancien que le code signifie que l'add-on n'a pas été
-    // rechargé depuis about:debugging (Firefox garde le manifeste du chargement).
-    state.manifestOutdated = Boolean(state.manifestVersion && state.manifestVersion !== VERSION);
+    // Si le manifeste du disque est plus récent que celui chargé, l'add-on
+    // temporaire n'a pas été rechargé : Firefox garde le manifeste du chargement.
+    state.diskVersion = await readDiskVersion();
+    state.manifestOutdated = Boolean(
+      state.diskVersion && state.manifestVersion && state.diskVersion !== state.manifestVersion
+    );
 
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
@@ -605,6 +636,8 @@
     } finally {
       state.loading = false;
       render();
+      // Vérifie l'écart entre le manifeste du disque et celui gardé par Firefox.
+      setTimeout(() => checkManifestVersion(), 0);
     }
   }
 
@@ -1352,10 +1385,10 @@
     ui.banner.hidden = false;
     ui.banner.innerHTML = `
       <span class="kp-banner-text">
-        Manifeste v${esc(state.manifestVersion ?? '?')} alors que le code est en v${esc(state.version)}.
-        L'add-on doit être rechargé une fois.
+        Le dossier est en v${esc(state.version)} mais Firefox a chargé v${esc(state.manifestVersion ?? '?')}.
+        Retire l'add-on dans <code>about:debugging</code>, puis recharge-le depuis le dossier.
       </span>
-      <button class="kp-btn is-primary" type="button" data-act="reload-ext">Recharger</button>
+      <button class="kp-btn is-primary" type="button" data-act="tab" data-tab="settings">Voir les Réglages</button>
     `;
   }
 
@@ -2503,23 +2536,29 @@
           ${
             state.manifestOutdated
               ? `<div class="kp-alert is-bad" style="margin-bottom:8px">
-                   <b>Manifeste périmé</b><br>
-                   Firefox a encore en mémoire la version ${esc(state.manifestVersion ?? '?')} du manifeste,
-                   alors que le code du dossier est en v${esc(state.version)}.
-                   Clique sur « Recharger l'extension » : si rien ne change, retire l'add-on dans
-                   <code>about:debugging</code> puis recharge-le depuis le dossier.
+                   <b>Firefox a gardé l'ancienne version</b><br>
+                   Le dossier est en v${esc(state.version)}, mais l'add-on chargé est encore en
+                   v${esc(state.manifestVersion ?? '?')}. Un add-on temporaire doit être retiré puis rechargé
+                   pour prendre le nouveau numéro de version :
+                   <code>about:debugging</code> → <b>Ce Firefox</b> → « Retirer », puis
+                   « Charger un module temporaire » → <code>manifest.json</code> du dossier.
                  </div>`
               : ''
           }
           <div class="kp-card-stat">
             <span>Version du code</span>
             <b>v${esc(state.version)}</b>
-            <small>lue depuis le dossier local · aucun téléchargement</small>
+            <small>manifeste lu depuis le dossier local · aucun téléchargement</small>
           </div>
           <div class="kp-card-stat" style="margin-top:6px">
-            <span>Version du manifeste chargé</span>
+            <span>Manifeste sur le disque</span>
+            <b>v${esc(state.diskVersion ?? '—')}</b>
+            <small>${state.diskVersion ? 'fichier manifest.json' : 'illisible'}</small>
+          </div>
+          <div class="kp-card-stat" style="margin-top:6px">
+            <span>Manifeste chargé par Firefox</span>
             <b>v${esc(state.manifestVersion ?? '—')}</b>
-            <small>${state.manifestOutdated ? 'à rafraîchir' : 'à jour'}</small>
+            <small>${state.manifestVersion ? (state.manifestOutdated ? 'en retard sur le dossier' : 'à jour') : '—'}</small>
           </div>
           <div class="kp-hint" style="margin-top:8px">
             Après une modification du dossier, recharge l'extension pour appliquer le nouveau code.
@@ -2608,8 +2647,7 @@
         <div class="kp-card-stat"><span>Session</span><b>${esc(state.user?.pseudo ?? 'invité')}</b><small>id ${esc(state.user?.id ?? '—')} · ${counts} entrées collection</small></div>
         <div class="kp-card-stat"><span>Prix en cache</span><b>${pricedIds}</b><small>${Object.keys(state.prices).length} entrées · TTL ${state.settings.ttlH} h</small></div>
         <div class="kp-card-stat"><span>Bootstrap</span><b>${esc(state.bootKeys.join(', ') || '—')}</b><small>clés renvoyées par /api/me/bootstrap</small></div>
-        <div class="kp-card-stat"><span>Version</span><b>v${esc(state.version)}</b><small>manifeste chargé : v${esc(state.manifestVersion ?? '—')}</small></div>
-        <div class="kp-toolbar">
+        <div class="kp-card-stat"><span>Version</span><b>v${esc(state.version)}</b><small>manifeste chargé : v${esc(state.manifestVersion ?? '—')}</small></div>        <div class="kp-toolbar">
           <button class="kp-btn" type="button" data-act="reload-ext">Recharger l'extension</button>
         </div>
         <div class="kp-toolbar">
