@@ -1,4 +1,4 @@
-﻿/* Kyareeh+ — content script
+/* Kyareeh+ — content script
  * Tableau de bord de compte, valorisation en chakra et vente assistée.
  * Tout passe par la session existante de l'utilisateur : aucun identifiant stocké.
  */
@@ -9,7 +9,7 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.8.0';
+  const VERSION = '0.9.0';
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -27,6 +27,7 @@
     auctionPct: 15,
     buyoutPct: 0,
     durationHours: 12,
+    dupeSort: 'price_desc',
     dealsRarity: 'all',
     dealsSort: 'price_asc',
     dealsPages: 6,
@@ -40,6 +41,15 @@
     ['price_desc', 'Prix décroissant'],
     ['newest', 'Plus récentes'],
     ['ending', 'Fin proche']
+  ];
+
+  const DUPE_SORTS = [
+    ['price_desc', 'Prix unitaire ↓'],
+    ['total_desc', 'Valeur du lot ↓'],
+    ['copies_desc', 'Exemplaires ↓'],
+    ['rarity_desc', 'Rareté ↓'],
+    ['price_asc', 'Prix unitaire ↑'],
+    ['name_asc', 'Nom A→Z']
   ];
 
   const RARITY = {
@@ -64,6 +74,8 @@
     String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const toNum = (v) => {
+    // Attention : Number(null) vaut 0. On veut null pour « absent ».
+    if (v == null || v === '') return null;
     const n = typeof v === 'string' ? Number.parseFloat(v.replace(',', '.')) : Number(v);
     return Number.isFinite(n) ? n : null;
   };
@@ -500,6 +512,7 @@
     state.settings.autoPrices = state.settings.autoPrices !== false;
     state.settings.saleType = state.settings.saleType === 'auction' ? 'auction' : 'fixed';
     state.settings.dealsRarity = String(state.settings.dealsRarity || 'all');
+    state.settings.dupeSort = DUPE_SORTS.some(([value]) => value === state.settings.dupeSort) ? state.settings.dupeSort : 'price_desc';
     state.settings.dealsType = ['all', 'fixed', 'auction'].includes(state.settings.dealsType) ? state.settings.dealsType : 'all';
     state.settings.dealsSort = DEAL_SORTS.some(([value]) => value === state.settings.dealsSort) ? state.settings.dealsSort : 'price_asc';
     state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(state.settings.dealsPages)));
@@ -832,8 +845,28 @@
   function filteredDupes() {
     const all = duplicateRows();
     const query = state.query.trim().toLowerCase();
-    if (!query) return all;
-    return all.filter((r) => `${r.name} ${r.series}`.toLowerCase().includes(query));
+    const rows = query ? all.filter((r) => `${r.name} ${r.series}`.toLowerCase().includes(query)) : all.slice();
+    const sort = state.settings.dupeSort;
+
+    const rarityRank = (code) => RARITY_ORDER.indexOf(String(code || 'C').toUpperCase());
+    const valueOf = (row) => (row.price == null ? -1 : row.price);
+
+    const comparators = {
+      price_desc: (a, b) => valueOf(b) - valueOf(a) || b.sellable - a.sellable,
+      price_asc: (a, b) => {
+        // Les cartes sans prix restent en fin de liste.
+        if (a.price == null && b.price == null) return a.name.localeCompare(b.name);
+        if (a.price == null) return 1;
+        if (b.price == null) return -1;
+        return a.price - b.price || b.sellable - a.sellable;
+      },
+      copies_desc: (a, b) => b.sellable - a.sellable || valueOf(b) - valueOf(a),
+      rarity_desc: (a, b) => rarityRank(b.rarity) - rarityRank(a.rarity) || valueOf(b) - valueOf(a),
+      total_desc: (a, b) => valueOf(b) * b.qty - valueOf(a) * a.qty,
+      name_asc: (a, b) => a.name.localeCompare(b.name, 'fr')
+    };
+
+    return rows.sort(comparators[sort] ?? comparators.price_desc);
   }
 
   function computeStats(rows) {
@@ -1149,13 +1182,37 @@
     return list.filter((l) => !l.status || l.status === 'active').length;
   }
 
+  /**
+   * Emplacements d'annonce restants. Le site plafonne les annonces actives
+   * (5 par défaut) ; chaque exemplaire mis en vente occupe une place.
+   */
+  function listingSlots() {
+    const cfg = getCfg();
+    const fromApi =
+      toNum(cfg.maxActive) ??
+      toNum(state.access?.maxActiveListings) ??
+      toNum(state.access?.maxActive) ??
+      toNum(state.access?.limit) ??
+      toNum(state.mine?.maxActiveListings) ??
+      toNum(state.mine?.limit);
+    const max = fromApi == null ? 5 : fromApi;
+    const active = activeListings();
+    return { max, active, remaining: Math.max(0, max - active) };
+  }
+
+  /** Nombre d'exemplaires déjà cochés (chaque copie = une annonce). */
+  function selectedCopies() {
+    let copies = 0;
+    for (const row of duplicateRows()) {
+      if (state.selected.has(row.id)) copies += row.sellable;
+    }
+    return copies;
+  }
+
   function sellBlocker(plan) {
     const t = sellTotals(plan);
-    const cfg = getCfg();
     const chakra = toNum(state.user?.chakra) ?? 0;
-    const maxActive = cfg.maxActive;
-    const active = activeListings();
-    const slots = maxActive == null ? null : Math.max(0, maxActive - active);
+    const { max, remaining } = listingSlots();
     const isAuction = state.sell?.type === 'auction';
 
     if (!plan.length) return 'Aucune carte sélectionnée.';
@@ -1171,12 +1228,13 @@
     if (t.copies > state.settings.maxBatch) {
       return `Lot limité à ${state.settings.maxBatch} annonces (tu en as ${t.copies}). Réduis la sélection ou augmente la limite dans Réglages.`;
     }
+    // Limite d'annonces actives du site : c'est elle qui bloque en premier.
+    if (t.copies > remaining) {
+      return `Il te reste ${remaining} place(s) d'annonce sur ${max}. Décoche des cartes ou retire une annonce.`;
+    }
     if (state.settings.dryRun) return '';
     if (t.fees > chakra) {
       return `Frais de dépôt : ${fmt(t.fees)} ◆, chakra disponible : ${fmt(chakra)} ◆.`;
-    }
-    if (slots != null && t.copies > slots) {
-      return `Il te reste ${slots} emplacement(s) d'annonce(s) actif(s) sur ${maxActive}.`;
     }
     if (state.access && state.access.allowed === false) {
       return "L'accès au marché n'est pas encore débloqué sur ce compte.";
@@ -1612,17 +1670,37 @@
 
     if (rows.length) loadMarketInfo(rows.map((r) => r.id), state.marketLimit);
 
+    const slots = listingSlots();
+    const usedCopies = selectedCopies();
+    const freeSlots = Math.max(0, slots.remaining - usedCopies);
     const selected = rows.filter((r) => state.selected.has(r.id));
     const totals = sellTotals(
       selected.map((r) => ({ qty: r.sellable, price: suggestPrice(r.id, r.rarity) }))
     );
+    const full = usedCopies >= slots.remaining;
 
     return `
       <div class="kp-toolbar">
         <input class="kp-input" type="search" data-role="dupe-search" placeholder="Filtrer une carte…" value="${esc(state.query)}">
-        <button class="kp-mini-btn" type="button" data-act="select-all">Tout</button>
+        <button class="kp-mini-btn" type="button" data-act="select-all" title="Remplit les places libres dans l'ordre de tri">Remplir</button>
         <button class="kp-mini-btn" type="button" data-act="select-none">Rien</button>
       </div>
+
+      <label class="kp-filter" style="margin-bottom:8px">
+        <span>Trier</span>
+        <select class="kp-select" data-setting="dupeSort">
+          ${DUPE_SORTS.map(
+            ([value, label]) => `<option value="${value}" ${state.settings.dupeSort === value ? 'selected' : ''}>${label}</option>`
+          ).join('')}
+        </select>
+      </label>
+
+      <div class="kp-slots ${full ? 'is-full' : ''}">
+        <b>${usedCopies} / ${slots.remaining}</b>
+        annonce(s) sélectionnée(s) · ${freeSlots} place(s) libre(s) sur ${slots.max}
+        ${slots.active ? `<small>(${slots.active} annonce(s) active(s) déjà en ligne)</small>` : ''}
+      </div>
+
       <div class="kp-hint">${rows.length} carte(s) · ${rows.reduce((s, r) => s + r.sellable, 0)} exemplaire(s) vendable(s) ${state.marketLoading ? '<span class="kp-spinner"></span>' : ''}
         ${!state.marketLoading && state.marketLoaded.size < rows.length ? ` · <span class="kp-link" data-act="load-market-more">charger plus de prix marché</span>` : ''}
       </div>
@@ -1634,9 +1712,10 @@
             const bid = state.buyOrders[r.id];
             const lowest = state.lowest[r.id];
             const pp = state.prices[r.id];
+            const disabled = !checked && full;
             return `
-              <label class="kp-row ${checked ? 'is-selected' : ''}">
-                <input type="checkbox" data-sel="${esc(r.id)}" ${checked ? 'checked' : ''}>
+              <label class="kp-row ${checked ? 'is-selected' : ''} ${disabled ? 'is-disabled' : ''}">
+                <input type="checkbox" data-sel="${esc(r.id)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
                 <img src="${esc(r.image)}" alt="" loading="lazy">
                 <div class="kp-row-main">
                   <div class="kp-row-name">${esc(r.name)}</div>
@@ -1661,7 +1740,7 @@
       </div>
       <div class="kp-sellbar">
         <div class="kp-sellbar-info">
-          <b>${selected.length} sélectionnée(s) · ◆ ${fmt(totals.net)} net</b>
+          <b>${selected.length} carte(s) · ◆ ${fmt(totals.net)} net</b>
           <span>${totals.copies} annonce(s) · frais ◆ ${fmt(totals.fees)}</span>
         </div>
         <button class="kp-btn is-primary" type="button" data-act="prepare-sell" ${selected.length ? '' : 'disabled'}>Préparer la vente</button>
@@ -2117,7 +2196,7 @@
     const poolsReady = Boolean(state.packPools);
 
     const suggestions =
-      query.length >= 2
+      query.length >= 2 && !target
         ? [...state.characters.values()]
             .filter((card) => String(card?.name ?? '').toLowerCase().includes(query))
             .slice(0, 8)
@@ -2193,7 +2272,7 @@
         </div>
 
         ${
-          suggestions.length
+          suggestions.length && !target
             ? `<div class="kp-table" style="margin-top:8px">
                  ${suggestions
                    .map((card) => {
@@ -2417,7 +2496,7 @@
 
         <div class="kp-alert">
           Frais actuels : dépôt ${cfg.feePct} % (min ${cfg.feeMin} ◆) · taxe de vente ${cfg.taxPct} %.
-          ${cfg.maxActive != null ? `Limite : ${cfg.maxActive} annonces actives.` : ''}
+          Limite : ${listingSlots().max} annonces actives (${listingSlots().active} en ligne, ${listingSlots().remaining} libre(s)).
           Les frais de dépôt ne sont pas remboursés si la carte ne se vend pas.
         </div>
 
@@ -3144,7 +3223,21 @@
         break;
       }
       case 'select-all': {
-        for (const row of filteredDupes()) state.selected.add(row.id);
+        // Remplit les places libres restantes, sans jamais dépasser la limite du site.
+        const { remaining } = listingSlots();
+        let used = selectedCopies();
+        state.selected.clear();
+        for (const row of filteredDupes()) {
+          if (used + row.sellable > remaining) continue;
+          state.selected.add(row.id);
+          used += row.sellable;
+          if (used >= remaining) break;
+        }
+        if (!state.selected.size && remaining > 0) {
+          // Aucune carte ne rentre entièrement : on en prend au moins une.
+          const first = filteredDupes()[0];
+          if (first) state.selected.add(first.id);
+        }
         render();
         break;
       }
@@ -3213,6 +3306,7 @@
         const id = el.getAttribute('data-id');
         const card = state.characters.get(String(id)) ?? null;
         state.packTarget = card ? { id: String(id), card } : null;
+        state.packQuery = '';
         render();
         break;
       }
@@ -3290,8 +3384,30 @@
     const checkbox = target.closest('input[data-sel]');
     if (checkbox) {
       const id = checkbox.getAttribute('data-sel');
-      if (checkbox.checked) state.selected.add(id);
-      else state.selected.delete(id);
+      if (!checkbox.checked) {
+        state.selected.delete(id);
+        render();
+        return;
+      }
+
+      // Une place par exemplaire : on refuse de dépasser les emplacements libres.
+      const row = duplicateRows().find((r) => r.id === id);
+      const { remaining } = listingSlots();
+      const already = selectedCopies();
+      const need = row ? row.sellable : 0;
+
+      if (already + need > remaining) {
+        const free = Math.max(0, remaining - already);
+        notify(
+          free > 0
+            ? `Pas assez de places : ${free} exemplaire(s) possible(s) pour cette carte (${remaining} place(s) libre(s) au total).`
+            : `Limite d'annonces actives atteinte (${listingSlots().active}/${listingSlots().max}). Retire une annonce ou décoche une carte.`
+        );
+        render();
+        return;
+      }
+
+      state.selected.add(id);
       render();
       return;
     }
@@ -3301,7 +3417,14 @@
       const key = setting.getAttribute('data-setting');
       let value;
       if (setting.type === 'checkbox') value = setting.checked;
-      else if (key === 'saleType' || key === 'durationHours' || key === 'dealsRarity' || key === 'dealsSort' || key === 'dealsType') {
+      else if (
+        key === 'saleType' ||
+        key === 'durationHours' ||
+        key === 'dealsRarity' ||
+        key === 'dealsSort' ||
+        key === 'dealsType' ||
+        key === 'dupeSort'
+      ) {
         value = String(setting.value);
       } else value = Number(setting.value);
       if (typeof value === 'number' && !Number.isFinite(value)) return;
@@ -3383,6 +3506,8 @@
     const packSearch = target.closest('[data-role="pack-search"]');
     if (packSearch) {
       state.packQuery = packSearch.value;
+      // Retaper une recherche relance la chasse : on quitte la carte sélectionnée.
+      if (state.packTarget && state.packQuery.trim()) state.packTarget = null;
       render();
       const again = qs('[data-role="pack-search"]');
       if (again) {
@@ -3462,6 +3587,9 @@
       loadData,
       scanMarket,
       loadPrices,
+      listingSlots,
+      selectedCopies,
+      filteredDupes,
       searchProfile,
       loadProfile,
       resetProfile

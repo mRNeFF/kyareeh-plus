@@ -1,4 +1,4 @@
-﻿const ext = globalThis.browser ?? globalThis.chrome;
+const ext = globalThis.browser ?? globalThis.chrome;
 
 const statusEl = document.getElementById('status');
 const openBtn = document.getElementById('open');
