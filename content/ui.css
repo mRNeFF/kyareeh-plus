@@ -361,11 +361,17 @@ select {
 }
 
 .kp-autopack {
+  position: relative;
   display: grid;
-  gap: 1px;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    'tick name'
+    'tick meta'
+    'tick count';
+  gap: 0 6px;
   padding: 7px 9px;
   border: 1px solid rgba(255, 255, 255, 0.07);
-  border-left: 3px solid color-mix(in srgb, var(--rc, var(--kp-accent)) 70%, transparent);
+  border-left: 3px solid rgba(255, 255, 255, 0.09);
   border-radius: 9px;
   background: var(--kp-bg-2);
   color: var(--kp-text);
@@ -380,14 +386,37 @@ select {
 
 .kp-autopack.is-active {
   border-color: color-mix(in srgb, var(--rc, var(--kp-accent)) 80%, transparent);
+  border-left-color: var(--rc, var(--kp-accent));
   background: color-mix(in srgb, var(--rc, var(--kp-accent)) 16%, var(--kp-bg-2));
 }
 
 .kp-auto-packs:has(.is-active) .kp-autopack:not(.is-active) {
-  opacity: 0.55;
+  opacity: 0.5;
+  filter: grayscale(0.8);
+}
+
+.kp-autopack-tick {
+  grid-area: tick;
+  display: grid;
+  place-items: center;
+  align-self: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  color: transparent;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.kp-autopack.is-active .kp-autopack-tick {
+  border-color: var(--rc, var(--kp-accent));
+  background: var(--rc, var(--kp-accent));
+  color: #14151a;
 }
 
 .kp-autopack-name {
+  grid-area: name;
   overflow: hidden;
   font-size: 10.5px;
   font-weight: 700;
@@ -396,16 +425,28 @@ select {
 }
 
 .kp-autopack-meta {
+  grid-area: meta;
   color: var(--kp-muted);
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 9px;
 }
 
 .kp-autopack-count {
+  grid-area: count;
   color: var(--kp-good);
   font-size: 8.5px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
+}
+
+.kp-auto-checks {
+  display: grid;
+  gap: 2px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: var(--kp-bg-2);
 }
 
 .kp-check {
@@ -418,11 +459,84 @@ select {
   cursor: pointer;
 }
 
+.kp-auto-checks .kp-check {
+  margin-top: 0;
+  padding: 3px 0;
+}
+
 .kp-check input {
+  flex: none;
   width: 14px;
   height: 14px;
   accent-color: var(--kp-accent);
   cursor: pointer;
+}
+
+.kp-check small {
+  display: block;
+  color: var(--kp-muted);
+  font-size: 9px;
+}
+
+.kp-explain-count {
+  color: var(--kp-accent-2);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.kp-best-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.kp-best-card {
+  display: grid;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.kp-best-card img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border: 2px solid var(--rc, #3a3f4b);
+  border-radius: 6px;
+  background: var(--kp-bg-2);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 10px -4px var(--rc, transparent);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.kp-best-card:hover img {
+  transform: translateY(-2px);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 14px -2px var(--rc, transparent);
+}
+
+.kp-best-card b {
+  overflow: hidden;
+  color: var(--rc, var(--kp-text));
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-align: center;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.kp-progress.is-loop i {
+  animation: kp-loop 1.4s ease-in-out infinite;
+  background: linear-gradient(90deg, var(--kp-accent), var(--kp-accent-2), var(--kp-accent));
+  background-size: 200% 100%;
+}
+
+@keyframes kp-loop {
+  0% { background-position: 0% 0; opacity: 0.55; }
+  50% { opacity: 1; }
+  100% { background-position: 200% 0; opacity: 0.55; }
 }
 
 .kp-auto-summary,

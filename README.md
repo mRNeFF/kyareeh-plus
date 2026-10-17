@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.9.4)
+## Fonctionnalités (v0.9.5)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -17,7 +17,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Marché** : scan configurable (tri prix croissant/décroissant/plus récentes/fin proche, jusqu'à 20 pages de 50 annonces, seuil de remise réglable, filtre prix fixe/enchères), classé par économie réelle par rapport à la médiane 7 jours.
 - **Cartes (nouvel onglet)** : en tête, la *chasse à la carte* — probabilité exacte par booster, pour **tous** les boosters disponibles (pool réel, vedettes et pack doré inclus), nombre de boosters attendus, coût moyen et chance d'au moins une sur 100 boosters. Une fois la carte choisie, seule cette carte reste affichée. En dessous, l'espérance de chakra par booster (retour en %) et les prix moyens par rareté.
 - **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
-- **Auto-Open (nouvel onglet)** : choisit un booster et l'ouvre en rafale à ta place. Il consomme d'abord les boosters offerts (dons, gratuits, bonus), puis le chakra, jamais plus que ce que le compte permet. Options : nombre à ouvrir (`0` = tout), pause entre deux fournées, et arrêt automatique dès qu'une Légendaire ou Mythique tombe. Suivi en direct : boosters ouverts, cartes obtenues, chakra dépensé, répartition par rareté, meilleures trouvailles, dernier tirage. Si le laissez-passer du site a expiré, un bouton ouvre la page du booster pour le renouveler.
+- **Auto-Open (nouvel onglet)** : coche **un ou plusieurs** boosters — l'ouverture en tire un **au hasard** à chaque fois, un booster par requête. Il consomme d'abord les boosters offerts (dons, gratuits, bonus), puis le chakra **seulement si tu l'autorises**. Options : nombre à ouvrir (`0` = tout ce que le compte permet), pause de base **et variance aléatoire** (± ms) entre deux ouvertures, **boucle infinie** qui attend les boosters suivants au lieu de s'arrêter, **bruit à chaque booster** (carillon, plus aigu sur une Légendaire/Mythique, désactivable), arrêt automatique sur Légendaire/Mythique, et **rafraîchissement automatique du compte** (10 min par défaut) pour voir arriver de nouveaux boosters. Suivi en direct : boosters ouverts, cartes, chakra dépensé, répartition par rareté, meilleures trouvailles et dernier tirage. Si le laissez-passer du site a expiré, un bouton ouvre la page du booster pour le renouveler.
 - **Valeur d'un autre compte** : recherche instantanée au fil de la saisie, puis page dédiée avec valeur exacte (prix du jeu), répartition par rareté, plus belles cartes, et bouton **← Mon compte**.
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
 - **Mise à jour** : bouton **Recharger l'extension** dans les Réglages (et dans la popup) qui relit le dossier local et rafraîchit la page — aucun téléchargement.

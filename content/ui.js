@@ -41,9 +41,15 @@
     dealsPages: 6,
     dealsMinPct: 10,
     dealsType: 'all',
-    autoPackId: '',
+    autoPackIds: [],
+    autoPackPicked: false,
     autoCount: 10,
     autoDelayMs: 1200,
+    autoJitterMs: 0,
+    autoLoop: false,
+    autoSound: true,
+    autoAllowChakra: true,
+    autoRefreshMin: 10,
     autoStopRare: false
   };
 
@@ -172,11 +178,13 @@
     packSearching: false,
     packState: null,
     packStateLoading: false,
+    lastAutoRefresh: 0,
     autoOpen: {
       running: false,
       stop: false,
       opened: 0,
       target: 0,
+      loop: false,
       spent: 0,
       cardCount: 0,
       cards: [],
@@ -581,8 +589,29 @@
     state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(state.settings.dealsPages)));
     state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(state.settings.dealsMinPct)));
     state.settings.autoCount = Math.min(500, Math.max(0, Math.round(state.settings.autoCount ?? DEFAULT_SETTINGS.autoCount)));
-    state.settings.autoDelayMs = Math.min(10000, Math.max(300, Math.round(state.settings.autoDelayMs ?? DEFAULT_SETTINGS.autoDelayMs)));
-    state.settings.autoPackId = String(state.settings.autoPackId || '');
+    state.settings.autoDelayMs = Math.min(
+      60000,
+      Math.max(300, Math.round(state.settings.autoDelayMs ?? DEFAULT_SETTINGS.autoDelayMs))
+    );
+    state.settings.autoJitterMs = Math.min(
+      10000,
+      Math.max(0, Math.round(state.settings.autoJitterMs ?? DEFAULT_SETTINGS.autoJitterMs))
+    );
+    state.settings.autoRefreshMin = Math.min(
+      120,
+      Math.max(1, Math.round(state.settings.autoRefreshMin ?? DEFAULT_SETTINGS.autoRefreshMin))
+    );
+    // Sélection de boosters : tableau d'ids, avec reprise de l'ancien réglage unique.
+    state.settings.autoPackIds = Array.isArray(state.settings.autoPackIds)
+      ? state.settings.autoPackIds.map(String)
+      : state.settings.autoPackId
+        ? [String(state.settings.autoPackId)]
+        : [];
+    delete state.settings.autoPackId;
+    state.settings.autoPackPicked = Boolean(state.settings.autoPackPicked);
+    state.settings.autoLoop = Boolean(state.settings.autoLoop);
+    state.settings.autoSound = state.settings.autoSound !== false;
+    state.settings.autoAllowChakra = state.settings.autoAllowChakra !== false;
     state.settings.autoStopRare = Boolean(state.settings.autoStopRare);
     const cached = await storageGet(PRICE_KEY, {});
     if (cached && typeof cached === 'object') {
@@ -590,6 +619,7 @@
     }
     await mount();
     await loadData();
+    startAutoRefreshLoop();
   }
 
   async function loadCharacters() {
@@ -705,6 +735,33 @@
     } catch {
       /* silencieux */
     }
+  }
+
+  /* Rafraîchissement périodique du compte : boosters, chakra, collection. */
+  let autoRefreshTimer = null;
+
+  async function autoRefreshTick(force = false) {
+    if (state.loading) return;
+    if (!force && document.hidden) return;
+    try {
+      const me = await api('/api/me', { timeout: 20000 }).catch(() => null);
+      if (me && typeof me === 'object') state.user = me;
+      await loadPackState(true);
+      await loadPacks(true);
+      state.lastAutoRefresh = Date.now();
+      render();
+    } catch {
+      /* réseau : on retentera au prochain tick */
+    }
+  }
+
+  function startAutoRefreshLoop() {
+    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+    const minutes = Math.min(
+      120,
+      Math.max(1, Math.round(Number(state.settings.autoRefreshMin) || AUTO_REFRESH_DEFAULT))
+    );
+    autoRefreshTimer = setInterval(() => autoRefreshTick(), minutes * 60000);
   }
 
   /* ------------------------------------------------------------------ */
@@ -1987,6 +2044,11 @@
       const data = await api('/api/packs', { timeout: 25000 });
       const list = Array.isArray(data) ? data : Array.isArray(data?.packs) ? data.packs : [];
       state.packs = list.filter((p) => p && p.rates);
+      // Première visite : on coche le premier booster achetable par défaut.
+      if (!state.settings.autoPackPicked && !(state.settings.autoPackIds ?? []).length) {
+        const first = state.packs.find((pack) => !pack.grantOnly);
+        if (first) state.settings.autoPackIds = [String(first.id)];
+      }
     } catch (err) {
       state.packsError = friendlyError(err);
       state.packs = state.packs || [];
@@ -2575,13 +2637,16 @@
   /* ------------------------------------------------------------------ */
 
   const AUTO_MIN_DELAY = 300;
-  const AUTO_MAX_BATCH = 10;
-  const AUTO_MAX_RUN = 500;
+  const AUTO_MAX_DELAY = 60000;
+  const AUTO_MAX_RUN = 5000;
+  const AUTO_IDLE_WAIT = 30000;
+  const AUTO_REFRESH_DEFAULT = 10;
 
-  function activeAutoPack() {
-    const id = String(state.settings.autoPackId || '');
-    const packs = state.packs ?? [];
-    return packs.find((p) => String(p.id) === id) ?? packs.find((p) => !p.grantOnly) ?? null;
+  /** Boosters cochés, dans l'ordre du serveur. */
+  function autoSelectedPacks() {
+    const packs = (state.packs ?? []).filter((pack) => pack && !pack.grantOnly);
+    const ids = (state.settings.autoPackIds ?? []).map(String);
+    return packs.filter((pack) => ids.includes(String(pack.id)));
   }
 
   async function loadPackState(force = false) {
@@ -2599,26 +2664,95 @@
     render();
   }
 
-  /** Combien de boosters de ce type le compte peut ouvrir maintenant. */
-  function autoAvailability(pack) {
+  /**
+   * Combien de boosters de ce type le compte peut ouvrir maintenant.
+   * `allowChakra = false` interdit la dépense : seuls les dons et les boosters offerts comptent.
+   */
+  function autoAvailability(pack, allowChakra = state.settings.autoAllowChakra !== false) {
     const price = Math.max(0, toNum(pack?.chakraPrice) ?? 0);
     const grants = Math.max(0, toNum(state.packState?.grants?.[String(pack?.id)]) ?? 0);
     const free = pack?.usesFreePacks
       ? Math.max(0, toNum(state.user?.freePacks) ?? 0) + Math.max(0, toNum(state.user?.bonusPacks) ?? 0)
       : 0;
     const chakra = Math.max(0, toNum(state.user?.chakra) ?? 0);
-    const paid = price > 0 ? Math.floor(chakra / price) : 0;
+    const paid = allowChakra && price > 0 ? Math.floor(chakra / price) : 0;
     let total = grants + free + paid;
 
     // Limite quotidienne éventuelle du booster.
     const limitLeft = toNum(state.packState?.limits?.[String(pack?.id)]?.left);
     if (limitLeft != null) total = Math.min(total, grants + Math.max(0, limitLeft));
 
-    return { price, grants, free, chakra, paid, total };
+    return { price, grants, free, chakra, paid, total, limitLeft };
   }
 
-  /** Répartition du coût de n ouvertures : dons, gratuits, puis chakra. */
-  function autoCost(pack, n) {
+  /**
+   * Plan d'ouverture sur une sélection : dons par booster, puis boosters offerts (pool partagé),
+   * puis chakra sur les boosters les moins chers.
+   * `requested = 0` signifie « tout ce qui est possible ».
+   */
+  function autoPlan(packs, requested, allowChakra = state.settings.autoAllowChakra !== false) {
+    const rows = packs.map((pack) => {
+      const avail = autoAvailability(pack, allowChakra);
+      return {
+        price: avail.price,
+        grants: avail.grants,
+        freeEligible: pack.usesFreePacks === true,
+        paidCap: avail.paid,
+        limitLeft: avail.limitLeft
+      };
+    });
+
+    const freePool = rows.some((row) => row.freeEligible)
+      ? Math.max(0, toNum(state.user?.freePacks) ?? 0) + Math.max(0, toNum(state.user?.bonusPacks) ?? 0)
+      : 0;
+
+    let left = Math.max(0, Math.round(Number(requested) || 0)) || Infinity;
+    let grants = 0;
+    let free = 0;
+    let paid = 0;
+    let chakra = 0;
+
+    for (const row of rows) {
+      const use = Math.min(left, row.grants);
+      grants += use;
+      left -= use;
+    }
+
+    const freeUse = Math.min(left, freePool);
+    free += freeUse;
+    left -= freeUse;
+
+    let chakraLeft = Math.max(0, toNum(state.user?.chakra) ?? 0);
+    if (allowChakra) {
+      const affordable = rows.filter((row) => row.paidCap > 0).sort((x, y) => x.price - y.price);
+      for (const row of affordable) {
+        if (left <= 0) break;
+        const capped = row.limitLeft == null ? Infinity : Math.max(0, row.limitLeft - row.grants);
+        const use = Math.min(left, row.paidCap, capped, Math.floor(chakraLeft / row.price));
+        if (use <= 0) continue;
+        paid += use;
+        left -= use;
+        chakra += use * row.price;
+        chakraLeft -= use * row.price;
+      }
+    }
+
+    return {
+      total: grants + free + paid,
+      grants,
+      free,
+      paid,
+      chakra,
+      missing: Number.isFinite(left) ? Math.max(0, left) : 0
+    };
+  }
+
+  function autoPoolTotal(packs, allowChakra = state.settings.autoAllowChakra !== false) {
+    return autoPlan(packs, 0, allowChakra).total;
+  }
+
+  /** Répartition du coût de n ouvertures : dons, gratuits, puis chakra (si autorisé). */
+  function autoCost(pack, n, allowChakra = state.settings.autoAllowChakra !== false) {
     let left = Math.max(0, Math.round(n));
     const grants = Math.max(0, toNum(state.packState?.grants?.[String(pack?.id)]) ?? 0);
     const grantUse = Math.min(left, grants);
@@ -2636,7 +2770,80 @@
     }
 
     const price = Math.max(0, toNum(pack?.chakraPrice) ?? 0);
-    return { grants: grantUse, free: freeUse, bonus: bonusUse, paid: left, chakra: left * price };
+    const paid = allowChakra ? left : 0;
+    return { grants: grantUse, free: freeUse, bonus: bonusUse, paid, chakra: paid * price, short: left - paid };
+  }
+
+  /** Tire au hasard un booster parmi ceux qui ont encore des ouvertures possibles. */
+  function pickAutoPack(packs) {
+    const ready = packs.filter((pack) => autoAvailability(pack).total > 0);
+    if (!ready.length) return null;
+    return ready[Math.floor(Math.random() * ready.length)];
+  }
+
+  /** Pause configurée, avec une variance aléatoire autour de la valeur de base. */
+  function autoDelay() {
+    const base = Math.min(
+      AUTO_MAX_DELAY,
+      Math.max(AUTO_MIN_DELAY, Math.round(Number(state.settings.autoDelayMs) || 1200))
+    );
+    const jitter = Math.min(10000, Math.max(0, Math.round(Number(state.settings.autoJitterMs) || 0)));
+    const delay = base + (Math.random() * 2 - 1) * jitter;
+    return Math.max(AUTO_MIN_DELAY, Math.min(AUTO_MAX_DELAY, Math.round(delay)));
+  }
+
+  /* --- Son ---------------------------------------------------------- */
+
+  let audioCtx = null;
+
+  function primeAudio() {
+    if (state.settings.autoSound === false) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      audioCtx = audioCtx || new Ctx();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    } catch {
+      /* audio indisponible */
+    }
+  }
+
+  function playOpenSound(tier = 0) {
+    if (state.settings.autoSound === false) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      audioCtx = audioCtx || new Ctx();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+
+      // Un petit carillon : une note simple, ou un arpège pour les hautes raretés.
+      const notes = tier >= 2 ? [784, 1046, 1318] : tier >= 1 ? [698, 932] : [620];
+      const now = audioCtx.currentTime;
+      notes.forEach((freq, index) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        const start = now + index * 0.07;
+        osc.type = tier >= 1 ? 'triangle' : 'sine';
+        osc.frequency.setValueAtTime(freq, start);
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.07, start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(start);
+        osc.stop(start + 0.18);
+      });
+    } catch {
+      /* audio indisponible : on continue sans bruit */
+    }
+  }
+
+  /** Niveau sonore d'un tirage : 0 = commun, 1 = rare/épique, 2 = légendaire et plus. */
+  function pulledTier(cards) {
+    let top = -1;
+    for (const card of cards) top = Math.max(top, RARITY_ORDER.indexOf(card.rarity));
+    if (top >= RARITY_ORDER.indexOf('L')) return 2;
+    if (top >= RARITY_ORDER.indexOf('R')) return 1;
+    return 0;
   }
 
   /** Applique localement ce que le serveur vient de consommer. */
@@ -2702,6 +2909,8 @@
         a.status = `Arrêté : ${rarityInfo(found?.rarity).label} trouvée — ${found?.name ?? 'carte'} !`;
       }
     }
+
+    return pulled;
   }
 
   function autoSleep(ms) {
@@ -2738,12 +2947,11 @@
     if (a.running) return;
 
     if (!state.packs?.length) await loadPacks();
-    const pack = activeAutoPack();
-    if (!pack) {
-      notify('Aucun booster disponible.');
+    const packs = autoSelectedPacks();
+    if (!packs.length) {
+      notify('Sélectionne au moins un booster.');
       return;
     }
-    state.settings.autoPackId = String(pack.id);
 
     await loadPackState(true);
     // On relit le compte juste avant : le chakra et les boosters gratuits ont pu bouger.
@@ -2754,12 +2962,18 @@
       /* on garde les valeurs connues */
     }
 
-    const avail = autoAvailability(pack);
+    const allowChakra = state.settings.autoAllowChakra !== false;
+    const loop = state.settings.autoLoop === true;
+    const total = autoPoolTotal(packs, allowChakra);
     const asked = Math.max(0, Math.round(Number(state.settings.autoCount) || 0));
-    const target = Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, avail.total) : avail.total);
+    const target = loop ? 0 : Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, total) : total);
 
-    if (target < 1) {
-      notify(`Aucun booster ouvrable : il faut ◆ ${fmt(avail.price)} par booster.`);
+    if (!loop && target < 1) {
+      notify(
+        allowChakra
+          ? 'Aucun booster ouvrable : ni don, ni booster gratuit, ni assez de chakra.'
+          : 'Rien à ouvrir sans chakra : décoche « utiliser le chakra » ou attends des boosters offerts.'
+      );
       return;
     }
 
@@ -2768,6 +2982,7 @@
       stop: false,
       opened: 0,
       target,
+      loop,
       spent: 0,
       cardCount: 0,
       cards: [],
@@ -2777,34 +2992,58 @@
       godPacks: 0,
       error: null,
       passNeeded: false,
-      status: `Ouverture de ${target} booster(s)…`,
+      status: loop ? 'Boucle démarrée…' : `Ouverture de ${target} booster(s)…`,
       startedAt: Date.now()
     });
     await persistSettings();
     render();
 
-    await autoOpenLoop(pack, target);
+    await autoOpenLoop();
   }
 
-  async function autoOpenLoop(pack, target) {
+  async function autoOpenLoop() {
     const a = state.autoOpen;
     let rateHits = 0;
 
-    while (!a.stop && a.opened < target) {
-      const avail = autoAvailability(pack);
-      const affordable = Math.max(0, Math.min(target - a.opened, avail.total));
-      if (affordable < 1) {
-        a.status = `Arrêté : plus assez de chakra (${a.opened}/${target}).`;
+    while (!a.stop) {
+      const loop = state.settings.autoLoop === true;
+      a.loop = loop;
+      if (!loop && a.opened >= a.target) break;
+
+      const packs = autoSelectedPacks();
+      if (!packs.length) {
+        a.status = 'Arrêté : plus aucun booster sélectionné.';
         break;
       }
 
-      const batch = Math.min(AUTO_MAX_BATCH, affordable);
-      const cost = autoCost(pack, batch);
+      const pack = pickAutoPack(packs);
+      if (!pack) {
+        if (!loop) {
+          a.status = `Terminé : plus rien à ouvrir (${a.opened} ouvert(s)).`;
+          break;
+        }
+        // En boucle : on patiente et on re-vérifie le compte régulièrement.
+        a.status = `En attente de boosters… ${a.opened} ouvert(s)`;
+        render();
+        await autoSleep(AUTO_IDLE_WAIT);
+        if (a.stop) break;
+        try {
+          const me = await api('/api/me', { timeout: 15000 });
+          if (me && typeof me === 'object') state.user = me;
+        } catch {
+          /* on réessaiera */
+        }
+        await loadPackState(true);
+        continue;
+      }
+
+      const allowChakra = state.settings.autoAllowChakra !== false;
+      const cost = autoCost(pack, 1, allowChakra);
 
       try {
         const data = await api(`/api/packs/${encodeURIComponent(pack.id)}/open-many`, {
           method: 'POST',
-          body: { count: batch, maxChakra: cost.chakra },
+          body: { count: 1, maxChakra: cost.chakra },
           timeout: 45000
         });
 
@@ -2816,9 +3055,12 @@
           break;
         }
 
-        recordAutoResults(pack, results, cost, batch);
+        const pulled = recordAutoResults(pack, results, cost, 1);
         if (data?.user && typeof data.user === 'object') state.user = data.user;
         rateHits = 0;
+
+        // Un bruit par booster ouvert, plus riche si une belle carte tombe.
+        playOpenSound(pulledTier(pulled));
 
         if (data?.stopped) {
           a.status = `Arrêté par le serveur : ${autoStoppedText(data.stopped)}.`;
@@ -2826,13 +3068,17 @@
           break;
         }
 
-        a.status = `Ouverture… ${a.opened}/${target}`;
+        a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · ${packName(pack)}`;
         render();
       } catch (err) {
         const code = err?.code ?? (err?.message === 'pass_required' ? 'pass_required' : null);
         if (code === 'pass_required') {
           a.passNeeded = true;
           a.status = 'Laissez-passer expiré : ouvre un booster une fois sur le site, puis relance.';
+          break;
+        }
+        if ((code === 'insufficient_chakra' || code === 'no_funds') && allowChakra) {
+          a.status = 'Arrêté : chakra insuffisant.';
           break;
         }
         if (code === 'rate_limited' && rateHits < 4) {
@@ -2848,16 +3094,20 @@
         break;
       }
 
-      if (!a.stop && a.opened < target) {
-        const delay = Math.min(10000, Math.max(AUTO_MIN_DELAY, Math.round(Number(state.settings.autoDelayMs) || 1200)));
-        a.status = `Ouverture… ${a.opened}/${target} · pause`;
+      if (!a.stop) {
+        const delay = autoDelay();
+        a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · pause ${(
+          delay / 1000
+        ).toFixed(1)} s`;
         render();
         await autoSleep(delay);
       }
     }
 
     a.running = false;
-    if (!a.error && !a.stop) {
+    if (a.stop) {
+      a.status = `Arrêté : ${a.opened} booster(s), ${a.cardCount} carte(s) pour ◆ ${fmt(a.spent)}.`;
+    } else if (!a.error) {
       a.status = `Terminé : ${a.opened} booster(s), ${a.cardCount} carte(s) pour ◆ ${fmt(a.spent)}.`;
     }
     render();
@@ -2873,6 +3123,11 @@
     render();
   }
 
+  /** Coût estimé de n ouvertures réparties sur une sélection (offerts d'abord, puis le moins cher). */
+  function autoEstimateCost(packs, n, allowChakra = state.settings.autoAllowChakra !== false) {
+    return autoPlan(packs, n, allowChakra);
+  }
+
   function viewAuto() {
     if (!state.user) return loginHTML();
     if (!state.packs && !state.packsLoading) loadPacks();
@@ -2880,22 +3135,28 @@
 
     const a = state.autoOpen;
     const packs = (state.packs ?? []).filter((pack) => pack && !pack.grantOnly);
-    const current = activeAutoPack();
-    if (current && !state.settings.autoPackId) state.settings.autoPackId = String(current.id);
+    const selected = autoSelectedPacks();
+    const selectedIds = new Set(selected.map((pack) => String(pack.id)));
+    const allowChakra = state.settings.autoAllowChakra !== false;
+    const loop = state.settings.autoLoop === true;
 
-    const avail = current ? autoAvailability(current) : null;
+    const total = autoPoolTotal(selected, allowChakra);
     const asked = Math.max(0, Math.round(Number(state.settings.autoCount) || 0));
-    const planned = avail ? Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, avail.total) : avail.total) : 0;
-    const cost = current ? autoCost(current, planned) : null;
+    const planned = loop ? 0 : Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, total) : total);
+    const estimate = autoEstimateCost(selected, loop ? total : planned, allowChakra);
     const pct = a.target > 0 ? Math.min(100, Math.round((a.opened / a.target) * 100)) : 0;
-    const pause = Math.min(10, Math.max(0.3, (Number(state.settings.autoDelayMs) || 1200) / 1000));
+    const base = Math.min(60, Math.max(0.3, (Number(state.settings.autoDelayMs) || 1200) / 1000));
+    const jitter = Math.min(10, Math.max(0, (Number(state.settings.autoJitterMs) || 0) / 1000));
+    const refreshMin = Math.min(120, Math.max(1, Math.round(Number(state.settings.autoRefreshMin) || 10)));
+    const passPack = selected[0] ?? packs[0] ?? null;
 
     const packButton = (pack) => {
-      const left = autoAvailability(pack);
+      const left = autoAvailability(pack, allowChakra);
       const price = toNum(pack.chakraPrice);
-      const isActive = current && String(current.id) === String(pack.id);
+      const isActive = selectedIds.has(String(pack.id));
       return `
-        <button class="kp-autopack ${isActive ? 'is-active' : ''}" type="button" data-act="auto-pack" data-id="${esc(pack.id)}" style="--rc:${esc(pack.color ?? '#ff4d2e')}">
+        <button class="kp-autopack ${isActive ? 'is-active' : ''}" type="button" data-act="auto-pack" data-id="${esc(pack.id)}" style="--rc:${esc(pack.color ?? '#ff4d2e')}" role="checkbox" aria-checked="${isActive}">
+          <span class="kp-autopack-tick">${isActive ? '✓' : '+'}</span>
           <span class="kp-autopack-name">${esc(packName(pack))}</span>
           <span class="kp-autopack-meta">${price != null && price > 0 ? `◆ ${fmt(price)}` : pack.usesFreePacks ? 'gratuit' : '—'}</span>
           <span class="kp-autopack-count">${left.total > 0 ? `${fmt(left.total)} possible(s)` : 'indisponible'}</span>
@@ -2905,64 +3166,111 @@
     return `
       <div class="kp-section" style="margin-top:0">
         <div class="kp-section-title">Auto-Open <span>${
-          a.running ? 'en cours' : a.opened ? 'dernière session' : 'prêt'
+          a.running ? (loop ? 'en boucle' : 'en cours') : a.opened ? 'dernière session' : 'prêt'
         }</span></div>
 
         <div class="kp-explain">
           <p>
-            L'extension ouvre les boosters à ta place, en rafale. Elle utilise d'abord tes
-            <b>boosters gratuits</b>, puis ton <b>chakra</b>, et s'arrête toute seule quand il n'y a plus rien à ouvrir.
+            L'extension ouvre les boosters à ta place, <b>un par un</b>, en tirant au hasard parmi ceux que tu coches.
+            Elle consomme d'abord les <b>boosters offerts</b>, puis — si tu l'autorises — ton <b>chakra</b>.
           </p>
         </div>
 
-        <div class="kp-explain-sub">Type de booster</div>
+        <div class="kp-explain-sub">Boosters à ouvrir <span class="kp-explain-count">${selected.length} sélectionné(s)</span></div>
         ${
           packs.length
             ? `<div class="kp-auto-packs">${packs.map(packButton).join('')}</div>`
             : `<div class="kp-empty">${state.packsLoading ? '<span class="kp-spinner"></span> Chargement…' : 'Aucun booster disponible.'}</div>`
         }
+        ${
+          selected.length > 1
+            ? `<div class="kp-hint">Plusieurs boosters cochés : l'ouverture choisit au hasard à chaque fois.</div>`
+            : ''
+        }
 
-        <div class="kp-explain-sub">Options</div>
+        <div class="kp-explain-sub">Rythme</div>
         <div class="kp-filters">
           <label class="kp-filter">
             <span>Boosters à ouvrir</span>
-            <input class="kp-input" type="number" min="0" max="500" step="1" data-setting="autoCount" value="${state.settings.autoCount}">
+            <input class="kp-input" type="number" min="0" max="5000" step="1" data-setting="autoCount" value="${state.settings.autoCount}" ${loop ? 'disabled' : ''}>
           </label>
           <label class="kp-filter">
             <span>Pause (ms)</span>
-            <input class="kp-input" type="number" min="300" max="10000" step="100" data-setting="autoDelayMs" value="${state.settings.autoDelayMs}">
+            <input class="kp-input" type="number" min="300" max="60000" step="100" data-setting="autoDelayMs" value="${state.settings.autoDelayMs}">
+          </label>
+          <label class="kp-filter">
+            <span>Variance (± ms)</span>
+            <input class="kp-input" type="number" min="0" max="10000" step="100" data-setting="autoJitterMs" value="${state.settings.autoJitterMs}">
+          </label>
+          <label class="kp-filter">
+            <span>Rafraîchir (min)</span>
+            <input class="kp-input" type="number" min="1" max="120" step="1" data-setting="autoRefreshMin" value="${refreshMin}">
           </label>
         </div>
-        <div class="kp-hint">0 = tout ce que le compte permet. Pause ${pause.toFixed(1)} s entre deux fournées.</div>
+        <div class="kp-hint">
+          ${loop ? 'Boucle active : le nombre est ignoré.' : '0 = tout ce que le compte permet.'}
+          Pause ${
+            jitter > 0
+              ? `entre <b>${Math.max(0.3, base - jitter).toFixed(1)} s</b> et <b>${(base + jitter).toFixed(1)} s</b> environ`
+              : `fixe de <b>${base.toFixed(1)} s</b>`
+          }.
+          Compte rafraîchi toutes les ${refreshMin} min.
+        </div>
 
-        <label class="kp-check">
-          <input type="checkbox" data-setting="autoStopRare" ${state.settings.autoStopRare ? 'checked' : ''}>
-          <span>S'arrêter dès qu'une Légendaire ou Mythique sort</span>
-        </label>
+        <div class="kp-auto-checks">
+          <label class="kp-check">
+            <input type="checkbox" data-setting="autoLoop" ${loop ? 'checked' : ''}>
+            <span>Ouvrir en boucle <small>ne s'arrête pas, attend les boosters suivants</small></span>
+          </label>
+          <label class="kp-check">
+            <input type="checkbox" data-setting="autoAllowChakra" ${allowChakra ? 'checked' : ''}>
+            <span>Utiliser mon chakra <small>sinon seulement les boosters offerts</small></span>
+          </label>
+          <label class="kp-check">
+            <input type="checkbox" data-setting="autoSound" ${state.settings.autoSound !== false ? 'checked' : ''}>
+            <span>Bruit à chaque booster <small>carillon, plus aigu sur une belle carte</small></span>
+          </label>
+          <label class="kp-check">
+            <input type="checkbox" data-setting="autoStopRare" ${state.settings.autoStopRare ? 'checked' : ''}>
+            <span>S'arrêter sur Légendaire / Mythique</span>
+          </label>
+        </div>
 
         ${
-          current && cost
+          selected.length
             ? `<div class="kp-auto-summary">
-                 <div><span>Prévu</span><b>${fmt(planned)} booster(s)</b></div>
-                 <div><span>Gratuits utilisés</span><b>${fmt(cost.grants + cost.free + cost.bonus)}</b></div>
-                 <div><span>Chakra max</span><b>◆ ${fmt(cost.chakra)}</b></div>
-               </div>`
-            : ''
+                 <div><span>Ouvrables</span><b>${fmt(total)}</b></div>
+                 <div><span>Offerts</span><b>${fmt(estimate.grants + estimate.free)}</b></div>
+                 <div><span>Chakra max</span><b>◆ ${fmt(estimate.chakra)}</b></div>
+               </div>
+               ${
+                 estimate.missing > 0
+                   ? `<div class="kp-hint" style="color:var(--kp-bad)">${fmt(
+                       estimate.missing
+                     )} booster(s) de la sélection ne sont pas ouvrables (chakra bloqué ou limite atteinte).</div>`
+                   : ''
+               }`
+            : `<div class="kp-hint">Coche au moins un booster pour pouvoir démarrer.</div>`
         }
 
         <div class="kp-toolbar" style="margin-top:10px">
           ${
             a.running
               ? `<button class="kp-btn is-ghost" type="button" data-act="auto-stop">Arrêter</button>`
-              : `<button class="kp-btn is-primary" type="button" data-act="auto-start" ${packs.length ? '' : 'disabled'}>Démarrer l'auto-open</button>`
+              : `<button class="kp-btn is-primary" type="button" data-act="auto-start" ${selected.length ? '' : 'disabled'}>Démarrer${
+                  loop ? ' la boucle' : " l'auto-open"
+                }</button>`
           }
-          <button class="kp-btn" type="button" data-act="auto-refresh" ${a.running ? 'disabled' : ''}>Rafraîchir le compte</button>
+          <button class="kp-btn" type="button" data-act="auto-refresh" ${a.running ? 'disabled' : ''}>Rafraîchir</button>
+          <button class="kp-btn is-ghost" type="button" data-act="auto-sound-test" title="Tester le son">♪</button>
         </div>
 
         ${
           a.running || a.opened
             ? `<div class="kp-auto-progress">
-                 <div class="kp-progress"><i style="width:${pct}%"></i></div>
+                 <div class="kp-progress ${a.running && loop ? 'is-loop' : ''}"><i style="width:${
+                   a.running && loop ? 100 : pct
+                 }%"></i></div>
                  <div class="kp-hint">${esc(a.status)}</div>
                </div>`
             : a.status
@@ -2971,13 +3279,13 @@
         }
 
         ${
-          a.passNeeded && current
+          a.passNeeded && passPack
             ? `<div class="kp-alert is-bad" style="margin-top:10px">
                  <b>Laissez-passer expiré</b><br>
                  Le site exige un laissez-passer pour ouvrir des boosters. Ouvre <b>un</b> booster à la main,
                  reviens ici, puis relance l'auto-open.
                  <div class="kp-toolbar" style="margin-top:6px">
-                   <a class="kp-btn" href="https://kyara.games/ouvrir/${encodeURIComponent(current.id)}" target="_blank" rel="noopener">Ouvrir sur le site ↗</a>
+                   <a class="kp-btn" href="https://kyara.games/ouvrir/${encodeURIComponent(passPack.id)}" target="_blank" rel="noopener">Ouvrir sur le site ↗</a>
                  </div>
                </div>`
             : ''
@@ -3008,16 +3316,18 @@
         ${
           a.best.length
             ? `<div class="kp-explain-sub">Meilleures trouvailles</div>
-               <div class="kp-top-cards">
+               <div class="kp-best-cards">
                  ${a.best
-                   .map(
-                     (card) => `
-                   <div class="kp-top-card" data-act="open-card" data-id="${esc(card.id)}" title="${esc(card.name)} · ${esc(rarityInfo(card.rarity).label)}">
+                   .map((card) => {
+                     const info = rarityInfo(card.rarity);
+                     return `
+                   <div class="kp-best-card" style="--rc:${info.color}" data-act="open-card" data-id="${esc(
+                       card.id
+                     )}" title="${esc(card.name)} · ${esc(info.label)}">
                      <img src="${esc(imgSrc(card))}" alt="${esc(card.name)}" loading="lazy">
-                     <span>${esc(card.name)}</span>
-                     <b style="color:${rarityInfo(card.rarity).color}">${esc(rarityInfo(card.rarity).label)}</b>
-                   </div>`
-                   )
+                     <b>${esc(info.label)}</b>
+                   </div>`;
+                   })
                    .join('')}
                </div>`
             : ''
@@ -3956,12 +4266,18 @@
       case 'auto-pack': {
         const id = el.getAttribute('data-id');
         if (!id) return;
-        state.settings.autoPackId = String(id);
+        const key = String(id);
+        const current = (state.settings.autoPackIds ?? []).map(String);
+        state.settings.autoPackIds = current.includes(key)
+          ? current.filter((value) => value !== key)
+          : [...current, key];
+        state.settings.autoPackPicked = true;
         persistSettings();
         render();
         break;
       }
       case 'auto-start':
+        primeAudio();
         startAutoOpen();
         break;
       case 'auto-stop':
@@ -3969,7 +4285,12 @@
         break;
       case 'auto-refresh':
         loadPackState(true);
-        refreshLight();
+        autoRefreshTick(true);
+        break;
+      case 'auto-sound-test':
+        primeAudio();
+        playOpenSound(2);
+        notify('Son de test joué.');
         break;
       case 'packs-refresh':
         loadPacks(true);
@@ -4107,8 +4428,13 @@
       state.settings[key] = key === 'durationHours' ? Number(value) : value;
       if (key === 'dealsPages') state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(Number(value) || 6)));
       if (key === 'dealsMinPct') state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(Number(value) || 0)));
+      if (key === 'autoCount') state.settings.autoCount = Math.min(5000, Math.max(0, Math.round(Number(value) || 0)));
+      if (key === 'autoDelayMs') state.settings.autoDelayMs = Math.min(60000, Math.max(300, Math.round(Number(value) || 1200)));
+      if (key === 'autoJitterMs') state.settings.autoJitterMs = Math.min(10000, Math.max(0, Math.round(Number(value) || 0)));
+      if (key === 'autoRefreshMin') state.settings.autoRefreshMin = Math.min(120, Math.max(1, Math.round(Number(value) || 10)));
       persistSettings();
       if (key === 'ttlH') schedulePriceRun();
+      if (key === 'autoRefreshMin') startAutoRefreshLoop();
       if (key === 'dealsSort' || key === 'dealsPages' || key === 'dealsMinPct') {
         // Ces réglages changent la requête : on relance le scan si un scan a déjà eu lieu.
         if (state.deals !== null) scanMarket();
@@ -4268,14 +4594,22 @@
       filteredDupes,
       searchProfile,
       loadProfile,
-      resetProfile
+      resetProfile,
+      autoRefreshTick
     };
   }
 
   boot();
 
   setInterval(() => {
-    if (state.open && state.user && !state.loading && !state.priceRun.running && !state.sell?.running) {
+    if (
+      state.open &&
+      state.user &&
+      !state.loading &&
+      !state.priceRun.running &&
+      !state.sell?.running &&
+      !state.autoOpen.running
+    ) {
       refreshLight();
     }
   }, 90000);
