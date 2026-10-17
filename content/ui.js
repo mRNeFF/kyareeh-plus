@@ -44,8 +44,7 @@
     autoPackIds: [],
     autoPackPicked: false,
     autoCount: 10,
-    autoSeriesCount: 10,
-    autoMaxDelaySec: 600,
+    autoMaxPerBoosterMin: 10,
     autoLoop: false,
     autoSound: true,
     autoAllowChakra: true,
@@ -584,7 +583,7 @@
 
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
-    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours', 'dealsPages', 'dealsMinPct', 'autoCount', 'autoSeriesCount', 'autoMaxDelaySec']) {
+    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours', 'dealsPages', 'dealsMinPct', 'autoCount', 'autoMaxPerBoosterMin']) {
       const value = Number(state.settings[key]);
       state.settings[key] = Number.isFinite(value) ? value : DEFAULT_SETTINGS[key];
     }
@@ -598,19 +597,14 @@
     state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(state.settings.dealsPages)));
     state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(state.settings.dealsMinPct)));
     state.settings.autoCount = Math.min(5000, Math.max(0, Math.round(state.settings.autoCount ?? DEFAULT_SETTINGS.autoCount)));
-    state.settings.autoSeriesCount = Math.min(
-      1000,
-      Math.max(1, Math.round(state.settings.autoSeriesCount ?? DEFAULT_SETTINGS.autoSeriesCount))
+    state.settings.autoMaxPerBoosterMin = Math.min(
+      60,
+      Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin ?? DEFAULT_SETTINGS.autoMaxPerBoosterMin))
     );
-    state.settings.autoMaxDelaySec = Math.min(
-      3600,
-      Math.max(10, Math.round(state.settings.autoMaxDelaySec ?? DEFAULT_SETTINGS.autoMaxDelaySec))
-    );
-    // Remplace l'ancienne « fenêtre de série » (5 min) : le plafond est désormais un délai par booster.
-    delete state.settings.autoSeriesSec;
-    // Anciens réglages de pause fixe + variance : remplacés par le système de séries.
-    delete state.settings.autoDelayMs;
-    delete state.settings.autoJitterMs;
+    // Anciens réglages (pause fixe, variance, séries) : remplacés par la formule min/max.
+    for (const stale of ['autoDelayMs', 'autoJitterMs', 'autoSeriesCount', 'autoSeriesSec', 'autoMaxDelaySec']) {
+      delete state.settings[stale];
+    }
     state.settings.autoRefreshMin = Math.min(
       120,
       Math.max(1, Math.round(state.settings.autoRefreshMin ?? DEFAULT_SETTINGS.autoRefreshMin))
@@ -2651,6 +2645,7 @@
   /* ------------------------------------------------------------------ */
 
   const AUTO_MIN_GAP = 10000;
+  const AUTO_REMAINING_CAP = 9;
   const AUTO_MAX_RUN = 5000;
   const AUTO_IDLE_WAIT = 30000;
   const AUTO_REFRESH_DEFAULT = 10;
@@ -2795,62 +2790,26 @@
   }
 
   /**
-   * Cadence des ouvertures.
-   *
-   * « Série » = simple compteur de paquets : un groupe de N boosters (10 par défaut) qu'on
-   * ouvre en respectant un budget de temps. Ce budget vaut N × délai maximum, parce que
-   * chaque booster a droit à son propre délai max (10 min par défaut). Une fois la série
-   * terminée, une nouvelle série démarre avec un budget neuf : c'est juste une façon de
-   * remettre le compteur à zéro, ça ne change rien à ta façon d'ouvrir.
-   *
-   * Entre deux boosters, le délai est tiré au hasard entre 10 s et le délai maximum,
-   * en gardant toujours 10 s de marge pour chaque booster restant : on ne peut donc
-   * jamais dépasser le budget de la série, et on ne gaspille pas de temps.
+   * Cadence des ouvertures : entre deux boosters, délai tiré au hasard entre
+   * 10 s (minimum) et « minutes par booster × boosters restants » (maximum),
+   * avec un plafond de 9 boosters restants pris en compte.
+   * En boucle, on ne connaît pas la fin : le maximum reste donc au plafond haut (9).
    */
-  function autoSeriesPlan() {
-    const size = Math.min(1000, Math.max(1, Math.round(Number(state.settings.autoSeriesCount) || 10)));
-    const maxDelaySec = Math.min(
-      3600,
-      Math.max(AUTO_MIN_GAP / 1000, Math.round(Number(state.settings.autoMaxDelaySec) || 600))
-    );
-    return { size, maxDelayMs: maxDelaySec * 1000, maxDelaySec };
-  }
-
-  function startAutoSeries() {
+  function autoDelayRange() {
+    const perBoosterMs =
+      Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10)) * 60000;
     const a = state.autoOpen;
-    const plan = autoSeriesPlan();
-    a.seriesSize = plan.size;
-    a.seriesLeft = plan.size;
-    a.seriesDone = 0;
-    // Budget de la série : chaque booster a droit à son délai max.
-    a.seriesDeadline = Date.now() + plan.size * plan.maxDelayMs;
-    a.seriesIndex = (a.seriesIndex ?? 0) + 1;
+    const left = a.loop
+      ? AUTO_REMAINING_CAP
+      : Math.max(1, Math.min(AUTO_REMAINING_CAP, (a.target ?? 0) - (a.opened ?? 0)));
+    const max = Math.max(AUTO_MIN_GAP, perBoosterMs * left);
+    return { min: AUTO_MIN_GAP, max, remaining: left, perBoosterMs };
   }
 
-  /** Délai tiré au hasard pour le prochain booster, borné par le budget de la série. */
+  /** Délai aléatoire avant le prochain booster. */
   function autoDelay() {
-    const a = state.autoOpen;
-    const plan = autoSeriesPlan();
-    if (!a.seriesDeadline) startAutoSeries();
-
-    const remaining = Math.max(1, a.seriesLeft ?? 1);
-    const now = Date.now();
-    // Temps encore disponible, en réservant 10 s pour chacun des boosters suivants.
-    const budget = (a.seriesDeadline ?? now) - now - AUTO_MIN_GAP * (remaining - 1);
-    const cap = Math.min(plan.maxDelayMs, Math.max(AUTO_MIN_GAP, budget));
-
-    if (cap <= AUTO_MIN_GAP) return AUTO_MIN_GAP;
-    return Math.round(AUTO_MIN_GAP + Math.random() * (cap - AUTO_MIN_GAP));
-  }
-
-  /** Consomme un booster de la série ; on enchaîne sur une nouvelle fenêtre si elle est finie. */
-  function advanceAutoSeries() {
-    const a = state.autoOpen;
-    a.seriesLeft = Math.max(0, (a.seriesLeft ?? 1) - 1);
-    a.seriesDone = (a.seriesDone ?? 0) + 1;
-    // Série terminée : nouvelle fenêtre tout de suite, sinon le délai serait calculé
-    // sur le temps restant de l'ancienne fenêtre (et pourrait être énorme).
-    if (a.seriesLeft <= 0) startAutoSeries();
+    const { min, max } = autoDelayRange();
+    return Math.round(min + Math.random() * (max - min));
   }
 
   /* --- Son ---------------------------------------------------------- */
@@ -3063,12 +3022,8 @@
       status: loop ? 'Boucle démarrée…' : `Ouverture de ${target} booster(s)…`,
       startedAt: Date.now(),
       nextGapMs: 0,
-      nextAt: 0,
-      seriesIndex: 0,
-      seriesLeft: 0,
-      seriesDone: 0
+      nextAt: 0
     });
-    startAutoSeries();
     await persistSettings();
     render();
 
@@ -3143,7 +3098,6 @@
         }
 
         a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · ${packName(pack)}`;
-        advanceAutoSeries();
         render();
       } catch (err) {
         const code = err?.code ?? (err?.message === 'pass_required' ? 'pass_required' : null);
@@ -3170,15 +3124,13 @@
       }
 
       if (!a.stop && (a.loop || a.opened < a.target)) {
-        // Délai tiré au hasard dans la fenêtre restante de la série (jamais moins de 10 s).
+        // 10 s minimum, 10 min × boosters restants (plafond 9) au maximum.
         const delay = autoDelay();
         a.nextGapMs = delay;
-        const size = a.seriesSize ?? 10;
-        // Position du booster qu'on attend (1 = premier de la série).
-        const nextPos = Math.min(size, (a.seriesDone ?? 0) + 1);
-        a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · série ${nextPos}/${size} · prochain dans ${fmtWait(
+        const range = autoDelayRange();
+        a.status = `Ouverture… ${a.opened}${a.target ? `/${a.target}` : ''} · prochain dans ${fmtWait(
           delay
-        )}`;
+        )} (max ${fmtWait(range.max)})`;
         // Le compte à rebours doit exister avant le rendu, sinon le bloc n'apparaît pas.
         a.nextAt = Date.now() + delay;
         render();
@@ -3229,17 +3181,14 @@
     const planned = loop ? 0 : Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, total) : total);
     const estimate = autoEstimateCost(selected, loop ? total : planned, allowChakra);
     const pct = a.target > 0 ? Math.min(100, Math.round((a.opened / a.target) * 100)) : 0;
-    const seriesCount = Math.max(1, Math.round(Number(state.settings.autoSeriesCount) || 10));
-    const maxDelaySec = Math.min(3600, Math.max(10, Math.round(Number(state.settings.autoMaxDelaySec) || 600)));
-    const maxDelayMin = Math.round((maxDelaySec / 60) * 10) / 10;
-    const maxDelayLabel =
-      maxDelaySec < 60
-        ? `${maxDelaySec} s`
-        : maxDelaySec % 60 === 0
-          ? `${maxDelaySec / 60} min`
-          : `${(maxDelaySec / 60).toFixed(1)} min`;
-    // Budget d'une série : chaque booster a droit à son délai maximum.
-    const budgetMin = Math.round((seriesCount * maxDelaySec) / 60);
+    const perBoosterMin = Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10));
+    const points = loop
+      ? AUTO_REMAINING_CAP
+      : Math.max(
+          1,
+          Math.min(AUTO_REMAINING_CAP, a.running ? (a.target ?? 0) - (a.opened ?? 0) : planned)
+        );
+    const maxNowLabel = fmtWait(perBoosterMin * 60000 * points);
     const refreshMin = Math.min(120, Math.max(1, Math.round(Number(state.settings.autoRefreshMin) || 10)));
     const passPack = selected[0] ?? packs[0] ?? null;
 
@@ -3288,12 +3237,8 @@
             <input class="kp-input" type="number" min="0" max="5000" step="1" data-setting="autoCount" value="${state.settings.autoCount}" ${loop ? 'disabled' : ''}>
           </label>
           <label class="kp-filter">
-            <span>Boosters par série</span>
-            <input class="kp-input" type="number" min="1" max="1000" step="1" data-setting="autoSeriesCount" value="${state.settings.autoSeriesCount}">
-          </label>
-          <label class="kp-filter">
-            <span>Délai max (min)</span>
-            <input class="kp-input" type="number" min="0.2" max="60" step="0.5" data-setting="autoMaxDelayMin" value="${maxDelayMin}">
+            <span>Minutes par booster</span>
+            <input class="kp-input" type="number" min="0.2" max="60" step="0.5" data-setting="autoMaxPerBoosterMin" value="${perBoosterMin}">
           </label>
           <label class="kp-filter">
             <span>Rafraîchir (min)</span>
@@ -3301,11 +3246,8 @@
           </label>
         </div>
         <div class="kp-hint">
-          Entre deux boosters : délai aléatoire entre <b>10 s</b> et <b>${maxDelayLabel}</b>.
-          Une « série » n'est qu'un compteur de sécurité : <b>${seriesCount} booster(s)</b> disposent
-          chacun de ${maxDelayLabel}, soit <b>${budgetMin} min</b> au total. Si tu prends du retard sur ce
-          budget, le plafond se resserre ; quand la série est finie, un nouveau budget démarre.
-          ${loop ? 'Boucle active : le nombre total est ignoré.' : 'Total 0 = tout ce que le compte permet.'}
+          <b>Minimum 10 s</b>, <b>maximum ${perBoosterMin} min × boosters restants</b> (jusqu'à ${AUTO_REMAINING_CAP}).
+          ${loop ? `Boucle active : entre 10 s et ${fmtWait(perBoosterMin * 60000 * AUTO_REMAINING_CAP)} par ouverture, jusqu'à ce que tu cliques sur Arrêter.` : `Ici : entre 10 s et ${maxNowLabel} par ouverture.`}
           Compte rafraîchi toutes les ${refreshMin} min.
         </div>
 
@@ -4526,12 +4468,8 @@
       if (key === 'dealsPages') state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(Number(value) || 6)));
       if (key === 'dealsMinPct') state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(Number(value) || 0)));
       if (key === 'autoCount') state.settings.autoCount = Math.min(5000, Math.max(0, Math.round(Number(value) || 0)));
-      if (key === 'autoSeriesCount') {
-        state.settings.autoSeriesCount = Math.min(1000, Math.max(1, Math.round(Number(value) || 10)));
-      }
-      if (key === 'autoMaxDelayMin') {
-        const minutes = Math.min(60, Math.max(0.2, Number(value) || 10));
-        state.settings.autoMaxDelaySec = Math.round(minutes * 60);
+      if (key === 'autoMaxPerBoosterMin') {
+        state.settings.autoMaxPerBoosterMin = Math.min(60, Math.max(0.2, Number(value) || 10));
       }
       if (key === 'autoRefreshMin') state.settings.autoRefreshMin = Math.min(120, Math.max(1, Math.round(Number(value) || 10)));
       persistSettings();
@@ -4699,7 +4637,7 @@
       resetProfile,
       autoRefreshTick,
       autoDelay,
-      startAutoSeries,
+      autoDelayRange,
       startAutoOpen,
       stopAutoOpen
     };
