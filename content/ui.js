@@ -40,7 +40,11 @@
     dealsSort: 'price_asc',
     dealsPages: 6,
     dealsMinPct: 10,
-    dealsType: 'all'
+    dealsType: 'all',
+    autoPackId: '',
+    autoCount: 10,
+    autoDelayMs: 1200,
+    autoStopRare: false
   };
 
   // Tris acceptés par /api/market/listings (valeurs validées côté serveur).
@@ -91,10 +95,11 @@
     new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
 
   class ApiError extends Error {
-    constructor(status, message) {
+    constructor(status, message, code = null) {
       super(message);
       this.name = 'ApiError';
       this.status = status;
+      this.code = code;
     }
   }
 
@@ -111,7 +116,7 @@
   };
 
   function friendlyError(err) {
-    const code = err?.message;
+    const code = err?.code || err?.message;
     return ERROR_HINTS[code] || code || 'Erreur inconnue';
   }
 
@@ -165,6 +170,25 @@
     packQuery: '',
     packTarget: null,
     packSearching: false,
+    packState: null,
+    packStateLoading: false,
+    autoOpen: {
+      running: false,
+      stop: false,
+      opened: 0,
+      target: 0,
+      spent: 0,
+      cardCount: 0,
+      cards: [],
+      best: [],
+      counts: {},
+      golden: 0,
+      godPacks: 0,
+      error: null,
+      status: '',
+      passNeeded: false,
+      startedAt: 0
+    },
     reloadArmed: false,
     reloadTimer: null,
     profile: {
@@ -501,9 +525,17 @@
       pushDebug({ method, path, status: res.status, ms, ok: res.ok });
       if (!res.ok) {
         let message = `HTTP ${res.status}`;
-        if (data && typeof data === 'object') message = data.message || data.error || message;
-        else if (typeof data === 'string' && data.trim()) message = data.trim().slice(0, 180);
-        throw new ApiError(res.status, message);
+        let code = null;
+        if (data && typeof data === 'object') {
+          message = data.message || data.error || message;
+          code =
+            typeof data.code === 'string'
+              ? data.code
+              : typeof data.error === 'string'
+                ? data.error
+                : null;
+        } else if (typeof data === 'string' && data.trim()) message = data.trim().slice(0, 180);
+        throw new ApiError(res.status, message, code);
       }
       return data;
     } catch (err) {
@@ -535,7 +567,7 @@
 
     const saved = await storageGet(SETTINGS_KEY, {});
     state.settings = { ...DEFAULT_SETTINGS, ...(saved || {}) };
-    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours', 'dealsPages', 'dealsMinPct']) {
+    for (const key of ['ttlH', 'gapMs', 'maxBatch', 'discountPct', 'auctionPct', 'buyoutPct', 'durationHours', 'dealsPages', 'dealsMinPct', 'autoCount', 'autoDelayMs']) {
       const value = Number(state.settings[key]);
       state.settings[key] = Number.isFinite(value) ? value : DEFAULT_SETTINGS[key];
     }
@@ -548,6 +580,10 @@
     state.settings.dealsSort = DEAL_SORTS.some(([value]) => value === state.settings.dealsSort) ? state.settings.dealsSort : 'price_asc';
     state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(state.settings.dealsPages)));
     state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(state.settings.dealsMinPct)));
+    state.settings.autoCount = Math.min(500, Math.max(0, Math.round(state.settings.autoCount ?? DEFAULT_SETTINGS.autoCount)));
+    state.settings.autoDelayMs = Math.min(10000, Math.max(300, Math.round(state.settings.autoDelayMs ?? DEFAULT_SETTINGS.autoDelayMs)));
+    state.settings.autoPackId = String(state.settings.autoPackId || '');
+    state.settings.autoStopRare = Boolean(state.settings.autoStopRare);
     const cached = await storageGet(PRICE_KEY, {});
     if (cached && typeof cached === 'object') {
       state.prices = cached.prices && typeof cached.prices === 'object' ? cached.prices : cached;
@@ -1428,6 +1464,7 @@
       ['dupes', dupes ? `Doublons (${dupes})` : 'Doublons'],
       ['market', 'Marché'],
       ['cards', 'Cartes'],
+      ['auto', 'Auto-Open'],
       ['settings', 'Réglages'],
       ['debug', 'Debug']
     ];
@@ -1464,6 +1501,7 @@
       dupes: viewDupes,
       market: viewMarket,
       cards: viewCards,
+      auto: viewAuto,
       settings: viewSettings,
       debug: viewDebug
     }[state.tab] ?? viewAccount;
@@ -2532,6 +2570,479 @@
     `;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Auto-Open                                                           */
+  /* ------------------------------------------------------------------ */
+
+  const AUTO_MIN_DELAY = 300;
+  const AUTO_MAX_BATCH = 10;
+  const AUTO_MAX_RUN = 500;
+
+  function activeAutoPack() {
+    const id = String(state.settings.autoPackId || '');
+    const packs = state.packs ?? [];
+    return packs.find((p) => String(p.id) === id) ?? packs.find((p) => !p.grantOnly) ?? null;
+  }
+
+  async function loadPackState(force = false) {
+    if (state.packStateLoading) return;
+    if (state.packState && !force) return;
+    state.packStateLoading = true;
+    try {
+      const data = await api('/api/me/packs', { timeout: 20000 });
+      state.packState = data && typeof data === 'object' ? data : {};
+    } catch {
+      state.packState = state.packState ?? {};
+    } finally {
+      state.packStateLoading = false;
+    }
+    render();
+  }
+
+  /** Combien de boosters de ce type le compte peut ouvrir maintenant. */
+  function autoAvailability(pack) {
+    const price = Math.max(0, toNum(pack?.chakraPrice) ?? 0);
+    const grants = Math.max(0, toNum(state.packState?.grants?.[String(pack?.id)]) ?? 0);
+    const free = pack?.usesFreePacks
+      ? Math.max(0, toNum(state.user?.freePacks) ?? 0) + Math.max(0, toNum(state.user?.bonusPacks) ?? 0)
+      : 0;
+    const chakra = Math.max(0, toNum(state.user?.chakra) ?? 0);
+    const paid = price > 0 ? Math.floor(chakra / price) : 0;
+    let total = grants + free + paid;
+
+    // Limite quotidienne éventuelle du booster.
+    const limitLeft = toNum(state.packState?.limits?.[String(pack?.id)]?.left);
+    if (limitLeft != null) total = Math.min(total, grants + Math.max(0, limitLeft));
+
+    return { price, grants, free, chakra, paid, total };
+  }
+
+  /** Répartition du coût de n ouvertures : dons, gratuits, puis chakra. */
+  function autoCost(pack, n) {
+    let left = Math.max(0, Math.round(n));
+    const grants = Math.max(0, toNum(state.packState?.grants?.[String(pack?.id)]) ?? 0);
+    const grantUse = Math.min(left, grants);
+    left -= grantUse;
+
+    let freeUse = 0;
+    let bonusUse = 0;
+    if (pack?.usesFreePacks) {
+      const free = Math.max(0, toNum(state.user?.freePacks) ?? 0);
+      freeUse = Math.min(left, free);
+      left -= freeUse;
+      const bonus = Math.max(0, toNum(state.user?.bonusPacks) ?? 0);
+      bonusUse = Math.min(left, bonus);
+      left -= bonusUse;
+    }
+
+    const price = Math.max(0, toNum(pack?.chakraPrice) ?? 0);
+    return { grants: grantUse, free: freeUse, bonus: bonusUse, paid: left, chakra: left * price };
+  }
+
+  /** Applique localement ce que le serveur vient de consommer. */
+  function consumeAutoCost(pack, cost) {
+    if (state.packState?.grants && typeof state.packState.grants === 'object') {
+      const key = String(pack?.id);
+      state.packState.grants[key] = Math.max(0, (toNum(state.packState.grants[key]) ?? 0) - cost.grants);
+    }
+    if (cost.free || cost.bonus) {
+      state.user = {
+        ...(state.user ?? {}),
+        freePacks: Math.max(0, (toNum(state.user?.freePacks) ?? 0) - cost.free),
+        bonusPacks: Math.max(0, (toNum(state.user?.bonusPacks) ?? 0) - cost.bonus)
+      };
+    }
+    if (cost.chakra) {
+      state.user = { ...(state.user ?? {}), chakra: Math.max(0, (toNum(state.user?.chakra) ?? 0) - cost.chakra) };
+    }
+  }
+
+  function autoCard(raw) {
+    const card = raw?.character ?? raw?.card ?? raw;
+    const id = card?.id ?? card?.characterId ?? raw?.characterId ?? raw?.id ?? '';
+    const known = state.characters.get(String(id)) ?? {};
+    return {
+      id: String(id),
+      name: card?.name ?? known.name ?? `Carte #${id || '?'}`,
+      rarity: String(card?.rarity ?? known.rarity ?? 'C').toUpperCase(),
+      image: card?.image ?? known.image ?? '',
+      series: card?.series ?? known.series ?? ''
+    };
+  }
+
+  function recordAutoResults(pack, results, cost, requested) {
+    const a = state.autoOpen;
+    a.opened += results.length || requested;
+    a.spent += cost.chakra;
+    consumeAutoCost(pack, cost);
+
+    const pulled = [];
+    for (const result of results) {
+      if (result?.golden) a.golden += 1;
+      if (result?.godPack) a.godPacks += 1;
+      const list = Array.isArray(result?.cards) ? result.cards : [];
+      for (const raw of list) pulled.push(autoCard(raw));
+    }
+
+    a.cardCount += pulled.length;
+    for (const card of pulled) a.counts[card.rarity] = (a.counts[card.rarity] ?? 0) + 1;
+
+    if (pulled.length) {
+      a.cards = [...pulled.slice().reverse(), ...a.cards].slice(0, 60);
+      a.best = [...a.cards]
+        .sort((x, y) => RARITY_ORDER.indexOf(y.rarity) - RARITY_ORDER.indexOf(x.rarity))
+        .slice(0, 8);
+    }
+
+    if (state.settings.autoStopRare && pulled.length) {
+      const top = pulled.reduce((rank, card) => Math.max(rank, RARITY_ORDER.indexOf(card.rarity)), -1);
+      if (top >= RARITY_ORDER.indexOf('L')) {
+        const found = pulled.find((card) => RARITY_ORDER.indexOf(card.rarity) === top);
+        a.stop = true;
+        a.status = `Arrêté : ${rarityInfo(found?.rarity).label} trouvée — ${found?.name ?? 'carte'} !`;
+      }
+    }
+  }
+
+  function autoSleep(ms) {
+    return new Promise((resolve) => {
+      const step = 100;
+      let elapsed = 0;
+      const timer = setInterval(() => {
+        elapsed += step;
+        if (elapsed >= ms || state.autoOpen.stop) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, step);
+    });
+  }
+
+  function autoStoppedText(stopped) {
+    const code = String(stopped?.code ?? stopped?.reason ?? '');
+    const map = {
+      guest_limit: 'compte invité : connecte-toi avec Discord',
+      no_funds: 'chakra insuffisant',
+      insufficient_chakra: 'chakra insuffisant',
+      rate_limited: 'trop de requêtes',
+      limit: 'limite atteinte',
+      daily_limit: 'limite quotidienne atteinte',
+      no_packs: 'plus de boosters disponibles',
+      pass_required: 'laissez-passer expiré'
+    };
+    return map[code] || code || 'raison inconnue';
+  }
+
+  async function startAutoOpen() {
+    const a = state.autoOpen;
+    if (a.running) return;
+
+    if (!state.packs?.length) await loadPacks();
+    const pack = activeAutoPack();
+    if (!pack) {
+      notify('Aucun booster disponible.');
+      return;
+    }
+    state.settings.autoPackId = String(pack.id);
+
+    await loadPackState(true);
+    // On relit le compte juste avant : le chakra et les boosters gratuits ont pu bouger.
+    try {
+      const me = await api('/api/me', { timeout: 15000 });
+      if (me && typeof me === 'object') state.user = me;
+    } catch {
+      /* on garde les valeurs connues */
+    }
+
+    const avail = autoAvailability(pack);
+    const asked = Math.max(0, Math.round(Number(state.settings.autoCount) || 0));
+    const target = Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, avail.total) : avail.total);
+
+    if (target < 1) {
+      notify(`Aucun booster ouvrable : il faut ◆ ${fmt(avail.price)} par booster.`);
+      return;
+    }
+
+    Object.assign(a, {
+      running: true,
+      stop: false,
+      opened: 0,
+      target,
+      spent: 0,
+      cardCount: 0,
+      cards: [],
+      best: [],
+      counts: {},
+      golden: 0,
+      godPacks: 0,
+      error: null,
+      passNeeded: false,
+      status: `Ouverture de ${target} booster(s)…`,
+      startedAt: Date.now()
+    });
+    await persistSettings();
+    render();
+
+    await autoOpenLoop(pack, target);
+  }
+
+  async function autoOpenLoop(pack, target) {
+    const a = state.autoOpen;
+    let rateHits = 0;
+
+    while (!a.stop && a.opened < target) {
+      const avail = autoAvailability(pack);
+      const affordable = Math.max(0, Math.min(target - a.opened, avail.total));
+      if (affordable < 1) {
+        a.status = `Arrêté : plus assez de chakra (${a.opened}/${target}).`;
+        break;
+      }
+
+      const batch = Math.min(AUTO_MAX_BATCH, affordable);
+      const cost = autoCost(pack, batch);
+
+      try {
+        const data = await api(`/api/packs/${encodeURIComponent(pack.id)}/open-many`, {
+          method: 'POST',
+          body: { count: batch, maxChakra: cost.chakra },
+          timeout: 45000
+        });
+
+        const results = Array.isArray(data?.results) ? data.results : [];
+        if (!results.length) {
+          a.status = data?.stopped
+            ? `Arrêté par le serveur : ${autoStoppedText(data.stopped)}.`
+            : 'Le serveur n’a renvoyé aucune carte.';
+          break;
+        }
+
+        recordAutoResults(pack, results, cost, batch);
+        if (data?.user && typeof data.user === 'object') state.user = data.user;
+        rateHits = 0;
+
+        if (data?.stopped) {
+          a.status = `Arrêté par le serveur : ${autoStoppedText(data.stopped)}.`;
+          render();
+          break;
+        }
+
+        a.status = `Ouverture… ${a.opened}/${target}`;
+        render();
+      } catch (err) {
+        const code = err?.code ?? (err?.message === 'pass_required' ? 'pass_required' : null);
+        if (code === 'pass_required') {
+          a.passNeeded = true;
+          a.status = 'Laissez-passer expiré : ouvre un booster une fois sur le site, puis relance.';
+          break;
+        }
+        if (code === 'rate_limited' && rateHits < 4) {
+          rateHits += 1;
+          const wait = 4000 * rateHits;
+          a.status = `Trop de requêtes : pause ${Math.round(wait / 1000)} s…`;
+          render();
+          await autoSleep(wait);
+          continue;
+        }
+        a.error = friendlyError(err);
+        a.status = `Arrêté : ${a.error}`;
+        break;
+      }
+
+      if (!a.stop && a.opened < target) {
+        const delay = Math.min(10000, Math.max(AUTO_MIN_DELAY, Math.round(Number(state.settings.autoDelayMs) || 1200)));
+        a.status = `Ouverture… ${a.opened}/${target} · pause`;
+        render();
+        await autoSleep(delay);
+      }
+    }
+
+    a.running = false;
+    if (!a.error && !a.stop) {
+      a.status = `Terminé : ${a.opened} booster(s), ${a.cardCount} carte(s) pour ◆ ${fmt(a.spent)}.`;
+    }
+    render();
+    notify(a.status);
+    refreshLight();
+  }
+
+  function stopAutoOpen() {
+    const a = state.autoOpen;
+    if (!a.running) return;
+    a.stop = true;
+    a.status = 'Arrêt demandé…';
+    render();
+  }
+
+  function viewAuto() {
+    if (!state.user) return loginHTML();
+    if (!state.packs && !state.packsLoading) loadPacks();
+    if (!state.packState && !state.packStateLoading) loadPackState();
+
+    const a = state.autoOpen;
+    const packs = (state.packs ?? []).filter((pack) => pack && !pack.grantOnly);
+    const current = activeAutoPack();
+    if (current && !state.settings.autoPackId) state.settings.autoPackId = String(current.id);
+
+    const avail = current ? autoAvailability(current) : null;
+    const asked = Math.max(0, Math.round(Number(state.settings.autoCount) || 0));
+    const planned = avail ? Math.min(AUTO_MAX_RUN, asked > 0 ? Math.min(asked, avail.total) : avail.total) : 0;
+    const cost = current ? autoCost(current, planned) : null;
+    const pct = a.target > 0 ? Math.min(100, Math.round((a.opened / a.target) * 100)) : 0;
+    const pause = Math.min(10, Math.max(0.3, (Number(state.settings.autoDelayMs) || 1200) / 1000));
+
+    const packButton = (pack) => {
+      const left = autoAvailability(pack);
+      const price = toNum(pack.chakraPrice);
+      const isActive = current && String(current.id) === String(pack.id);
+      return `
+        <button class="kp-autopack ${isActive ? 'is-active' : ''}" type="button" data-act="auto-pack" data-id="${esc(pack.id)}" style="--rc:${esc(pack.color ?? '#ff4d2e')}">
+          <span class="kp-autopack-name">${esc(packName(pack))}</span>
+          <span class="kp-autopack-meta">${price != null && price > 0 ? `◆ ${fmt(price)}` : pack.usesFreePacks ? 'gratuit' : '—'}</span>
+          <span class="kp-autopack-count">${left.total > 0 ? `${fmt(left.total)} possible(s)` : 'indisponible'}</span>
+        </button>`;
+    };
+
+    return `
+      <div class="kp-section" style="margin-top:0">
+        <div class="kp-section-title">Auto-Open <span>${
+          a.running ? 'en cours' : a.opened ? 'dernière session' : 'prêt'
+        }</span></div>
+
+        <div class="kp-explain">
+          <p>
+            L'extension ouvre les boosters à ta place, en rafale. Elle utilise d'abord tes
+            <b>boosters gratuits</b>, puis ton <b>chakra</b>, et s'arrête toute seule quand il n'y a plus rien à ouvrir.
+          </p>
+        </div>
+
+        <div class="kp-explain-sub">Type de booster</div>
+        ${
+          packs.length
+            ? `<div class="kp-auto-packs">${packs.map(packButton).join('')}</div>`
+            : `<div class="kp-empty">${state.packsLoading ? '<span class="kp-spinner"></span> Chargement…' : 'Aucun booster disponible.'}</div>`
+        }
+
+        <div class="kp-explain-sub">Options</div>
+        <div class="kp-filters">
+          <label class="kp-filter">
+            <span>Boosters à ouvrir</span>
+            <input class="kp-input" type="number" min="0" max="500" step="1" data-setting="autoCount" value="${state.settings.autoCount}">
+          </label>
+          <label class="kp-filter">
+            <span>Pause (ms)</span>
+            <input class="kp-input" type="number" min="300" max="10000" step="100" data-setting="autoDelayMs" value="${state.settings.autoDelayMs}">
+          </label>
+        </div>
+        <div class="kp-hint">0 = tout ce que le compte permet. Pause ${pause.toFixed(1)} s entre deux fournées.</div>
+
+        <label class="kp-check">
+          <input type="checkbox" data-setting="autoStopRare" ${state.settings.autoStopRare ? 'checked' : ''}>
+          <span>S'arrêter dès qu'une Légendaire ou Mythique sort</span>
+        </label>
+
+        ${
+          current && cost
+            ? `<div class="kp-auto-summary">
+                 <div><span>Prévu</span><b>${fmt(planned)} booster(s)</b></div>
+                 <div><span>Gratuits utilisés</span><b>${fmt(cost.grants + cost.free + cost.bonus)}</b></div>
+                 <div><span>Chakra max</span><b>◆ ${fmt(cost.chakra)}</b></div>
+               </div>`
+            : ''
+        }
+
+        <div class="kp-toolbar" style="margin-top:10px">
+          ${
+            a.running
+              ? `<button class="kp-btn is-ghost" type="button" data-act="auto-stop">Arrêter</button>`
+              : `<button class="kp-btn is-primary" type="button" data-act="auto-start" ${packs.length ? '' : 'disabled'}>Démarrer l'auto-open</button>`
+          }
+          <button class="kp-btn" type="button" data-act="auto-refresh" ${a.running ? 'disabled' : ''}>Rafraîchir le compte</button>
+        </div>
+
+        ${
+          a.running || a.opened
+            ? `<div class="kp-auto-progress">
+                 <div class="kp-progress"><i style="width:${pct}%"></i></div>
+                 <div class="kp-hint">${esc(a.status)}</div>
+               </div>`
+            : a.status
+              ? `<div class="kp-hint">${esc(a.status)}</div>`
+              : ''
+        }
+
+        ${
+          a.passNeeded && current
+            ? `<div class="kp-alert is-bad" style="margin-top:10px">
+                 <b>Laissez-passer expiré</b><br>
+                 Le site exige un laissez-passer pour ouvrir des boosters. Ouvre <b>un</b> booster à la main,
+                 reviens ici, puis relance l'auto-open.
+                 <div class="kp-toolbar" style="margin-top:6px">
+                   <a class="kp-btn" href="https://kyara.games/ouvrir/${encodeURIComponent(current.id)}" target="_blank" rel="noopener">Ouvrir sur le site ↗</a>
+                 </div>
+               </div>`
+            : ''
+        }
+        ${a.error ? `<div class="kp-alert is-bad" style="margin-top:8px">${esc(a.error)}</div>` : ''}
+
+        ${
+          a.opened
+            ? `<div class="kp-auto-metrics">
+                 <div><span>Ouverts</span><b>${fmt(a.opened)}${a.target ? ` / ${fmt(a.target)}` : ''}</b></div>
+                 <div><span>Cartes</span><b>${fmt(a.cardCount)}</b></div>
+                 <div><span>Chakra dépensé</span><b>◆ ${fmt(a.spent)}</b></div>
+               </div>
+               <div class="kp-chips" style="margin:8px 0">
+                 ${RARITY_ORDER.filter((code) => a.counts?.[code])
+                   .reverse()
+                   .map((code) => {
+                     const info = rarityInfo(code);
+                     return `<span class="kp-chip" style="--rc:${info.color}"><em>${esc(info.label)}</em> ${fmt(a.counts[code])}</span>`;
+                   })
+                   .join('')}
+                 ${a.golden ? `<span class="kp-chip"><em>Dorés</em> ${fmt(a.golden)}</span>` : ''}
+                 ${a.godPacks ? `<span class="kp-chip"><em>God packs</em> ${fmt(a.godPacks)}</span>` : ''}
+               </div>`
+            : ''
+        }
+
+        ${
+          a.best.length
+            ? `<div class="kp-explain-sub">Meilleures trouvailles</div>
+               <div class="kp-top-cards">
+                 ${a.best
+                   .map(
+                     (card) => `
+                   <div class="kp-top-card" data-act="open-card" data-id="${esc(card.id)}" title="${esc(card.name)} · ${esc(rarityInfo(card.rarity).label)}">
+                     <img src="${esc(imgSrc(card))}" alt="${esc(card.name)}" loading="lazy">
+                     <span>${esc(card.name)}</span>
+                     <b style="color:${rarityInfo(card.rarity).color}">${esc(rarityInfo(card.rarity).label)}</b>
+                   </div>`
+                   )
+                   .join('')}
+               </div>`
+            : ''
+        }
+
+        ${
+          a.cards.length
+            ? `<div class="kp-explain-sub">Dernières cartes</div>
+               <div class="kp-auto-cards">
+                 ${a.cards
+                   .slice(0, 30)
+                   .map(
+                     (card) => `
+                   <img src="${esc(imgSrc(card))}" alt="${esc(card.name)}" title="${esc(card.name)} · ${esc(
+                     rarityInfo(card.rarity).label
+                   )}" loading="lazy" style="--rc:${rarityInfo(card.rarity).color}" data-act="open-card" data-id="${esc(card.id)}">`
+                   )
+                   .join('')}
+               </div>`
+            : ''
+        }
+      </div>
+    `;
+  }
+
   function viewSettings() {
     const cfg = getCfg();
     return `
@@ -3442,6 +3953,24 @@
         render();
         break;
       }
+      case 'auto-pack': {
+        const id = el.getAttribute('data-id');
+        if (!id) return;
+        state.settings.autoPackId = String(id);
+        persistSettings();
+        render();
+        break;
+      }
+      case 'auto-start':
+        startAutoOpen();
+        break;
+      case 'auto-stop':
+        stopAutoOpen();
+        break;
+      case 'auto-refresh':
+        loadPackState(true);
+        refreshLight();
+        break;
       case 'packs-refresh':
         loadPacks(true);
         loadPackPools(true);

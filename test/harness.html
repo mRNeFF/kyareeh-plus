@@ -79,6 +79,33 @@
         if (!url.includes('/api/')) return realFetch(input, init);
         log('API ' + (init?.method || 'GET') + ' ' + url);
 
+        const path = new URL(url, location.href).pathname;
+
+        if (path.endsWith('/open-many')) {
+          const body = JSON.parse(init?.body || '{}');
+          const n = Math.max(1, Math.min(10, Number(body.count) || 1));
+          const pool = CHARACTERS;
+          const results = Array.from({ length: n }, (_, i) => ({
+            cards: [pool[(i + n) % pool.length]],
+            golden: i === 0,
+            godPack: false,
+            pity: false
+          }));
+          return json({ results });
+        }
+        if (path === '/api/me/packs') return json({ grants: {}, limits: {} });
+        if (path === '/api/me') {
+          return json({
+            id: 'u-axel',
+            pseudo: 'Axel',
+            chakra: 12345,
+            freePacks: 7,
+            bonusPacks: 2,
+            freePacksMax: 10,
+            pity: 120
+          });
+        }
+
         if (url.includes('/api/me/collection/prices')) {
           const ids = new URL(url, location.href).searchParams.get('ids').split(',');
           return json(ids.map((id) => ({ characterId: Number(id), ...(PRICES[id] || {}) })));
