@@ -2,6 +2,7 @@ export default {
   sourceDir: '.',
   ignoreFiles: [
     'README.md',
+    'BUILD.md',
     'PRIVACY.md',
     'updates.json',
     'package.json',

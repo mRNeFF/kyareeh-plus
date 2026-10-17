@@ -66,6 +66,47 @@ function fail(message) {
   process.exit(1);
 }
 
+/**
+ * Archive du code source à joindre à la soumission AMO.
+ * AMO la demande dès qu'un outil de build est utilisé (ici web-ext pour empaqueter).
+ * `git archive` garantit que l'archive correspond exactement au commit livré,
+ * sans node_modules ni artefacts.
+ */
+function makeSourceArchive(target, { required = false } = {}) {
+  const name = `kyareeh-plus-${target}-source.zip`;
+  const out = join(ARTIFACTS, name);
+
+  const committed = spawnSync('git', ['show', `HEAD:manifest.json`], { cwd: ROOT, encoding: 'utf8' });
+  if (committed.status === 0) {
+    try {
+      const version = JSON.parse(committed.stdout).version;
+      if (version !== target) {
+        console.log(
+          `! Le commit HEAD contient la version ${version}, pas ${target}.\n` +
+            `  L'archive source sera celle de HEAD : commite d'abord, puis relance.`
+        );
+        if (required) return null;
+      }
+    } catch {
+      /* manifeste illisible : on continue */
+    }
+  }
+
+  const res = spawnSync(
+    'git',
+    ['archive', '--format=zip', `--prefix=kyareeh-plus-${target}/`, '-o', out, 'HEAD'],
+    { cwd: ROOT, encoding: 'utf8' }
+  );
+
+  if (res.status !== 0) {
+    console.log(`! Archive source impossible : ${(res.stderr || '').trim() || 'git archive a échoué'}`);
+    return null;
+  }
+
+  console.log(`✓ Code source : ${out}`);
+  return out;
+}
+
 const buildOnly = flags.has('--build-only');
 
 /* --- 1. version ----------------------------------------------------- */
@@ -139,11 +180,18 @@ const zip = join(ARTIFACTS, `kyareeh-plus-${target}.zip`);
 console.log(`\n✓ Zip prêt : ${zip}`);
 
 if (buildOnly) {
+  makeSourceArchive(target);
   console.log(`
+À joindre à la soumission AMO :
+  • l'extension : web-ext-artifacts/kyareeh-plus-${target}.zip
+  • le code source : web-ext-artifacts/kyareeh-plus-${target}-source.zip
+
 Prochaine étape (première soumission) :
   1. https://addons.mozilla.org/developers/  →  « Submit a New Add-on »
   2. Choisis « On this site » (listé) : c'est ce qui active les mises à jour automatiques.
-  3. Envoie web-ext-artifacts/kyareeh-plus-${target}.zip
+  3. Envoie le zip de l'extension.
+  4. Si AMO demande le code source : envoie l'archive -source.zip et coche
+     « non » à la question sur le code minifié (aucun code n'est minifié ici).
 `);
   process.exit(0);
 }
@@ -157,6 +205,9 @@ if (commit) {
 } else {
   console.log('Rien à committer (ou hook déjà passé).');
 }
+
+// L'archive source doit refléter le commit qui vient d'être créé.
+makeSourceArchive(target);
 
 /* --- 5. envoi AMO --------------------------------------------------- */
 
