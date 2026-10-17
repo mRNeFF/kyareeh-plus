@@ -33,6 +33,8 @@
     H: { label: 'Héritage', color: '#f472b6' }
   };
 
+  const SERIES_COLORS = ['#ff8a6d', '#ffb020', '#4ade80', '#60a5fa', '#c084fc', '#f472b6', '#22d3ee', '#a3e635'];
+
   const nf = new Intl.NumberFormat('fr-FR');
   const fmt = (v) => (v == null || !Number.isFinite(Number(v)) ? '—' : nf.format(Math.round(Number(v))));
   const esc = (s) =>
@@ -751,7 +753,7 @@
 
     let base = median ?? low ?? floor;
     if (low != null && low > 1) base = Math.min(base, low - 1);
-    if (bid != null) base = Math.max(base, bid);
+    if (bid != null && (median == null || bid >= median * 0.85)) base = bid;
     base = Math.max(floor, base);
     if (state.settings.discountPct) base = base * (1 - state.settings.discountPct / 100);
     return Math.max(1, Math.round(base));
@@ -1137,6 +1139,27 @@
     const rarities = [...byRarity.entries()].sort((a, b) => b[1].value - a[1].value);
     const maxRarity = Math.max(1, ...rarities.map(([, v]) => v.value));
 
+    const seriesTotals = new Map();
+    for (const character of state.characters.values()) {
+      const key = character?.series || 'Inconnue';
+      seriesTotals.set(key, (seriesTotals.get(key) ?? 0) + 1);
+    }
+    const ownedBySeries = new Map();
+    for (const row of rows) {
+      const key = row.series || 'Inconnue';
+      const set = ownedBySeries.get(key) ?? new Set();
+      set.add(row.id);
+      ownedBySeries.set(key, set);
+    }
+    const series = [...ownedBySeries.entries()]
+      .map(([name, set]) => {
+        const total = seriesTotals.get(name) ?? set.size;
+        return { name, owned: set.size, total, pct: total ? Math.round((set.size / total) * 100) : 0 };
+      })
+      .filter((s) => s.total >= 5)
+      .sort((a, b) => b.pct - a.pct || b.owned - a.owned)
+      .slice(0, 8);
+
     const progressPct = state.priceRun.total ? Math.round((state.priceRun.done / state.priceRun.total) * 100) : 0;
 
     const booster = toNum(state.user.freePacks) ?? 0;
@@ -1222,6 +1245,26 @@
                      <span>${esc(v.label)} · ${v.qty}</span>
                      <div class="kp-bar"><i style="width:${Math.max(2, Math.round((v.value / maxRarity) * 100))}%;--kp-bar-color:${v.color}"></i></div>
                      <b>◆ ${fmt(v.value)}</b>
+                   </div>`
+                   )
+                   .join('')}
+               </div>
+             </div>`
+          : ''
+      }
+
+      ${
+        series.length
+          ? `<div class="kp-section">
+               <div class="kp-section-title">Séries les plus complètes</div>
+               <div class="kp-bars">
+                 ${series
+                   .map(
+                     (s, index) => `
+                   <div class="kp-bar-row">
+                     <span title="${esc(s.name)}">${esc(s.name)}</span>
+                     <div class="kp-bar"><i style="width:${Math.max(2, s.pct)}%;--kp-bar-color:${SERIES_COLORS[index % SERIES_COLORS.length]}"></i></div>
+                     <b>${s.owned}/${s.total}</b>
                    </div>`
                    )
                    .join('')}
@@ -1616,7 +1659,9 @@
         const a = document.createElement('a');
         a.href = url;
         a.download = 'kyara-collection.json';
+        document.body.appendChild(a);
         a.click();
+        a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 2000);
         notify('Export téléchargé.');
         break;

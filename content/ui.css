@@ -494,7 +494,10 @@ select {
 }
 
 .kp-bar-row span:first-child {
+  overflow: hidden;
   color: var(--kp-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kp-bar-row .kp-bar {

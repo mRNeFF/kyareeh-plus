@@ -44,7 +44,7 @@ L'extension interroge l'endpoint groupé `GET /api/me/collection/prices?ids=…`
 
 Prix de vente proposé :
 
-1. le meilleur ordre d'achat s'il existe (vente immédiate) ;
+1. le meilleur ordre d'achat s'il est à moins de 15 % sous la médiane (vente immédiate) ;
 2. sinon le plus bas prix d'annonce moins 1 ◆ ;
 3. sinon la médiane ;
 4. plancher = valeur de recyclage de la rareté.
