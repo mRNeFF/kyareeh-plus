@@ -540,8 +540,7 @@ select {
 }
 
 .kp-auto-summary,
-.kp-auto-metrics {
-  display: grid;
+.kp-auto-metrics {  display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
   margin-top: 9px;
@@ -579,6 +578,19 @@ select {
   overflow: hidden;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
+}
+
+.kp-auto-countdown {
+  margin-top: 3px;
+  color: var(--kp-accent-2);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kp-auto-countdown [data-countdown] {
+  color: #fff;
+  font-weight: 700;
 }
 
 .kp-auto-progress .kp-progress i {
