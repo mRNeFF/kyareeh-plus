@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.9.9)
+## Fonctionnalités (v0.10.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -40,18 +40,28 @@ npx web-ext build
 
 ## Mettre à jour
 
-L'extension est chargée **directement depuis ce dossier** : il n'y a rien à retélécharger ni à réinstaller.
+### Si tu as le dépôt (git)
 
-1. Récupère les changements (`git pull`, ou une modification faite sur cette machine).
-2. Ouvre le panneau Kyareeh+ → onglet **Réglages** → **Recharger l'extension** → **Confirmer**.
-   (ou icône de la barre d'outils → **Mettre à jour l'extension**)
-3. La page se rafraîchit et le nouveau code est actif.
+1. `git pull`
+2. Panneau → **Réglages** → **Recharger l'extension** → **Confirmer** (ou icône de la barre d'outils → **Mettre à jour l'extension**).
+3. La page se rafraîchit toute seule et le nouveau code est actif.
 
-Le bouton envoie un message au **script de fond** (`background/background.js`), seul contexte autorisé à appeler `runtime.reload()`, puis rafraîchit l'onglet.
+Le bouton envoie un message au **script de fond** (`background/background.js`), seul contexte autorisé à appeler `runtime.reload()`. Ce script **rafraîchit l'onglet avant** de recharger l'extension : après `runtime.reload()`, le content script est détruit, donc un `location.reload()` lancé depuis la page ne s'exécuterait jamais (c'était le bug qui faisait croire que la mise à jour ne fonctionnait pas).
+
+### Si tu n'as pas git (ami, autre machine)
+
+L'extension ne peut pas se réécrire toute seule : Firefox n'autorise pas un add-on à modifier ses propres fichiers. Elle fait donc le maximum : elle **vérifie GitHub** et te le dit.
+
+1. Panneau → **Réglages** → la ligne **Sur GitHub** indique la dernière version publiée. Un bandeau **« Version vX disponible »** apparaît dès qu'une version plus récente existe.
+2. Clique sur **Télécharger la dernière version** → une archive `.zip` est téléchargée.
+3. Décompresse-la et **remplace le contenu de ton dossier d'extension** par les nouveaux fichiers (garde le **même dossier** : c'est lui que Firefox surveille).
+4. **Recharger l'extension** → **Confirmer**. La page se rafraîchit automatiquement.
+
+Si tu avais chargé un `.zip` dans `about:debugging` au lieu d'un dossier, Firefox travaille sur une copie extraite : retire l'add-on, puis **Charger un module complémentaire temporaire…** et sélectionne le `manifest.json` du dossier mis à jour.
 
 ### Si la version ne change pas
 
-Le panneau affiche trois versions dans les Réglages : **version du code** (celle du manifeste chargé), **manifeste sur le disque** (relu directement dans `manifest.json`, sans cache) et **manifeste chargé par Firefox**. Un bandeau s'affiche dès que le fichier du dossier est plus récent que ce que Firefox a en mémoire.
+Le panneau affiche quatre lignes dans les Réglages : **version du code**, **manifeste sur le disque** (relu sans cache), **manifeste chargé par Firefox**, et **Sur GitHub**. Un bandeau s'affiche dès que le fichier du dossier est plus récent que ce que Firefox a en mémoire.
 
 C'est le symptôme d'un add-on jamais rechargé : Firefox relit le JS à chaque page, mais garde le manifeste du chargement. Dans ce cas, le bouton ne peut pas fonctionner (le manifeste périmé n'a pas encore de script de fond). Il faut le faire une fois à la main :
 

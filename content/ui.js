@@ -168,6 +168,7 @@
     manifestVersion: null,
     diskVersion: null,
     manifestOutdated: false,
+    update: { checking: false, version: null, error: null, checkedAt: 0 },
     selfProfile: null,
     selfProfileTried: null,
     packs: null,
@@ -345,29 +346,85 @@
       notify(`${reason} Passe par about:debugging → « Recharger ».`);
     };
 
-    // runtime.reload() n'est pas disponible dans un content script : on passe par le fond.
+    // runtime.reload() n'est pas disponible dans un content script : on passe par le fond,
+    // qui rafraîchit aussi cet onglet avant de couper l'extension.
+    // (Un location.reload() lancé d'ici ne s'exécuterait jamais : le contexte est détruit.)
     const ask = ext.runtime.sendMessage({ type: 'kp-reload-extension' });
     Promise.resolve(ask)
       .then((res) => {
         if (!res || !res.ok) throw new Error('refusé');
-        // On laisse le fond relire le manifeste avant de rafraîchir la page.
-        setTimeout(() => {
-          try {
-            location.reload();
-          } catch {
-            /* ignore */
-          }
-        }, 1200);
+        // Le fond s'occupe du rechargement de l'onglet juste avant runtime.reload().
       })
       .catch(() => {
-        // Repli : tentative directe (utile si le fond n'est pas encore chargé).
+        // Repli : recharger la page d'abord, puis l'extension.
         try {
-          ext.runtime.reload();
-          setTimeout(() => location.reload(), 800);
+          location.reload();
+          setTimeout(() => {
+            try {
+              ext.runtime.reload();
+            } catch {
+              /* ignore */
+            }
+          }, 300);
         } catch {
           fail('Rechargement automatique impossible.');
         }
       });
+  }
+
+  /* --- Mise à jour depuis GitHub ------------------------------------- */
+
+  const UPDATE_REPO = 'mRNeFF/kyareeh-plus';
+  const UPDATE_BRANCH = 'master';
+  const UPDATE_ZIP = `https://github.com/${UPDATE_REPO}/archive/refs/heads/${UPDATE_BRANCH}.zip`;
+  const UPDATE_PAGE = `https://github.com/${UPDATE_REPO}`;
+
+  function versionParts(v) {
+    return String(v || '0')
+      .split('.')
+      .map((n) => parseInt(n, 10) || 0);
+  }
+
+  /** true si `remote` est plus récent que `local`. */
+  function isNewerVersion(remote, local) {
+    const a = versionParts(remote);
+    const b = versionParts(local);
+    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+      const x = a[i] ?? 0;
+      const y = b[i] ?? 0;
+      if (x !== y) return x > y;
+    }
+    return false;
+  }
+
+  /**
+   * Relit le manifeste du dépôt pour savoir si une version plus récente existe.
+   * Permet à quelqu'un qui n'a pas git de voir qu'il est en retard, et de récupérer
+   * l'archive en un clic.
+   */
+  async function checkRemoteVersion(force = false) {
+    const u = state.update;
+    if (u.checking) return;
+    if (!force && u.checkedAt && Date.now() - u.checkedAt < 30 * 60 * 1000) return;
+
+    u.checking = true;
+    u.error = null;
+    render();
+    try {
+      const res = await fetch(
+        `https://raw.githubusercontent.com/${UPDATE_REPO}/${UPDATE_BRANCH}/manifest.json?t=${Date.now()}`,
+        { cache: 'no-store', credentials: 'omit' }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      u.version = typeof json?.version === 'string' ? json.version : null;
+      u.checkedAt = Date.now();
+    } catch {
+      u.error = 'Vérification impossible (pas de réseau, ou dépôt inaccessible).';
+    } finally {
+      u.checking = false;
+      render();
+    }
   }
 
   /** Version du manifeste réellement chargé par Firefox en mémoire. */
@@ -630,6 +687,8 @@
     await mount();
     await loadData();
     startAutoRefreshLoop();
+    // Vérifie une fois au démarrage si une version plus récente existe sur GitHub.
+    setTimeout(() => checkRemoteVersion(), 2500);
   }
 
   async function loadCharacters() {
@@ -1480,19 +1539,38 @@
 
   function renderBanner() {
     if (!ui?.banner) return;
-    if (!state.manifestOutdated) {
-      ui.banner.hidden = true;
-      ui.banner.innerHTML = '';
+
+    // 1) Une version plus récente existe sur GitHub.
+    const remote = state.update.version;
+    if (remote && isNewerVersion(remote, state.version)) {
+      ui.banner.hidden = false;
+      ui.banner.classList.remove('is-stale');
+      ui.banner.innerHTML = `
+        <span class="kp-banner-text">
+          Version <b>v${esc(remote)}</b> disponible (tu as v${esc(state.version)}).
+        </span>
+        <button class="kp-btn is-primary" type="button" data-act="update-download">Télécharger</button>
+        <button class="kp-btn is-ghost" type="button" data-act="tab" data-tab="settings">Comment ?</button>
+      `;
       return;
     }
-    ui.banner.hidden = false;
-    ui.banner.innerHTML = `
-      <span class="kp-banner-text">
-        Le dossier est en v${esc(state.version)} mais Firefox a chargé v${esc(state.manifestVersion ?? '?')}.
-        Retire l'add-on dans <code>about:debugging</code>, puis recharge-le depuis le dossier.
-      </span>
-      <button class="kp-btn is-primary" type="button" data-act="tab" data-tab="settings">Voir les Réglages</button>
-    `;
+
+    // 2) Firefox garde un manifeste plus ancien que le dossier.
+    if (state.manifestOutdated) {
+      ui.banner.hidden = false;
+      ui.banner.classList.add('is-stale');
+      ui.banner.innerHTML = `
+        <span class="kp-banner-text">
+          Le dossier est en v${esc(state.version)} mais Firefox a chargé v${esc(state.manifestVersion ?? '?')}.
+          Retire l'add-on dans <code>about:debugging</code>, puis recharge-le depuis le dossier.
+        </span>
+        <button class="kp-btn is-primary" type="button" data-act="tab" data-tab="settings">Voir les Réglages</button>
+      `;
+      return;
+    }
+
+    ui.banner.hidden = true;
+    ui.banner.innerHTML = '';
   }
 
   function renderStats() {
@@ -3353,6 +3431,8 @@
 
   function viewSettings() {
     const cfg = getCfg();
+    const u = state.update;
+    const newer = u.version && isNewerVersion(u.version, state.version);
     return `
       <div class="kp-settings">
         <div class="kp-section" style="margin-top:0">
@@ -3366,6 +3446,14 @@
                    pour prendre le nouveau numéro de version :
                    <code>about:debugging</code> → <b>Ce Firefox</b> → « Retirer », puis
                    « Charger un module temporaire » → <code>manifest.json</code> du dossier.
+                 </div>`
+              : ''
+          }
+          ${
+            newer
+              ? `<div class="kp-alert" style="margin-bottom:8px">
+                   <b>v${esc(u.version)} disponible</b> — tu es en v${esc(state.version)}.
+                   Télécharge l'archive puis remplace les fichiers de ton dossier (voir plus bas).
                  </div>`
               : ''
           }
@@ -3383,6 +3471,43 @@
             <span>Manifeste chargé par Firefox</span>
             <b>v${esc(state.manifestVersion ?? '—')}</b>
             <small>${state.manifestVersion ? (state.manifestOutdated ? 'en retard sur le dossier' : 'à jour') : '—'}</small>
+          </div>
+          <div class="kp-card-stat" style="margin-top:6px">
+            <span>Sur GitHub</span>
+            <b>${u.checking ? '…' : u.version ? `v${esc(u.version)}` : '—'}</b>
+            <small>${
+              u.checking
+                ? 'vérification…'
+                : u.error
+                  ? esc(u.error)
+                  : u.checkedAt
+                    ? newer
+                      ? 'plus récent que ta version'
+                      : 'tu es à jour'
+                    : 'jamais vérifié'
+            }</small>
+          </div>
+
+          <div class="kp-toolbar" style="margin-top:8px">
+            <button class="kp-btn" type="button" data-act="update-check" ${u.checking ? 'disabled' : ''}>
+              ${u.checking ? '<span class="kp-spinner"></span> Vérification…' : 'Vérifier les mises à jour'}
+            </button>
+            <button class="kp-btn is-primary" type="button" data-act="update-download">Télécharger la dernière version</button>
+            <button class="kp-btn is-ghost" type="button" data-act="update-repo">Dépôt ↗</button>
+          </div>
+
+          <div class="kp-explain" style="margin-top:10px">
+            <p><b>Tu as installé l'extension depuis un dossier ?</b></p>
+            <p>
+              1. Clique sur <b>Télécharger la dernière version</b>.<br>
+              2. Décompresse l'archive et <b>remplace le contenu de ton dossier</b> par les nouveaux fichiers
+              (garde le même dossier, c'est ce que Firefox surveille).<br>
+              3. Clique sur <b>Recharger l'extension</b> ci-dessous : la page se rafraîchit toute seule.
+            </p>
+            <p>
+              Si tu avais chargé un <b>.zip</b> directement dans <code>about:debugging</code>, Firefox travaille sur
+              une copie : retire l'add-on, puis recharge le <code>manifest.json</code> du dossier mis à jour.
+            </p>
           </div>
           <div class="kp-hint" style="margin-top:8px">
             Après une modification du dossier, recharge l'extension pour appliquer le nouveau code.
@@ -4290,6 +4415,16 @@
         playOpenSound(2);
         notify('Son de test joué.');
         break;
+      case 'update-check':
+        checkRemoteVersion(true);
+        break;
+      case 'update-download':
+        window.open(UPDATE_ZIP, '_blank', 'noopener');
+        notify('Archive téléchargée : remplace les fichiers du dossier, puis recharge l’extension.');
+        break;
+      case 'update-repo':
+        window.open(UPDATE_PAGE, '_blank', 'noopener');
+        break;
       case 'packs-refresh':
         loadPacks(true);
         loadPackPools(true);
@@ -4594,6 +4729,7 @@
       loadProfile,
       resetProfile,
       autoRefreshTick,
+      checkRemoteVersion,
       autoDelay,
       autoDelayRange,
       startAutoOpen,

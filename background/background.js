@@ -5,16 +5,30 @@ const ext = globalThis.browser ?? globalThis.chrome;
 
 let pendingReload = null;
 
-function scheduleReload() {
+/**
+ * Recharge l'extension et rafraîchit l'onglet demandeur.
+ * Important : l'onglet doit être rafraîchi AVANT runtime.reload(), car ce dernier
+ * détruit le content script — un setTimeout(location.reload) lancé depuis la page
+ * ne s'exécuterait jamais, et l'utilisateur resterait sur l'ancien code.
+ */
+function scheduleReload(tabId) {
   if (pendingReload) return;
-  pendingReload = setTimeout(() => {
+  pendingReload = setTimeout(async () => {
     pendingReload = null;
     try {
-      ext.runtime.reload();
+      if (tabId != null) await ext.tabs.reload(tabId);
     } catch {
-      /* ignore */
+      /* onglet fermé ou permission refusée */
     }
-  }, 150);
+    // Petite marge pour que la page commence à se recharger avant la coupure.
+    setTimeout(() => {
+      try {
+        ext.runtime.reload();
+      } catch {
+        /* ignore */
+      }
+    }, 250);
+  }, 100);
 }
 
 try {
@@ -22,8 +36,9 @@ try {
     if (!msg || typeof msg !== 'object') return;
 
     if (msg.type === 'kp-reload-extension') {
-      sendResponse({ ok: true, version: ext.runtime.getManifest().version });
-      scheduleReload();
+      const tabId = sender && sender.tab ? sender.tab.id : null;
+      sendResponse({ ok: true, version: ext.runtime.getManifest().version, tab: tabId });
+      scheduleReload(tabId);
       return;
     }
 

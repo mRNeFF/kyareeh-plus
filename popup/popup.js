@@ -41,32 +41,23 @@ function armReload() {
 function doReload() {
   reloadBtn.disabled = true;
   reloadBtn.textContent = 'Rechargement…';
-  reloadHint.textContent = 'Extension rechargée depuis le dossier local.';
+  reloadHint.textContent = 'Extension rechargée et page rafraîchie.';
 
   const finish = () => setTimeout(() => window.close(), 600);
 
   // Le fond est le seul contexte autorisé à appeler runtime.reload().
-  const askBackground = () =>
-    ext.runtime.sendMessage({ type: 'kp-reload-extension' }).then((res) => {
+  // C'est aussi lui qui rafraîchit l'onglet : l'extension est coupée pendant
+  // le rechargement, donc un appel tabs.reload() lancé d'ici ne partirait pas.
+  ext.runtime
+    .sendMessage({ type: 'kp-reload-extension' })
+    .then((res) => {
       if (!res || !res.ok) throw new Error('refusé');
-      return true;
-    });
-
-  askBackground()
-    .then(() => {
-      if (activeTab && activeTab.id != null) {
-        setTimeout(() => {
-          ext.tabs.reload(activeTab.id).catch(() => {});
-        }, 1200);
-      }
       finish();
     })
     .catch(() => {
+      // Le fond n'a pas répondu : on tente le rechargement direct, puis la page.
       try {
         ext.runtime.reload();
-        if (activeTab && activeTab.id != null) {
-          setTimeout(() => ext.tabs.reload(activeTab.id).catch(() => {}), 900);
-        }
       } catch {
         reloadHint.textContent = 'Échec : recharge manuellement dans about:debugging.';
       }
