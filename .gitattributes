@@ -1,0 +1,11 @@
+# Normalise les fins de ligne : le dépôt et les archives restent en LF,
+# même avec core.autocrlf=true (Windows). Garantit que l'archive source
+# fournie à AMO contient exactement les octets du paquet livré.
+* text=auto eol=lf
+
+# Fichiers binaires : aucune conversion.
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.xpi binary
