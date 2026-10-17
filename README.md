@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.4.0)
+## Fonctionnalités (v0.5.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **Valeur des doublons** : brut, net après taxe de vente (5 %) et frais de dépôt (2 %, min 1 ◆), plus la valeur de recyclage.
@@ -15,7 +15,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Mise en enchère** : au lieu du prix fixe, mise à prix calculée à *médiane − X %* (réglable par lot, 15 % par défaut), avec achat immédiat facultatif à *+ Y %*.
 - **Marché** : scan des 150 annonces les plus basses, filtrable par rareté (mêmes puces que la collection du site), classé par économie réelle par rapport à la médiane 7 jours.
 - **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
-- **Valeur d'un autre compte** : recherche par pseudo via le classement, puis estimation de la valeur de sa collection, de sa répartition par rareté et de ses plus belles cartes.
+- **Valeur d'un autre compte** : barre de recherche en haut de l'onglet Compte. Chercher un pseudo ouvre une page dédiée (résultats, puis profil complet : valeur estimée, répartition par rareté, plus belles cartes), avec un bouton **← Mon compte** pour revenir. La bande de stats du haut suit le profil consulté.
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
 - **Mise à jour** : bouton **Recharger l'extension** dans les Réglages (et dans la popup) qui relit le dossier local et rafraîchit la page — aucun téléchargement.
 - **Debug** : journal des requêtes, clés renvoyées par l'API, diagnostic copiable.

@@ -9,7 +9,7 @@
   window.__kyaraPlusLoaded = true;
 
   const ext = globalThis.browser ?? globalThis.chrome;
-  const VERSION = '0.4.0';
+  const VERSION = '0.5.0';
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -122,7 +122,8 @@
       loading: false,
       error: null,
       user: null,
-      value: null
+      value: null,
+      view: 'self'
     }
   };
 
@@ -202,6 +203,7 @@
     shadow.addEventListener('click', onClick);
     shadow.addEventListener('change', onChange);
     shadow.addEventListener('input', onInput);
+    shadow.addEventListener('keydown', onKeyDown);
 
     document.addEventListener(
       'keydown',
@@ -1164,6 +1166,19 @@
 
   function renderStats() {
     if (!ui) return;
+
+    // Vue d'un autre joueur : la bande haute suit le profil consulté.
+    if (state.profile.view !== 'self') {
+      const u = state.profile.user;
+      const v = state.profile.value;
+      ui.stats.innerHTML = `
+        <div class="kp-metric"><span>Compte</span><b>${esc(u?.pseudo ?? 'Recherche…')}</b></div>
+        <div class="kp-metric"><span>Valeur est.</span><b>◆ ${fmt(v?.total ?? 0)}</b></div>
+        <div class="kp-metric"><span>Cartes</span><b>${fmt(u?.owned ?? 0)}</b></div>
+      `;
+      return;
+    }
+
     if (!state.user) {
       ui.stats.innerHTML = '';
       return;
@@ -1249,6 +1264,8 @@
   }
 
   function viewAccount() {
+    if (state.profile.view === 'other') return viewOtherAccount();
+    if (state.profile.view === 'search') return viewProfileSearch();
     if (!state.user) return state.error ? errorHTML() : loginHTML();
     const rows = ownedRows();
     const stats = computeStats(rows);
@@ -1301,8 +1318,10 @@
     const accessOk = state.access?.allowed !== false;
 
     return `
+      ${profileSearchBar()}
       <div class="kp-hero">
-        <div class="kp-hero-label">Valeur estimée du compte</div>        <div class="kp-hero-value">◆ ${fmt(stats.total)}</div>
+        <div class="kp-hero-label">Valeur estimée du compte</div>
+        <div class="kp-hero-value">◆ ${fmt(stats.total)}</div>
         <div class="kp-hero-sub">
           Fourchette ${fmt(stats.low)} – ${fmt(stats.high)} · ${stats.priced}/${stats.count} cartes valorisées
           ${stats.unpriced ? ` · ${stats.unpriced} sans prix` : ''}
@@ -1403,8 +1422,6 @@
              </div>`
           : ''
       }
-
-      ${profileHTML()}
     `;
   }
 
@@ -1734,6 +1751,7 @@
     const query = state.profile.query.trim();
     if (!query) return;
 
+    state.profile.view = 'search';
     state.profile.searching = true;
     state.profile.error = null;
     state.profile.results = null;
@@ -1744,7 +1762,7 @@
     try {
       const data = await api(`/api/leaderboard/ladder?by=collection&q=${encodeURIComponent(query)}`, { timeout: 20000 });
       const found = Array.isArray(data?.found) ? data.found : [];
-      state.profile.results = found.slice(0, 8);
+      state.profile.results = found.slice(0, 12);
       if (!found.length) state.profile.error = `Aucun joueur nommé « ${query} ».`;
     } catch (err) {
       state.profile.error = friendlyError(err);
@@ -1754,8 +1772,19 @@
     }
   }
 
+  function resetProfile() {
+    state.profile.view = 'self';
+    state.profile.user = null;
+    state.profile.value = null;
+    state.profile.results = null;
+    state.profile.error = null;
+    state.profile.loading = false;
+    render();
+  }
+
   async function loadProfile(id) {
     if (!id) return;
+    state.profile.view = 'other';
     state.profile.loading = true;
     state.profile.error = null;
     state.profile.user = null;
@@ -1825,111 +1854,165 @@
     }
   }
 
-  function profileHTML() {
+  function profileSearchBar() {
     const p = state.profile;
-    const lines = [];
+    return `
+      <div class="kp-searchbar">
+        <input class="kp-input" type="search" data-role="profile-search" placeholder="Pseudo d'un joueur…" value="${esc(p.query)}" aria-label="Rechercher un compte">
+        <button class="kp-btn is-primary" type="button" data-act="profile-search" ${p.searching ? 'disabled' : ''}>${
+          p.searching ? '…' : 'Chercher'
+        }</button>
+      </div>`;
+  }
 
-    lines.push(`
-      <div class="kp-section" style="margin-top:16px">
-        <div class="kp-section-title">Valeur d'un autre compte</div>
-        <div class="kp-toolbar">
-          <input class="kp-input" type="search" data-role="profile-search" placeholder="Pseudo du joueur…" value="${esc(p.query)}">
-          <button class="kp-mini-btn" type="button" data-act="profile-search" ${p.searching ? 'disabled' : ''}>${
-            p.searching ? '…' : 'Chercher'
-          }</button>
-        </div>
-        ${p.error ? `<div class="kp-alert is-bad" style="margin-top:8px">${esc(p.error)}</div>` : ''}
+  function profileResultsTable(results) {
+    return `
+      <div class="kp-table">
+        ${results
+          .map(
+            (r) => `
+          <div class="kp-row" data-act="profile-open" data-id="${esc(r.id)}" data-pseudo="${esc(r.pseudo)}">
+            <span></span>
+            <img class="kp-avatar" src="${esc(r.avatar || '/brand/favicon/icon-192.png')}" alt="" loading="lazy">
+            <div class="kp-row-main">
+              <div class="kp-row-name">${esc(r.pseudo)}</div>
+              <div class="kp-row-meta">${esc(r.rank?.label ?? '—')} · ${fmt(r.owned)} cartes · ${fmt(r.mythics)} mythique(s)</div>
+            </div>
+            <div class="kp-row-price"><b>#${fmt(r.pos)}</b><small>${fmt(r.points)} pts</small></div>
+          </div>`
+          )
+          .join('')}
+      </div>`;
+  }
+
+  function viewProfileSearch() {
+    const p = state.profile;
+    const results = Array.isArray(p.results) ? p.results : null;
+
+    return `
+      <div class="kp-navbar">
+        <button class="kp-back" type="button" data-act="profile-back">← Mon compte</button>
+        <span>Recherche de compte</span>
       </div>
-    `);
 
-    if (Array.isArray(p.results) && p.results.length) {
-      lines.push(`
-        <div class="kp-table" style="margin-top:8px">
-          ${p.results
-            .map(
-              (r) => `
-            <div class="kp-row" data-act="profile-open" data-id="${esc(r.id)}" data-pseudo="${esc(r.pseudo)}">
-              <span></span>
-              <img src="${esc(r.avatar || '/brand/favicon/icon-192.png')}" alt="" loading="lazy" style="border-radius:50%;object-fit:cover">
-              <div class="kp-row-main">
-                <div class="kp-row-name">${esc(r.pseudo)}</div>
-                <div class="kp-row-meta">${esc(r.rank?.label ?? '—')} · ${fmt(r.owned)} cartes · ${fmt(r.mythics)} mythique(s)</div>
-              </div>
-              <div class="kp-row-price"><b>#${fmt(r.pos)}</b><small>${fmt(r.points)} pts</small></div>
-            </div>`
-            )
-            .join('')}
-        </div>
-      `);
-    }
+      ${profileSearchBar()}
 
-    if (p.loading) {
-      lines.push(`<div class="kp-empty"><span class="kp-spinner"></span> Chargement du profil…</div>`);
-    }
+      ${p.error ? `<div class="kp-alert is-bad" style="margin-top:10px">${esc(p.error)}</div>` : ''}
 
+      ${
+        p.searching
+          ? `<div class="kp-empty"><span class="kp-spinner"></span> Recherche…</div>`
+          : results && results.length
+            ? `<div class="kp-section-title" style="margin-top:14px">${
+                results.length > 1 ? `${results.length} joueurs trouvés` : '1 joueur trouvé'
+              }</div>
+               ${profileResultsTable(results)}`
+            : p.error
+              ? ''
+              : `<div class="kp-empty"><b>Cherche un joueur</b>Entre un pseudo pour voir la valeur estimée de son compte.</div>`
+      }
+    `;
+  }
+
+  function viewOtherAccount() {
+    const p = state.profile;
     const u = p.user;
     const v = p.value;
-    if (u) {
-      const rarityRows = v?.byRarity
-        ? (() => {
-            const codes = RARITY_ORDER.filter((code) => Number(v.byRarity[code]) > 0);
-            const maxCount = Math.max(1, ...codes.map((code) => Number(v.byRarity[code])));
-            const averages = rarityAverages();
-            return codes.map((code) => {
-              const info = rarityInfo(code);
-              const count = Number(v.byRarity[code]);
-              const avg = averages.get(code);
-              return `
+
+    const nav = `
+      <div class="kp-navbar">
+        <button class="kp-back" type="button" data-act="profile-back">← Mon compte</button>
+        <span>Profil</span>
+      </div>
+      ${profileSearchBar()}
+    `;
+
+    if (p.loading) {
+      return `${nav}<div class="kp-empty"><span class="kp-spinner"></span> Chargement du profil…</div>`;
+    }
+
+    if (!u) {
+      return `
+        ${nav}
+        <div class="kp-empty">
+          <b>Profil indisponible</b>
+          ${esc(p.error || 'Ce joueur est introuvable.')}
+        </div>`;
+    }
+
+    const rarityRows = v?.byRarity
+      ? (() => {
+          const codes = RARITY_ORDER.filter((code) => Number(v.byRarity[code]) > 0);
+          const maxCount = Math.max(1, ...codes.map((code) => Number(v.byRarity[code])));
+          const averages = rarityAverages();
+          return codes.map((code) => {
+            const info = rarityInfo(code);
+            const count = Number(v.byRarity[code]);
+            const avg = averages.get(code);
+            return `
               <div class="kp-bar-row">
                 <span>${esc(info.label)} · ${fmt(count)}</span>
                 <div class="kp-bar"><i style="width:${Math.max(2, Math.round((count / maxCount) * 100))}%;--kp-bar-color:${info.color}"></i></div>
                 <b>${avg ? `◆ ${fmt(avg.median)}` : '—'}</b>
               </div>`;
-            });
-          })()
-        : [];
+          });
+        })()
+      : [];
 
-      lines.push(`
-        <div class="kp-hero" style="margin-top:12px">
-          <div class="kp-hero-label">Valeur estimée de ${esc(u.pseudo)}</div>
-          <div class="kp-hero-value">◆ ${fmt(v?.total ?? 0)}</div>
-          <div class="kp-hero-sub">
-            ${
-              v?.hasCollection
-                ? `Estimation · top cartes valorisées ◆ ${fmt(v.bestValue)}${v.unknown ? ` · ${fmt(v.unknown)} carte(s) sans référence` : ''}`
-                : 'Collection privée : seules les infos publiques sont disponibles.'
-            }
-          </div>
-        </div>
-        <div class="kp-chips" style="margin-top:8px">
-          <span class="kp-chip"><em>Rang</em> ${esc(u.rank?.label ?? '—')}</span>
-          ${u.pos || u.position ? `<span class="kp-chip"><em>Classement</em> #${fmt(u.pos ?? u.position)}</span>` : ''}
-          ${u.points != null ? `<span class="kp-chip"><em>Points</em> ${fmt(u.points)}</span>` : ''}
-          ${u.owned != null ? `<span class="kp-chip"><em>Cartes</em> ${fmt(u.owned)}</span>` : ''}
-          ${u.mythics != null ? `<span class="kp-chip"><em>Mythiques</em> ${fmt(u.mythics)}</span>` : ''}
-        </div>
-        ${rarityRows.length ? `<div class="kp-section-title" style="margin-top:12px">Répartition par rareté</div><div class="kp-bars">${rarityRows.join('')}</div>` : ''}
-        ${
-          v?.best?.length
-            ? `<div class="kp-section-title" style="margin-top:12px">Ses plus belles cartes</div>
-               <div class="kp-top">
-                 ${v.best
-                   .map(
-                     (row) => `
-                   <div class="kp-top-card" data-act="open-card" data-id="${esc(row.card.id)}" title="${esc(row.card.name)}">
-                     <img src="${esc(imgSrc(row.card))}" alt="${esc(row.card.name)}" loading="lazy">
-                     <span>${esc(row.card.name)}</span>
-                     <b>${row.price != null ? `◆ ${fmt(row.price)}` : '—'}</b>
-                   </div>`
-                   )
-                   .join('')}
-               </div>`
-            : ''
-        }
-      `);
-    }
+    return `
+      ${nav}
 
-    return lines.join('');
+      <div class="kp-profile-head">
+        <img class="kp-avatar-lg" src="${esc(u.avatar || '/brand/favicon/icon-192.png')}" alt="" loading="lazy">
+        <div class="kp-profile-id">
+          <b>${esc(u.pseudo ?? 'Joueur')}</b>
+          <small>${esc(u.rank?.label ?? '—')}${u.points != null ? ` · ${fmt(u.points)} pts` : ''}</small>
+        </div>
+        <a class="kp-link" href="https://kyara.games/profil/${encodeURIComponent(u.id ?? '')}" target="_blank" rel="noopener">Voir sur le site ↗</a>
+      </div>
+
+      <div class="kp-hero" style="margin-top:10px">
+        <div class="kp-hero-label">Valeur estimée du compte</div>
+        <div class="kp-hero-value">◆ ${fmt(v?.total ?? 0)}</div>
+        <div class="kp-hero-sub">
+          ${
+            v?.hasCollection
+              ? `Top cartes valorisées ◆ ${fmt(v.bestValue)}${v.unknown ? ` · ${fmt(v.unknown)} carte(s) sans référence` : ''}`
+              : 'Collection privée : seules les infos publiques sont disponibles.'
+          }
+        </div>
+      </div>
+
+      <div class="kp-chips" style="margin-top:8px">
+        <span class="kp-chip"><em>Rang</em> ${esc(u.rank?.label ?? '—')}</span>
+        ${u.pos != null || u.position != null ? `<span class="kp-chip"><em>Classement</em> #${fmt(u.pos ?? u.position)}</span>` : ''}
+        ${u.points != null ? `<span class="kp-chip"><em>Points</em> ${fmt(u.points)}</span>` : ''}
+        ${u.owned != null ? `<span class="kp-chip"><em>Cartes</em> ${fmt(u.owned)}</span>` : ''}
+        ${u.mythics != null ? `<span class="kp-chip"><em>Mythiques</em> ${fmt(u.mythics)}</span>` : ''}
+      </div>
+
+      ${rarityRows.length ? `<div class="kp-section-title" style="margin-top:14px">Répartition par rareté</div><div class="kp-bars">${rarityRows.join('')}</div>` : ''}
+
+      ${
+        v?.best?.length
+          ? `<div class="kp-section-title" style="margin-top:14px">Ses plus belles cartes</div>
+             <div class="kp-top">
+               ${v.best
+                 .map(
+                   (row) => `
+                 <div class="kp-top-card" data-act="open-card" data-id="${esc(row.card.id)}" title="${esc(row.card.name)}">
+                   <img src="${esc(imgSrc(row.card))}" alt="${esc(row.card.name)}" loading="lazy">
+                   <span>${esc(row.card.name)}</span>
+                   <b>${row.price != null ? `◆ ${fmt(row.price)}` : '—'}</b>
+                 </div>`
+                 )
+                 .join('')}
+             </div>`
+          : ''
+      }
+
+      ${p.error ? `<div class="kp-alert" style="margin-top:12px">${esc(p.error)}</div>` : ''}
+    `;
   }
 
   /* ------------------------------------------------------------------ */
@@ -2095,6 +2178,10 @@
         break;
       case 'tab':
         state.tab = el.getAttribute('data-tab') || 'account';
+        if (state.tab === 'account') {
+          state.profile.view = 'self';
+          state.profile.error = null;
+        }
         if (state.tab === 'dupes') state.query = '';
         render();
         break;
@@ -2170,6 +2257,9 @@
       case 'profile-open':
         state.profile.query = el.getAttribute('data-pseudo') || state.profile.query;
         loadProfile(el.getAttribute('data-id'));
+        break;
+      case 'profile-back':
+        resetProfile();
         break;
       case 'clear-cache':
         state.prices = {};
@@ -2294,6 +2384,16 @@
     }
   }
 
+  function onKeyDown(event) {
+    if (event.key !== 'Enter') return;
+    const target = event.target;
+    if (!target || typeof target.closest !== 'function') return;
+    if (target.closest('[data-role="profile-search"]')) {
+      event.preventDefault();
+      searchProfile();
+    }
+  }
+
   function onInput(event) {
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
@@ -2374,7 +2474,8 @@
       scanMarket,
       loadPrices,
       searchProfile,
-      loadProfile
+      loadProfile,
+      resetProfile
     };
   }
 
