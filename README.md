@@ -23,7 +23,15 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Mise à jour** : bouton **Recharger l'extension** dans les Réglages (et dans la popup) qui relit le dossier local et rafraîchit la page — aucun téléchargement.
 - **Debug** : journal des requêtes, clés renvoyées par l'API, diagnostic copiable.
 
-## Installation (Firefox)
+## Installer (utilisateur normal — recommandé)
+
+Une fois l'extension publiée sur AMO :
+
+1. Ouvre la page de l'extension sur addons.mozilla.org.
+2. **Ajouter à Firefox** → **Autoriser**.
+3. C'est tout. Les mises à jour suivantes sont **automatiques** (Firefox vérifie environ une fois par jour), sans rien retélécharger.
+
+### Installation manuelle (développement)
 
 1. Ouvre `about:debugging#/runtime/this-firefox`.
 2. Clique sur **Charger un module complémentaire temporaire…**.
@@ -31,16 +39,15 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 4. Va sur `https://kyara.games`, connecte-toi avec Discord.
 5. Un bouton **◆ Kyareeh+** apparaît en bas à droite. Raccourci : `Alt+K`.
 
-L'add-on temporaire disparaît au redémarrage de Firefox. Pour une installation permanente, il faut signer le `.xpi` sur [addons.mozilla.org](https://addons.mozilla.org/developers/) (gratuit, en non listé) :
-
-```bash
-npx web-ext build
-# puis upload du .zip de web-ext-artifacts/ sur AMO
-```
+Un add-on temporaire disparaît au redémarrage de Firefox : c'est pour le développement, pas pour un usage quotidien.
 
 ## Mettre à jour
 
-### Si tu as le dépôt (git)
+### Installé depuis AMO (cas normal)
+
+Rien à faire. Firefox télécharge la nouvelle version en arrière-plan et l'active au redémarrage.
+
+### Chargé depuis le dossier (développement)
 
 1. `git pull`
 2. Panneau → **Réglages** → **Recharger l'extension** → **Confirmer** (ou icône de la barre d'outils → **Mettre à jour l'extension**).
@@ -48,18 +55,7 @@ npx web-ext build
 
 Le bouton envoie un message au **script de fond** (`background/background.js`), seul contexte autorisé à appeler `runtime.reload()`. Ce script **rafraîchit l'onglet avant** de recharger l'extension : après `runtime.reload()`, le content script est détruit, donc un `location.reload()` lancé depuis la page ne s'exécuterait jamais (c'était le bug qui faisait croire que la mise à jour ne fonctionnait pas).
 
-### Si tu n'as pas git (ami, autre machine)
-
-L'extension ne peut pas se réécrire toute seule : Firefox n'autorise pas un add-on à modifier ses propres fichiers. Elle fait donc le maximum : elle **vérifie GitHub** et te le dit.
-
-1. Panneau → **Réglages** → la ligne **Sur GitHub** indique la dernière version publiée. Un bandeau **« Version vX disponible »** apparaît dès qu'une version plus récente existe.
-2. Clique sur **Télécharger la dernière version** → une archive `.zip` est téléchargée.
-3. Décompresse-la et **remplace le contenu de ton dossier d'extension** par les nouveaux fichiers (garde le **même dossier** : c'est lui que Firefox surveille).
-4. **Recharger l'extension** → **Confirmer**. La page se rafraîchit automatiquement.
-
-Si tu avais chargé un `.zip` dans `about:debugging` au lieu d'un dossier, Firefox travaille sur une copie extraite : retire l'add-on, puis **Charger un module complémentaire temporaire…** et sélectionne le `manifest.json` du dossier mis à jour.
-
-### Si la version ne change pas
+### Si la version ne change pas (dev)
 
 Le panneau affiche quatre lignes dans les Réglages : **version du code**, **manifeste sur le disque** (relu sans cache), **manifeste chargé par Firefox**, et **Sur GitHub**. Un bandeau s'affiche dès que le fichier du dossier est plus récent que ce que Firefox a en mémoire.
 
@@ -77,6 +73,91 @@ Chaque commit de ce dépôt est poussé automatiquement sur GitHub via le hook `
 ```bash
 git config core.hooksPath .githooks
 ```
+
+## Publier sur AMO (addons.mozilla.org)
+
+C'est la seule façon d'avoir des **mises à jour réellement automatiques** : un add-on
+chargé depuis un dossier ne peut pas se mettre à jour tout seul, et Mozilla **interdit**
+`update_url` dans un add-on signé par AMO (le linter bloque : `MANIFEST_UPDATE_URL`).
+
+### 1. Compte développeur
+
+1. Va sur <https://addons.mozilla.org/developers/> et connecte-toi avec un compte Firefox.
+2. Accepte le contrat développeur.
+3. **Active la double authentification** : elle est obligatoire pour publier.
+
+### 2. Construire le paquet
+
+```bash
+npm install
+npm run release -- --build-only
+```
+
+Le script monte la version, construit `web-ext-artifacts/kyareeh-plus-<version>.zip`
+et lance `web-ext lint` (le paquet doit sortir avec **0 erreur**).
+
+### 3. Soumettre
+
+1. <https://addons.mozilla.org/developers/> → **Submit a New Add-on**.
+2. Choisis **« On this site »** (add-on listé). C'est ce choix qui déclenche les mises à
+   jour automatiques ; « On your own » (non listé) ne les permet pas sans `update_url`, interdit.
+3. Envoie le `.zip`. Mozilla scanne le paquet (automatique) puis demande les métadonnées.
+
+Métadonnées suggérées :
+
+- **Nom** : `Kyareeh+`
+- **Résumé** : `Tableau de bord, valorisation et vente assistée pour kyara.games.`
+- **Catégorie** : `Jeux et loisirs` (ou `Productivité`)
+- **Politique de confidentialité** : `https://github.com/mRNeFF/kyareeh-plus/blob/master/PRIVACY.md`
+- **Collecte de données** : aucune (déjà déclaré dans le manifeste via `data_collection_permissions.required: ["none"]`)
+
+Notes pour le relecteur (champ « Notes to reviewer ») — utile pour éviter un refus :
+
+> Extension de confort pour le site de collection de cartes kyara.games.
+> Elle lit uniquement les données du compte connecté via l'API publique du site,
+> en réutilisant la session déjà ouverte dans l'onglet (aucun identifiant stocké).
+> Aucune donnée n'est envoyée à l'auteur ni à un tiers. Aucune publicité,
+> aucun script distant : tout le code est dans le paquet, non minifié.
+> L'auto-open appelle la même route que le bouton « ouvrir » du site, au rythme choisi par l'utilisateur.
+
+### 4. Validation
+
+- Un add-on **nouveau** passe presque toujours par une relecture humaine : compte
+  quelques heures à quelques jours.
+- Les versions suivantes sont souvent approuvées automatiquement (même code, pas de
+  nouvelle permission).
+
+### 5. Publier les versions suivantes
+
+```bash
+# 1) monter la version, construire, linter, committer, pousser
+npm run release -- 0.10.1
+
+# 2) envoyer sur AMO (deux options)
+
+# a. automatique, avec des clés API
+#    https://addons.mozilla.org/developers/addon/api/key/
+$env:WEB_EXT_API_KEY="user:xxxxx:yyy"
+$env:WEB_EXT_API_SECRET="…"
+npm run release -- 0.10.1
+
+# b. manuel
+#    https://addons.mozilla.org/developers/addon/kyara-plus/versions
+#    « Upload a New Version » → web-ext-artifacts/kyareeh-plus-0.10.1.zip
+```
+
+Après publication, tous les utilisateurs sont mis à jour par Firefox (vérification
+toutes les ~24 h, ou immédiate via `about:addons` → engrenage → **Rechercher des mises à jour**).
+
+### Vérifier le paquet avant envoi
+
+```bash
+npm run lint
+```
+
+Les 10 avertissements `UNSAFE_VAR_ASSIGNMENT` sont attendus : l'interface est construite en
+`innerHTML` dans un Shadow DOM, avec échappement systématique via `esc()` pour toute valeur
+issue du réseau.
 
 ## Utilisation
 

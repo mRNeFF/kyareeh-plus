@@ -3497,16 +3497,16 @@
           </div>
 
           <div class="kp-explain" style="margin-top:10px">
-            <p><b>Tu as installé l'extension depuis un dossier ?</b></p>
+            <p><b>Installée depuis addons.mozilla.org ?</b></p>
             <p>
-              1. Clique sur <b>Télécharger la dernière version</b>.<br>
-              2. Décompresse l'archive et <b>remplace le contenu de ton dossier</b> par les nouveaux fichiers
-              (garde le même dossier, c'est ce que Firefox surveille).<br>
-              3. Clique sur <b>Recharger l'extension</b> ci-dessous : la page se rafraîchit toute seule.
+              Les mises à jour sont <b>automatiques</b> : Firefox télécharge la nouvelle version en arrière-plan
+              et l'active au redémarrage. Rien à faire ici.
             </p>
+            <p><b>Chargée depuis un dossier (développement) ?</b></p>
             <p>
-              Si tu avais chargé un <b>.zip</b> directement dans <code>about:debugging</code>, Firefox travaille sur
-              une copie : retire l'add-on, puis recharge le <code>manifest.json</code> du dossier mis à jour.
+              L'extension ne peut pas réécrire ses propres fichiers. Clique sur <b>Télécharger la dernière version</b>,
+              décompresse l'archive <b>dans le même dossier</b> (celui que Firefox surveille), puis
+              <b>Recharge l'extension</b> ci-dessous.
             </p>
           </div>
           <div class="kp-hint" style="margin-top:8px">
