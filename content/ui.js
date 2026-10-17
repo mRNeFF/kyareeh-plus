@@ -3473,7 +3473,7 @@
             <small>${state.manifestVersion ? (state.manifestOutdated ? 'en retard sur le dossier' : 'à jour') : '—'}</small>
           </div>
           <div class="kp-card-stat" style="margin-top:6px">
-            <span>Sur GitHub</span>
+            <span>Dépôt GitHub</span>
             <b>${u.checking ? '…' : u.version ? `v${esc(u.version)}` : '—'}</b>
             <small>${
               u.checking
@@ -3482,7 +3482,7 @@
                   ? esc(u.error)
                   : u.checkedAt
                     ? newer
-                      ? 'plus récent que ta version'
+                      ? 'plus récent que ta version (pas forcément publié sur AMO)'
                       : 'tu es à jour'
                     : 'jamais vérifié'
             }</small>
