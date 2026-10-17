@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Kyara+ harness</title>
+    <style>
+      html, body { margin: 0; min-height: 100%; background: #0b0c10; color: #fff; font-family: system-ui, sans-serif; }
+      body { padding: 24px; }
+      h1 { font-size: 16px; color: #ff8a6d; }
+      p { color: #9aa0ae; font-size: 12px; max-width: 520px; }
+      #log { margin-top: 18px; padding: 10px; border: 1px solid #2d303a; border-radius: 8px; background: #121318; font: 11px ui-monospace, monospace; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Kyara+ — harness de test</h1>
+    <p>Page locale avec API simulée. Le panneau doit s'ouvrir automatiquement (Alt+K).</p>
+    <div id="log"></div>
+
+    <script>
+      const logEl = document.getElementById('log');
+      const log = (msg) => { logEl.textContent += msg + '\n'; };
+      window.addEventListener('error', (e) => log('ERROR: ' + e.message));
+      window.addEventListener('unhandledrejection', (e) => log('REJECTION: ' + (e.reason?.message || e.reason)));
+
+      const store = {};
+      window.browser = {
+        storage: {
+          local: {
+            get: async (key) => ({ [key]: store[key] }),
+            set: async (obj) => Object.assign(store, obj)
+          }
+        },
+        runtime: {
+          getURL: (path) => '/' + path,
+          onMessage: { addListener: () => {} }
+        },
+        tabs: {}
+      };
+
+      const CHARACTERS = [
+        { id: 127691, name: 'Satoru Gojou', rarity: 'M', series: 'JUJUTSU KAISEN', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 10668, name: 'Conis', rarity: 'C', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b10668-JCNeCZ2ap8UR.png' },
+        { id: 282077, name: 'Vegapunk', rarity: 'C', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b282077-sPmt79g4douV.jpg' },
+        { id: 21122, name: 'Mikoto Uchiha', rarity: 'C', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/n21122-blSqxSAMDwXf.png' },
+        { id: 999001, name: 'Naruto Uzumaki', rarity: 'L', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b17-6LajS4M0J8c0.png' },
+        { id: 999002, name: 'Monkey D. Luffy', rarity: 'E', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b40-5K1xJ0m6w7jK.png' }
+      ];
+
+      const PRICES = {
+        127691: { median7d: 1200, median30d: 1100, sales7d: 4, sales30d: 9 },
+        10668: { median7d: 3, median30d: 3, sales7d: 50, sales30d: 50 },
+        282077: { median7d: 16, median30d: 16, sales7d: 83, sales30d: 85 },
+        21122: { median7d: 4, median30d: 4, sales7d: 40, sales30d: 44 },
+        999001: { median7d: 90, median30d: 80, sales7d: 12, sales30d: 20 },
+        999002: { median7d: 25, median30d: 22, sales7d: 30, sales30d: 41 }
+      };
+
+      const COLLECTION = [
+        { characterId: 127691, qty: 2, listable: 1 },
+        { characterId: 10668, qty: 4, listable: 3 },
+        { characterId: 282077, qty: 3, listable: 2 },
+        { characterId: 21122, qty: 1, listable: 0 },
+        { characterId: 999001, qty: 2, listable: 1 },
+        { characterId: 999002, qty: 1, listable: 0 }
+      ];
+
+      const CONFIG = {
+        catalogSize: 6736,
+        freePacks: { max: 10 },
+        recycle: { C: 1, U: 1, R: 3, E: 10, L: 40, M: 150 },
+        pity: { threshold: 250, rarity: 'M' }
+      };
+
+      const json = (data) => new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+
+      const realFetch = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const url = String(input);
+        if (!url.includes('/api/')) return realFetch(input, init);
+        log('API ' + (init?.method || 'GET') + ' ' + url);
+
+        if (url.includes('/api/me/bootstrap')) {
+          return json({
+            me: { id: 'u-axel', pseudo: 'Axel', chakra: 12345, freePacks: 7, freePacksMax: 10, bonusPacks: 2, pity: 120 },
+            wishlist: []
+          });
+        }
+        if (url.includes('/api/me/collection')) return json(COLLECTION);
+        if (url.includes('/api/characters')) return json(CHARACTERS);
+        if (url.includes('/api/config')) return json(CONFIG);
+        if (url.includes('/api/me/market/access')) return json({ allowed: true });
+        if (url.includes('/api/me/market')) return json({ listings: [] });
+
+        const priceMatch = url.match(/\/api\/market\/prices\/(\d+)/);
+        if (priceMatch) {
+          const id = priceMatch[1];
+          return json({ characterId: Number(id), ...(PRICES[id] || { median7d: null, median30d: null, sales7d: 0 }) });
+        }
+
+        if (url.includes('/api/market/buy-orders')) {
+          const id = new URL(url, location.href).searchParams.get('characterId');
+          const p = PRICES[id];
+          return json(p ? [{ price: Math.max(1, p.median7d - 1), qty: 2, status: 'open' }] : []);
+        }
+
+        if (url.includes('/api/market/listings')) {
+          const params = new URL(url, location.href).searchParams;
+          const id = params.get('characterId');
+          if (id) {
+            const p = PRICES[id];
+            const c = CHARACTERS.find((x) => String(x.id) === String(id));
+            return json({ items: p ? [{ id: 'l-' + id, characterId: Number(id), character: c, type: 'fixed', price: p.median7d + 2, prices: p }] : [], total: 1 });
+          }
+          return json({
+            items: [
+              { id: 'a', characterId: 10668, character: CHARACTERS[1], type: 'auction', price: 1, buyoutPrice: 9, prices: PRICES[10668] },
+              { id: 'b', characterId: 282077, character: CHARACTERS[2], type: 'fixed', price: 7, buyoutPrice: null, prices: PRICES[282077] },
+              { id: 'c', characterId: 999001, character: CHARACTERS[4], type: 'auction', price: 30, buyoutPrice: 70, prices: PRICES[999001] }
+            ],
+            total: 3
+          });
+        }
+
+        return json({});
+      };
+    </script>
+
+    <script src="/content/ui.js"></script>
+    <script>
+      setTimeout(() => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', altKey: true, bubbles: true }));
+        log('Alt+K envoyé');
+      }, 900);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "kyara-plus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Extension Firefox : tableau de bord et vente assistée pour kyara.games",
+  "scripts": {
+    "start": "web-ext run --source-dir .",
+    "lint": "web-ext lint --source-dir .",
+    "build": "web-ext build --source-dir . --filename kyara-plus-0.1.0.zip"
+  },
+  "devDependencies": {
+    "web-ext": "^8.3.0"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Kyara+",
+  "version": "0.1.0",
+  "description": "Tableau de bord de compte, valorisation en chakra et vente assistée des doublons pour kyara.games.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "kyara-plus@axel.dev",
+      "strict_min_version": "115.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["https://kyara.games/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://kyara.games/*"],
+      "js": ["content/ui.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/ui.css", "icons/*"],
+      "matches": ["https://kyara.games/*"]
+    }
+  ],
+  "action": {
+    "default_title": "Kyara+",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "48": "icons/icon-48.png",
+      "96": "icons/icon-96.png"
+    }
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  }
+}
