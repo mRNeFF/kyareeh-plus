@@ -13,8 +13,8 @@
   </head>
   <body>
     <h1>Kyareeh+ — harness de test</h1>
-    <p>Page locale avec API simulée. Le panneau doit s'ouvrir automatiquement (Alt+K).</p>
-    <div id="log"></div>
+      <p>Page locale avec API simulée. Le panneau doit s'ouvrir automatiquement (Alt+K).</p>
+      <div id="log"></div>
 
     <script>
       const logEl = document.getElementById('log');
@@ -23,6 +23,7 @@
       window.addEventListener('unhandledrejection', (e) => log('REJECTION: ' + (e.reason?.message || e.reason)));
 
       const store = {};
+      window.__harnessStore = store;
       window.browser = {
         storage: {
           local: {

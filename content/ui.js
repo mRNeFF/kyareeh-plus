@@ -45,6 +45,7 @@
     autoPackPicked: false,
     autoMaxPerBoosterMin: 10,
     autoSound: true,
+    antiAfk: true,
     autoAllowChakra: true,
     autoRefreshMin: 10,
     autoStopRare: false
@@ -427,9 +428,39 @@
     }
   }
 
+  /**
+   * Bouton unique « Mettre à jour et recharger » :
+   *   1. relit la version publiée sur GitHub ;
+   *   2. si le dossier local est déjà plus récent que ce que Firefox a en mémoire,
+   *      on recharge directement (c'est le cas du dev qui vient de faire git pull) ;
+   *   3. sinon on ouvre le téléchargement et on explique la marche à suivre.
+   * Dans tous les cas la page est rafraîchie par le script de fond.
+   */
+  async function updateAndReload() {
+    await checkRemoteVersion(true);
+
+    const remote = state.update.version;
+    const newerOnline = remote && isNewerVersion(remote, state.version);
+    const staleInMemory = Boolean(state.diskVersion && state.manifestVersion && state.diskVersion !== state.manifestVersion);
+
+    if (staleInMemory) {
+      notify(`Fichiers v${state.diskVersion} en place : rechargement…`);
+      reloadExtension();
+      return;
+    }
+
+    if (newerOnline) {
+      window.open(UPDATE_ZIP, '_blank', 'noopener');
+      notify(`v${remote} téléchargée : décompresse dans le dossier, puis reclique ici.`);
+      return;
+    }
+
+    notify('Tu es déjà à jour — rechargement de l’extension.');
+    reloadExtension();
+  }
+
   /** Version du manifeste réellement chargé par Firefox en mémoire. */
-  function loadedVersion() {
-    try {
+  function loadedVersion() {    try {
       return ext.runtime.getManifest().version || null;
     } catch {
       return null;
@@ -678,6 +709,7 @@
     delete state.settings.autoPackId;
     state.settings.autoPackPicked = Boolean(state.settings.autoPackPicked);
     state.settings.autoSound = state.settings.autoSound !== false;
+    state.settings.antiAfk = state.settings.antiAfk !== false;
     state.settings.autoAllowChakra = state.settings.autoAllowChakra !== false;
     state.settings.autoStopRare = Boolean(state.settings.autoStopRare);
     const cached = await storageGet(PRICE_KEY, {});
@@ -687,8 +719,25 @@
     await mount();
     await loadData();
     startAutoRefreshLoop();
+    installAntiAfk();
     // Vérifie une fois au démarrage si une version plus récente existe sur GitHub.
     setTimeout(() => checkRemoteVersion(), 2500);
+    // Reprise de l'auto-open s'il tournait avant un rechargement de page.
+    setTimeout(() => resumeAutoOpenIfNeeded(), 1500);
+  }
+
+  /** L'auto-open ne s'arrête que sur demande : on le relance après un rechargement. */
+  async function resumeAutoOpenIfNeeded() {
+    if (state.autoOpen.running) return;
+    const saved = await storageGet(AUTO_ACTIVE_KEY, null);
+    if (!saved || !saved.at) return;
+    // Trop vieux : on considère que la session est terminée.
+    if (Date.now() - Number(saved.at) > 12 * 3600 * 1000) {
+      await storageSet(AUTO_ACTIVE_KEY, { at: 0 });
+      return;
+    }
+    if (!state.user) return;
+    startAutoOpen({ resume: true });
   }
 
   async function loadCharacters() {
@@ -2727,6 +2776,7 @@
   const AUTO_MIN_GAP = 10000;
   const AUTO_REMAINING_CAP = 9;
   const AUTO_IDLE_WAIT = 30000;
+  const AUTO_ACTIVE_KEY = 'kyareeh.autoactive.v1';
   const AUTO_REFRESH_DEFAULT = 10;
 
   /** Boosters cochés, dans l'ordre du serveur. */
@@ -2883,6 +2933,107 @@
   function autoDelay() {
     const { min, max } = autoDelayRange();
     return Math.round(min + Math.random() * (max - min));
+  }
+
+  /* --- Anti-AFK ------------------------------------------------------ */
+
+  const AFK_MIN_DELAY = 2000;
+  const AFK_MAX_DELAY = 60000;
+  let afkTimer = null;
+  let afkScanTimer = null;
+  let afkObserver = null;
+  let afkLastScan = 0;
+  const afkSeen = new WeakSet();
+
+  /** Vrai si le libellé ressemble à une confirmation de présence. */
+  function isAfkConfirmLabel(label) {
+    const t = String(label ?? '').trim().toLowerCase();
+    if (!t) return false;
+    return /^(oui|yes|ok|je suis (toujours )?l[àa]|toujours l[àa])/.test(t);
+  }
+
+  /**
+   * Cherche le bouton « Oui » du contrôle anti-AFK.
+   * Le site peut changer ses classes : on ne se fie donc pas à un sélecteur précis,
+   * on remonte les ancêtres du bouton et on regarde le texte affiché.
+   */
+  function findAfkButton() {
+    const buttons = document.querySelectorAll(
+      'button, [role="button"], input[type="button"], input[type="submit"], a[class*="btn"], a[class*="button"]'
+    );
+    for (const btn of buttons) {
+      if (host && (host === btn || host.contains(btn))) continue;
+      const label = btn.innerText || btn.value || btn.getAttribute('aria-label') || '';
+      if (!isAfkConfirmLabel(label)) continue;
+
+      // Remonte jusqu'à 6 ancêtres pour lire le texte de la boîte de dialogue.
+      let node = btn;
+      let context = '';
+      for (let i = 0; i < 6 && node; i += 1) {
+        node = node.parentElement;
+        if (!node) break;
+        const text = node.innerText || '';
+        if (text.length > 1200) break;
+        context = text;
+        if (/toujours|still there|are you (still )?there|inactif|absent|anti[- ]?afk/i.test(text)) return btn;
+      }
+      void context;
+    }
+    return null;
+  }
+
+  function scheduleAfkConfirm() {
+    if (state.settings.antiAfk === false) return;
+    if (afkTimer) return;
+
+    const btn = findAfkButton();
+    if (!btn || afkSeen.has(btn)) return;
+    afkSeen.add(btn);
+
+    const delay = Math.round(AFK_MIN_DELAY + Math.random() * (AFK_MAX_DELAY - AFK_MIN_DELAY));
+    notify(`Anti-AFK détecté : réponse dans ${Math.round(delay / 1000)} s.`);
+
+    afkTimer = setTimeout(() => {
+      afkTimer = null;
+      try {
+        // La boîte a pu être reconstruite entre-temps : on relit l'élément.
+        const target = btn.isConnected ? btn : findAfkButton();
+        if (target && target.isConnected) {
+          target.click();
+          notify(`Anti-AFK : « ${(target.innerText || 'Oui').trim().slice(0, 20)} » cliqué.`);
+        } else {
+          notify('Anti-AFK : la boîte a disparu avant la réponse.');
+        }
+      } catch {
+        /* ignore */
+      }
+      // Un nouveau contrôle peut arriver plus tard.
+      setTimeout(() => scheduleAfkConfirm(), 4000);
+    }, delay);
+
+    render();
+  }
+
+  function scanAfk() {
+    if (state.settings.antiAfk === false) return;
+    if (afkTimer) return;
+    // Le DOM du site bouge beaucoup : on limite les scans à un par seconde.
+    const now = Date.now();
+    if (now - afkLastScan < 1000) return;
+    afkLastScan = now;
+    scheduleAfkConfirm();
+  }
+
+  function installAntiAfk() {
+    if (afkObserver) return;
+    try {
+      afkObserver = new MutationObserver(() => scanAfk());
+      afkObserver.observe(document.documentElement, { childList: true, subtree: true });
+    } catch {
+      /* document pas prêt : le scan périodique suffit */
+    }
+    // Filet de sécurité : certains contrôles apparaissent sans mutation exploitable.
+    if (!afkScanTimer) afkScanTimer = setInterval(scanAfk, 3000);
   }
 
   /* --- Son ---------------------------------------------------------- */
@@ -3042,15 +3193,22 @@
     return map[code] || code || 'raison inconnue';
   }
 
-  async function startAutoOpen() {
+  async function startAutoOpen(opts = {}) {
     const a = state.autoOpen;
     if (a.running) return;
 
     if (!state.packs?.length) await loadPacks();
-    const packs = autoSelectedPacks();
+
+    // Aucune sélection : on prend le premier booster achetable (utile au redémarrage).
+    if (!autoSelectedPacks().length && (state.packs ?? []).length && !state.settings.autoPackPicked) {
+      const first = state.packs.find((pack) => pack && !pack.grantOnly);
+      if (first) state.settings.autoPackIds = [String(first.id)];
+    }
+
+    let packs = autoSelectedPacks();
     if (!packs.length) {
-      notify('Sélectionne au moins un booster.');
-      return;
+      // On démarre quand même : la boucle attendra qu'une sélection existe.
+      a.loop = true;
     }
 
     await loadPackState(true);
@@ -3060,18 +3218,6 @@
       if (me && typeof me === 'object') state.user = me;
     } catch {
       /* on garde les valeurs connues */
-    }
-
-    const allowChakra = state.settings.autoAllowChakra !== false;
-    const available = autoPoolTotal(packs, allowChakra);
-
-    if (available < 1) {
-      notify(
-        allowChakra
-          ? 'Aucun booster ouvrable : ni don, ni booster gratuit, ni assez de chakra.'
-          : 'Rien à ouvrir sans chakra : coche « utiliser mon chakra » ou attends des boosters offerts.'
-      );
-      return;
     }
 
     Object.assign(a, {
@@ -3087,11 +3233,13 @@
       godPacks: 0,
       error: null,
       passNeeded: false,
-      status: 'Ouverture…',
+      status: opts.resume ? 'Reprise de l’auto-open…' : 'Auto-open activé · en attente de boosters…',
       startedAt: Date.now(),
       nextGapMs: 0,
       nextAt: 0
     });
+    // Le drapeau permet de reprendre après un rechargement de page.
+    await storageSet(AUTO_ACTIVE_KEY, { at: Date.now() });
     await persistSettings();
     render();
 
@@ -3104,8 +3252,13 @@
     while (!a.stop) {
       const packs = autoSelectedPacks();
       if (!packs.length) {
-        a.status = 'Arrêté : plus aucun booster sélectionné.';
-        break;
+        // Aucune sélection : on ne s'arrête pas, on réessaie (le compte peut changer).
+        a.status = 'En attente : aucun booster sélectionné';
+        render();
+        await autoSleep(AUTO_IDLE_WAIT);
+        if (a.stop) break;
+        await loadPacks(true);
+        continue;
       }
 
       const pack = pickAutoPack(packs);
@@ -3165,9 +3318,14 @@
           a.status = 'Laissez-passer expiré : ouvre un booster une fois sur le site, puis relance.';
           break;
         }
-        if ((code === 'insufficient_chakra' || code === 'no_funds') && allowChakra) {
-          a.status = 'Arrêté : chakra insuffisant.';
-          break;
+        if (code === 'insufficient_chakra' || code === 'no_funds') {
+          // Pas d'arrêt : le chakra revient avec le temps, on patiente.
+          a.status = `En attente de chakra… ${a.opened} ouvert(s)`;
+          render();
+          await autoSleep(AUTO_IDLE_WAIT);
+          if (a.stop) break;
+          await loadPackState(true);
+          continue;
         }
         if (code === 'rate_limited' && rateHits < 4) {
           rateHits += 1;
@@ -3175,6 +3333,14 @@
           a.status = `Trop de requêtes : pause ${Math.round(wait / 1000)} s…`;
           render();
           await autoSleep(wait);
+          continue;
+        }
+        if (code === 'rate_limited') {
+          // Même bloqué par la limite : on continue de veiller au lieu de s'arrêter.
+          rateHits = 0;
+          a.status = 'Limite de requêtes atteinte : pause de 5 min…';
+          render();
+          await autoSleep(5 * 60 * 1000);
           continue;
         }
         a.error = friendlyError(err);
@@ -3198,6 +3364,8 @@
     }
 
     a.running = false;
+    // Le drapeau de reprise ne survit qu'à un rechargement de page, pas à un arrêt.
+    await storageSet(AUTO_ACTIVE_KEY, { at: 0 });
     if (a.stop) {
       a.status = `Arrêté : ${a.opened} booster(s), ${a.cardCount} carte(s) pour ◆ ${fmt(a.spent)}.`;
     } else if (!a.error) {
@@ -3263,6 +3431,10 @@
             L'extension ouvre les boosters à ta place, <b>un par un</b>, en tirant au hasard parmi ceux que tu coches.
             Elle consomme d'abord les <b>boosters offerts</b>, puis — si tu l'autorises — ton <b>chakra</b>.
           </p>
+          <p>
+            La boucle <b>ne s'arrête jamais toute seule</b> : sans booster ouvrable elle reste en attente et
+            reprend dès qu'un booster apparaît. Seul le bouton <b>Arrêter</b> la coupe.
+          </p>
         </div>
 
         <div class="kp-explain-sub">Boosters à ouvrir <span class="kp-explain-count">${selected.length} sélectionné(s)</span></div>
@@ -3323,14 +3495,14 @@
                      )} booster(s) de la sélection ne sont pas ouvrables (chakra bloqué ou limite atteinte).</div>`
                    : ''
                }`
-            : `<div class="kp-hint">Coche au moins un booster pour pouvoir démarrer.</div>`
+            : `<div class="kp-hint">Aucun booster sélectionné : l'auto-open démarre quand même et attend qu'un booster soit ouvrable. Il ne s'arrête que sur <b>Arrêter</b>.</div>`
         }
 
         <div class="kp-toolbar" style="margin-top:10px">
           ${
             a.running
               ? `<button class="kp-btn is-ghost" type="button" data-act="auto-stop">Arrêter</button>`
-              : `<button class="kp-btn is-primary" type="button" data-act="auto-start" ${selected.length ? '' : 'disabled'}>Démarrer</button>`
+              : `<button class="kp-btn is-primary" type="button" data-act="auto-start">Démarrer</button>`
           }
           <button class="kp-btn" type="button" data-act="auto-refresh" ${a.running ? 'disabled' : ''}>Rafraîchir</button>
           <button class="kp-btn is-ghost" type="button" data-act="auto-sound-test" title="Tester le son">♪</button>
@@ -3489,11 +3661,16 @@
           </div>
 
           <div class="kp-toolbar" style="margin-top:8px">
-            <button class="kp-btn" type="button" data-act="update-check" ${u.checking ? 'disabled' : ''}>
-              ${u.checking ? '<span class="kp-spinner"></span> Vérification…' : 'Vérifier les mises à jour'}
+            <button class="kp-btn is-primary" type="button" data-act="update-now" ${u.checking ? 'disabled' : ''}>
+              ${u.checking ? '<span class="kp-spinner"></span> Vérification…' : 'Mettre à jour et recharger'}
             </button>
-            <button class="kp-btn is-primary" type="button" data-act="update-download">Télécharger la dernière version</button>
+            <button class="kp-btn" type="button" data-act="update-check" ${u.checking ? 'disabled' : ''}>Vérifier</button>
+            <button class="kp-btn" type="button" data-act="update-download">Télécharger</button>
             <button class="kp-btn is-ghost" type="button" data-act="update-repo">Dépôt ↗</button>
+          </div>
+          <div class="kp-hint">
+            <b>Mettre à jour et recharger</b> vérifie GitHub, puis recharge l'extension et la page :
+            un seul clic après un <code>git pull</code>.
           </div>
 
           <div class="kp-explain" style="margin-top:10px">
@@ -3572,6 +3749,20 @@
           <span>Valorisation automatique<small>Calcule les prix manquants à l’ouverture</small></span>
           <input type="checkbox" data-setting="autoPrices" ${state.settings.autoPrices ? 'checked' : ''}>
         </label>
+
+        <div class="kp-section-title" style="margin-top:14px">Présence</div>
+        <label class="kp-field">
+          <span>Répondre à l'anti-AFK<small>Clique « Oui » tout seul, délai aléatoire de 2 s à 1 min</small></span>
+          <input type="checkbox" data-setting="antiAfk" ${state.settings.antiAfk !== false ? 'checked' : ''}>
+        </label>
+        <div class="kp-hint">
+          Surveille l'apparition de la boîte « toujours là ? » sur le site et clique sur le bouton de
+          confirmation après un délai tiré au hasard entre <b>2 s</b> et <b>1 min</b>, pour ne pas
+          répondre instantanément comme un robot.
+        </div>
+        <div class="kp-toolbar">
+          <button class="kp-btn" type="button" data-act="anti-afk-test">Tester la détection</button>
+        </div>
 
         <div class="kp-alert">
           Frais actuels : dépôt ${cfg.feePct} % (min ${cfg.feeMin} ◆) · taxe de vente ${cfg.taxPct} %.
@@ -4518,6 +4709,13 @@
       case 'update-check':
         checkRemoteVersion(true);
         break;
+      case 'update-now':
+        updateAndReload();
+        break;
+      case 'anti-afk-test':
+        notify(state.settings.antiAfk === false ? 'Anti-AFK désactivé.' : 'Anti-AFK actif : détection toutes les 3 s.');
+        scanAfk();
+        break;
       case 'update-download':
         window.open(UPDATE_ZIP, '_blank', 'noopener');
         notify('Archive téléchargée : remplace les fichiers du dossier, puis recharge l’extension.');
@@ -4668,6 +4866,7 @@
       persistSettings();
       if (key === 'ttlH') schedulePriceRun();
       if (key === 'autoRefreshMin') startAutoRefreshLoop();
+      if (key === 'antiAfk' && state.settings.antiAfk !== false) scanAfk();
       if (key === 'dealsSort' || key === 'dealsPages' || key === 'dealsMinPct') {
         // Ces réglages changent la requête : on relance le scan si un scan a déjà eu lieu.
         if (state.deals !== null) scanMarket();
@@ -4830,6 +5029,10 @@
       resetProfile,
       autoRefreshTick,
       checkRemoteVersion,
+      updateAndReload,
+      resumeAutoOpenIfNeeded,
+      scanAfk,
+      findAfkButton,
       autoDelay,
       autoDelayRange,
       startAutoOpen,
