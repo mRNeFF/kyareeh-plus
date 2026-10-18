@@ -28,7 +28,7 @@ const prelude = `
 const block = source.slice(begin, end);
 const factory = new Function(`${prelude}
   ${block}
-  return { priceSeries, trendOf, volatilityOf, confidenceOf, analyzeCard, buildRecommendations, netOf };
+  return { priceSeries, trendOf, volatilityOf, confidenceOf, analyzeCard, buildRecommendations, sellBlockState, netOf };
 `);
 
 const api = factory();
@@ -172,6 +172,40 @@ const noSeries = api.analyzeCard({
 check('sans série mais avec médianes', noSeries.insufficient === false && noSeries.median === 50);
 check('variation de repli 7 j vs 30 j', near(noSeries.changePct, -37.5, 0.1), `change=${noSeries.changePct}`);
 check('projection refusée sans série', noSeries.forecast === null);
+
+/* --- 8. Verrous de revente -------------------------------------------- */
+
+const NOW = Date.parse('2026-10-19T00:00:00.000Z');
+
+const free = api.sellBlockState({ qty: 2, listable: 1 }, NOW);
+check('un exemplaire libre : pas de blocage', free === null);
+
+const resale = api.sellBlockState(
+  { qty: 2, listable: 0, locked: 2, sellBlock: 'resale_lock', resaleUntil: '2026-10-20T02:00:00.000Z' },
+  NOW
+);
+check('revente différée détectée', resale?.code === 'resale_lock');
+check('échéance conservée', resale?.until === Date.parse('2026-10-20T02:00:00.000Z'));
+check('heures restantes calculées', near(resale?.hoursLeft, 26, 0.01), `h=${resale?.hoursLeft}`);
+check('motif explicite 48 h', /48 h/.test(resale?.reason ?? ''));
+
+const escrow = api.sellBlockState({ qty: 1, listable: 0, sellBlock: 'in_escrow', escrow: { listings: 1 } }, NOW);
+check('mise en vente détectée', escrow?.code === 'in_escrow' && escrow?.reason === 'Déjà en vente');
+
+const escrowTrade = api.sellBlockState({ qty: 1, listable: 0, sellBlock: 'in_escrow', escrow: { trades: 1 } }, NOW);
+check('échange détecté', escrowTrade?.reason === 'Engagée dans un échange');
+
+const pinned = api.sellBlockState({ qty: 1, listable: 0, pinned: true }, NOW);
+check('mise de côté détectée', pinned?.code === 'pinned');
+
+const engaged = api.sellBlockState({ qty: 2, listable: 0, locked: 2 }, NOW);
+check('sans motif : tous engagés', engaged?.code === 'all_engaged');
+
+const partial = api.sellBlockState({ qty: 3, listable: 0, locked: 1 }, NOW);
+check('listable prime sur locked', partial?.code === 'all_engaged');
+
+const emptyCard = api.sellBlockState(null, NOW);
+check('carte absente', emptyCard === null);
 
 console.log(`\nContrôles : ${checks} · échecs : ${failures}`);
 process.exit(failures ? 1 : 0);

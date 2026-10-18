@@ -1459,6 +1459,55 @@ img.kp-avatar {
   opacity: 0.45;
 }
 
+/* Carte possédée mais non vendable (revente différée, déjà engagée…) :
+   grisée et décochable, tout en restant lisible. */
+.kp-sell-row.is-locked {
+  background: rgba(255, 255, 255, 0.018);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+.kp-sell-row.is-locked img {
+  filter: grayscale(1) brightness(0.62);
+  opacity: 0.75;
+}
+
+.kp-sell-row.is-locked .kp-row-name {
+  color: var(--kp-muted);
+}
+
+.kp-sell-row.is-locked .kp-sell-price b,
+.kp-sell-row.is-locked .kp-sell-trend {
+  opacity: 0.55;
+}
+
+.kp-sell-row.is-locked input[type='checkbox'] {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.kp-lock-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  padding: 2px 7px;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.1);
+  color: #f5d78e;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.kp-lock-ico {
+  font-size: 9px;
+}
+
+.kp-lock-text {
+  white-space: normal;
+}
+
 .kp-sell-row input[type='checkbox'] {
   width: 14px;
   height: 14px;

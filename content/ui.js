@@ -1163,12 +1163,19 @@
       const qty = Math.max(1, Number(item.qty ?? item.quantity ?? 1));
       const listableRaw = item.listable ?? item.listableQty ?? item.sellable;
       const listable = listableRaw == null ? qty : Math.max(0, Number(listableRaw));
+      // Champs officiels du site pour expliquer un blocage de revente.
+      const lockedQty = Math.max(0, Number(item.locked ?? item.lockedQty ?? 0) || 0);
       const price = priceOf(id);
       rows.push({
         id,
         rawId,
         qty,
         listable,
+        lockedQty,
+        pinned: Boolean(item.pinned),
+        sellBlock: item.sellBlock ?? null,
+        resaleUntil: item.resaleUntil ?? item.sellBlockUntil ?? null,
+        escrow: item.escrow ?? null,
         item,
         c: ch,
         name: ch.name ?? item.name ?? `Carte #${id}`,
@@ -1192,24 +1199,28 @@
    * `listable` vient du serveur : c'est lui qui décide (verrou de revente, annonce
    * déjà en ligne…). On ne force donc plus `qty - 1`, sinon une carte possédée en
    * un seul exemplaire ne serait jamais vendable depuis l'extension.
+   * À défaut de `listable`, on retire les exemplaires verrouillés (`locked`).
    */
   function sellableAllOf(row) {
     if (!row) return 0;
-    const listable = row.listable == null ? row.qty : Math.max(0, Number(row.listable));
-    return Math.max(0, Math.min(row.qty, listable));
+    const qty = Math.max(0, Number(row.qty) || 0);
+    const locked = Math.max(0, Number(row.lockedQty) || 0);
+    const listable = row.listable == null ? qty - locked : Math.max(0, Number(row.listable));
+    return Math.max(0, Math.min(qty, listable));
   }
 
   /** Toutes les cartes possédées, avec ce qui est vendable et ce qui ne l'est pas. */
   function sellRows() {
     return ownedRows().map((row) => {
       const sellable = sellableAllOf(row);
-      const price = row.price;
       return {
         ...row,
         sellable,
         locked: Math.max(0, row.qty - sellable),
         hasDupes: row.qty > 1,
-        lastCopy: sellable >= row.qty && row.qty > 0
+        lastCopy: sellable >= row.qty && row.qty > 0,
+        // Explication du blocage (revente différée, mise en vente, échange…).
+        block: sellable > 0 ? null : sellBlockOfRow({ ...row, sellable })
       };
     });
   }
@@ -1608,6 +1619,78 @@
 
   /* ANALYSIS:BEGIN — bloc autonome, extrait par test/verify-analysis.mjs */
   const DAY_MS = 86400000;
+
+  /**
+   * Pourquoi une carte ne peut pas être mise en vente, et jusqu'à quand.
+   * Reproduit les règles du site :
+   *   sellBlock = 'resale_lock' + resaleUntil → revente bloquée 48 h après un achat/échange
+   *   sellBlock = 'in_escrow'                 → déjà engagée (annonce, offre, échange)
+   *   pinned                                  → mise de côté
+   *   listable = 0 sans motif                 → aucun exemplaire libre
+   * Renvoie null si la carte est vendable.
+   */
+  function sellBlockState(item, now = Date.now()) {
+    if (!item) return null;
+    const qty = Math.max(0, Number(item.qty) || 0);
+    const listable = Number(item.listable);
+    const free = Number.isFinite(listable) ? listable : qty - (Number(item.lockedQty) || 0);
+
+    // Un exemplaire libre suffit : la carte reste vendable.
+    if (qty <= 0 || free > 0) return null;
+
+    const untilRaw = item.resaleUntil ?? item.sellBlockUntil ?? null;
+    const until = untilRaw ? Date.parse(untilRaw) : NaN;
+    const hasUntil = Number.isFinite(until);
+    const hoursLeft = hasUntil ? Math.max(0, (until - now) / 3600000) : null;
+
+    const base = { code: 'unavailable', reason: 'Aucun exemplaire disponible à la vente', until: hasUntil ? until : null, hoursLeft };
+
+    if (item.pinned) {
+      return { ...base, code: 'pinned', reason: 'Mise de côté (échange en cours)' };
+    }
+    if (item.sellBlock === 'resale_lock') {
+      if (hasUntil) {
+        return {
+          ...base,
+          code: 'resale_lock',
+          reason: 'Revente bloquée 48 h après un achat ou un échange',
+          hoursLeft
+        };
+      }
+      return { ...base, code: 'resale_lock', reason: 'Revente temporairement bloquée' };
+    }
+    if (item.sellBlock === 'in_escrow') {
+      const escrow = item.escrow ?? {};
+      const reason = escrow.trades
+        ? 'Engagée dans un échange'
+        : escrow.offers
+          ? 'Engagée dans une offre d’échange'
+          : escrow.listings
+            ? 'Déjà en vente'
+            : 'Engagée sur le marché';
+      return { ...base, code: 'in_escrow', reason };
+    }
+    if (qty > 0 && free <= 0) {
+      return { ...base, code: 'all_engaged', reason: 'Tous les exemplaires sont déjà engagés' };
+    }
+    return base;
+  }
+
+  /** Blocage de revente d'une ligne de collection (données du site). */
+  function sellBlockOfRow(row, now = Date.now()) {
+    return sellBlockState(
+      {
+        qty: row?.qty,
+        listable: row?.sellable ?? row?.listable,
+        lockedQty: row?.lockedQty,
+        pinned: row?.pinned,
+        sellBlock: row?.sellBlock,
+        resaleUntil: row?.resaleUntil,
+        escrow: row?.escrow
+      },
+      now
+    );
+  }
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -2912,9 +2995,60 @@
       }`;
   }
 
+  /** Durée lisible pour un verrou de revente. */
+  function fmtLockDelay(ms) {
+    const total = Math.max(0, Number(ms) || 0);
+    const hours = Math.floor(total / 3600000);
+    const minutes = Math.round((total % 3600000) / 60000);
+    if (hours >= 24) {
+      const days = Math.floor(hours / 24);
+      const rest = hours % 24;
+      return `${days} j${rest ? ` ${rest} h` : ''}`;
+    }
+    if (hours >= 1) return `${hours} h${minutes ? ` ${minutes} min` : ''}`;
+    return `${Math.max(1, minutes)} min`;
+  }
+
+  /** Badge + explication d'une carte non vendable (grisée mais lisible). */
+  function lockBadge(row) {
+    const block = row.block;
+    if (!block) return '';
+    const until = block.until && block.until > Date.now() ? ` · encore ${fmtLockDelay(block.until - Date.now())}` : '';
+    return `<span class="kp-lock-badge" title="${esc(block.reason)}" data-lock-reason="${esc(block.reason)}"${
+      block.until ? ` data-lock-until="${Number(block.until)}"` : ''
+    }><span class="kp-lock-ico">🔒</span><span class="kp-lock-text">${esc(block.reason)}${esc(until)}</span></span>`;
+  }
+
+  /**
+   * Met à jour les décomptes de verrou sans reconstruire le panneau.
+   * Quand un verrou expire, on relit la collection (throttlé) pour que le serveur
+   * confirme que la carte est de nouveau vendable.
+   */
+  let lockReloadAt = 0;
+  function updateLockBadges() {
+    const nodes = shadow ? shadow.querySelectorAll('.kp-lock-badge[data-lock-until]') : [];    let expired = false;
+    for (const node of nodes) {
+      const until = Number(node.getAttribute('data-lock-until'));
+      const reason = node.getAttribute('data-lock-reason') || '';
+      if (!Number.isFinite(until)) continue;
+      const left = until - Date.now();
+      if (left <= 0) {
+        expired = true;
+        continue;
+      }
+      const text = node.querySelector('.kp-lock-text');
+      if (text) text.textContent = `${reason} · encore ${fmtLockDelay(left)}`;
+    }
+    if (expired && Date.now() - lockReloadAt > 60000) {
+      lockReloadAt = Date.now();
+      loadData({ keepPrices: true });
+    }
+  }
+
   function sellOwnedRow(row) {
+    const locked = Boolean(row.block);
     const view = state.sellView;
-    const checked = state.selected.has(row.id);
+    const checked = state.selected.has(row.id) && !locked;
     const info = rarityInfo(row.rarity);
     const price = state.prices[row.id];
     const days = Array.isArray(price?.days) ? price.days.map((point) => toNum(point?.median)).filter((v) => v != null) : [];
@@ -2922,20 +3056,29 @@
     const lowest = state.lowest[row.id];
     const bid = state.buyOrders[row.id];
     const slotsLeft = listingSlots().remaining;
-    const blocked = !checked && selectedCopies() + 1 > slotsLeft;
+    const blocked = !locked && !checked && selectedCopies() + 1 > slotsLeft;
 
     return `
-      <div class="kp-sell-row ${checked ? 'is-selected' : ''} ${blocked ? 'is-disabled' : ''}"
-           data-act="sell-detail" data-id="${esc(row.id)}" title="Ouvrir la fiche de ${esc(row.name)}">
-        <input type="checkbox" data-sel="${esc(row.id)}" ${checked ? 'checked' : ''} ${blocked ? 'disabled' : ''} aria-label="Sélectionner ${esc(row.name)}">
+      <div class="kp-sell-row ${checked ? 'is-selected' : ''} ${blocked ? 'is-disabled' : ''} ${locked ? 'is-locked' : ''}"
+           data-act="sell-detail" data-id="${esc(row.id)}" title="${
+             locked ? esc(row.block.reason) : `Ouvrir la fiche de ${esc(row.name)}`
+           }">
+        <input type="checkbox" data-sel="${esc(row.id)}" ${checked ? 'checked' : ''} ${
+          blocked || locked ? 'disabled' : ''
+        } aria-label="Sélectionner ${esc(row.name)}" ${locked ? 'title="Carte non vendable"' : ''}>
         <img src="${esc(row.image)}" alt="" loading="lazy">
         <div class="kp-sell-main">
           <div class="kp-row-name">${esc(row.name)}</div>
           <div class="kp-row-meta">
             <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
-            ×${fmt(row.qty)}${row.hasDupes ? ` · ${fmt(row.sellable)} vendable${row.sellable > 1 ? 's' : ''}` : row.sellable ? ' · 1 vendable' : ' · verrouillée'}
+            ×${fmt(row.qty)}${
+              row.sellable > 0
+                ? ` · ${fmt(row.sellable)} vendable${row.sellable > 1 ? 's' : ''}`
+                : ` · ${fmt(row.qty)} bloquée${row.qty > 1 ? 's' : ''}`
+            }
             ${price?.sales7d != null ? ` · ${fmt(price.sales7d)} vente(s)/7j` : ''}
           </div>
+          ${lockBadge(row)}
         </div>
         <div class="kp-sell-trend">
           ${sparkline(days, { color: (change ?? 0) >= 0 ? '#4ade80' : '#ff6b6b' })}
@@ -5906,13 +6049,35 @@
                                 <button class="kp-btn is-primary" type="button" data-act="sell-card" data-id="${esc(card.id)}" data-price="${option.price}" data-type="fixed">Vendre à ce prix</button>
                                 <button class="kp-btn" type="button" data-act="sell-card" data-id="${esc(card.id)}" data-price="${option.price}" data-type="auction">Enchère</button>
                               </div>`
-                           : `<div class="kp-hint">Carte absente de ta collection : prix indicatif pour un achat.</div>`
+                           : owned
+                             ? `<div class="kp-hint">Non vendable pour l'instant : ${esc(owned.block?.reason ?? 'aucun exemplaire libre')}.</div>`
+                             : `<div class="kp-hint">Carte absente de ta collection : prix indicatif pour un achat.</div>`
                        }
                      </div>`;
                    })
                    .join('')}
                </div>`
             : `<div class="kp-hint">Pas assez de données pour recommander un prix.</div>`
+        }
+
+        ${
+          owned?.block
+            ? `<div class="kp-alert is-warn" style="margin-top:10px">
+                 <b>Carte non vendable pour le moment</b><br>
+                 ${esc(owned.block.reason)}${
+                   owned.block.until && owned.block.until > Date.now()
+                     ? ` · disponible dans ${esc(fmtLockDelay(owned.block.until - Date.now()))} (${esc(
+                         new Date(owned.block.until).toLocaleString('fr-FR', {
+                           day: '2-digit',
+                           month: '2-digit',
+                           hour: '2-digit',
+                           minute: '2-digit'
+                         })
+                       )})`
+                     : ''
+                 }
+               </div>`
+            : ''
         }
 
         ${
@@ -6260,7 +6425,7 @@
           break;
         }
         if (row.sellable < 1) {
-          notify('Cette carte n’est pas vendable (verrouillée ou déjà en vente).');
+          notify(`Non vendable : ${row.block?.reason ?? 'aucun exemplaire libre'}.`);
           break;
         }
         const price = Number(el.getAttribute('data-price'));
@@ -6506,7 +6671,7 @@
       const need = 1;
 
       if (!row || row.sellable < 1) {
-        notify('Cette carte n’est pas vendable (verrouillée ou déjà en vente).');
+        notify(`Non vendable : ${row?.block?.reason ?? 'carte introuvable dans la collection'}.`);
         render();
         return;
       }
@@ -6809,7 +6974,12 @@
       autoLog,
       loadAutoLog,
       refreshAutoAccount,
-      mergeUser
+      mergeUser,
+      sellRows,
+      sellRowOf,
+      sellBlockState,
+      updateLockBadges,
+      prepareSell
     };
   }
 
@@ -6819,6 +6989,11 @@
   setInterval(() => {
     if (state.autoOpen.nextAt) updateCountdownText();
   }, 1000);
+
+  // Verrous de revente : on rafraîchit les décomptes affichés, sans re-rendu complet.
+  setInterval(() => {
+    if (state.open && state.tab === 'sell') updateLockBadges();
+  }, 30000);
 
   setInterval(() => {
     if (

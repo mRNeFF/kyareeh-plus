@@ -51,8 +51,13 @@
         { id: 282077, name: 'Vegapunk', rarity: 'C', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b282077-sPmt79g4douV.jpg' },
         { id: 21122, name: 'Mikoto Uchiha', rarity: 'C', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/n21122-blSqxSAMDwXf.png' },
         { id: 999001, name: 'Naruto Uzumaki', rarity: 'L', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b17-6LajS4M0J8c0.png' },
-        { id: 999002, name: 'Monkey D. Luffy', rarity: 'E', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b40-5K1xJ0m6w7jK.png' }
+        { id: 999002, name: 'Monkey D. Luffy', rarity: 'E', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b40-5K1xJ0m6w7jK.png' },
+        { id: 45627, name: 'Yuki Nagato', rarity: 'R', series: 'The Melancholy of Haruhi Suzumiya', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b45627-8Gm5zY0q9dKx.png' },
+        { id: 45628, name: 'Itsuki Koizumi', rarity: 'R', series: 'The Melancholy of Haruhi Suzumiya', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b45628-2Kp9xR1mQ7aB.png' }
       ];
+
+      // Revente bloquée 48 h après un achat : même vocabulaire que le site.
+      const RESALE_UNTIL = new Date(Date.now() + 30 * 3600e3).toISOString();
 
       const PRICES = {
         127691: { median7d: 1200, median30d: 1100, sales7d: 4, sales30d: 9 },
@@ -60,7 +65,9 @@
         282077: { median7d: 16, median30d: 16, sales7d: 83, sales30d: 85 },
         21122: { median7d: 4, median30d: 4, sales7d: 40, sales30d: 44 },
         999001: { median7d: 90, median30d: 80, sales7d: 12, sales30d: 20 },
-        999002: { median7d: 25, median30d: 22, sales7d: 30, sales30d: 41 }
+        999002: { median7d: 25, median30d: 22, sales7d: 30, sales30d: 41 },
+        45627: { median7d: 140, median30d: 150, sales7d: 9, sales30d: 28 },
+        45628: { median7d: 60, median30d: 55, sales7d: 6, sales30d: 18 }
       };
 
       const COLLECTION = [
@@ -69,7 +76,26 @@
         { characterId: 282077, qty: 3, listable: 2 },
         { characterId: 21122, qty: 1, listable: 0 },
         { characterId: 999001, qty: 2, listable: 1 },
-        { characterId: 999002, qty: 1, listable: 1 }
+        { characterId: 999002, qty: 1, listable: 1 },
+        // Achetée récemment : revente bloquée jusqu'à RESALE_UNTIL.
+        {
+          characterId: 45627,
+          qty: 2,
+          listable: 0,
+          locked: 2,
+          sellBlock: 'resale_lock',
+          resaleUntil: RESALE_UNTIL,
+          firstAt: new Date(Date.now() - 18 * 3600e3).toISOString()
+        },
+        // Carte unique déjà mise en vente (escrow).
+        {
+          characterId: 45628,
+          qty: 1,
+          listable: 0,
+          locked: 1,
+          sellBlock: 'in_escrow',
+          escrow: { listings: 1 }
+        }
       ];
 
       const CONFIG = {
