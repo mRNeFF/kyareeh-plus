@@ -103,8 +103,11 @@
     const n = typeof v === 'string' ? Number.parseFloat(v.replace(',', '.')) : Number(v);
     return Number.isFinite(n) ? n : null;
   };
-  const nowTime = () =>
-    new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  const nowTime = (at) =>
+    new Date(Number.isFinite(Number(at)) && Number(at) > 0 ? Number(at) : Date.now()).toLocaleTimeString('fr-FR', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
 
   class ApiError extends Error {
     constructor(status, message, code = null) {
@@ -150,6 +153,30 @@
     marketLoaded: new Set(),
     marketLoading: false,
     marketLimit: 24,
+    // Onglet Vente : état séparé de l'ancien onglet Doublons.
+    sellView: {
+      mode: 'mine',
+      query: '',
+      rarity: 'all',
+      series: 'all',
+      type: 'all',
+      sort: 'potential_desc',
+      onlySellable: false,
+      limit: 40,
+      method: 'balanced',
+      detailId: null,
+      detail: null,
+      detailLoading: false,
+      detailError: null,
+      marketItems: null,
+      marketTotal: 0,
+      marketMeta: null,
+      marketLoading: false,
+      marketError: null,
+      marketPage: 1,
+      refreshing: false,
+      lastRefresh: 0
+    },
     deals: null,
     dealsMeta: null,
     dealsError: null,
@@ -980,7 +1007,30 @@
       sales7d: toNum(src.sales7d),
       sales30d: toNum(src.sales30d),
       days: Array.isArray(src.days) ? src.days : null,
+      lastSales: Array.isArray(src.lastSales) ? src.lastSales.slice(0, 20) : null,
+      lastAt: src.lastAt ?? null,
       at: Date.now()
+    };
+  }
+
+  /**
+   * Fusionne une entrée de prix sans perdre l'historique déjà récupéré.
+   * `/api/me/collection/prices` ne renvoie pas `days` ni `lastSales` : un simple
+   * remplacement effacerait la série chargée par `/api/market/prices/:id`.
+   */
+  function mergePriceEntry(id, entry) {
+    const key = String(id ?? '');
+    if (!key) return;
+    const prev = state.prices[key];
+    if (!entry) {
+      state.prices[key] = prev ?? { m7: null, m30: null, at: Date.now(), failed: true };
+      return;
+    }
+    state.prices[key] = {
+      ...(prev ?? {}),
+      ...entry,
+      days: entry.days ?? prev?.days ?? null,
+      lastSales: entry.lastSales ?? prev?.lastSales ?? null
     };
   }
 
@@ -1008,7 +1058,7 @@
 
       if (array) {
         chunk.forEach((id, index) => {
-          state.prices[id] = parsePriceEntry(array[index]) ?? { m7: null, m30: null, at: Date.now() };
+          mergePriceEntry(id, parsePriceEntry(array[index]));
         });
         state.priceRun.done += chunk.length;
       } else if (chunk.length <= 80) {
@@ -1016,16 +1066,16 @@
           if (!state.priceRun.running) break;
           try {
             const data = await api(`/api/market/prices/${encodeURIComponent(id)}`, { timeout: 15000 });
-            state.prices[id] = parsePriceEntry(data) ?? { m7: null, m30: null, at: Date.now() };
+            mergePriceEntry(id, parsePriceEntry(data));
           } catch {
-            state.prices[id] = { m7: null, m30: null, at: Date.now(), failed: true };
+            mergePriceEntry(id, null);
           }
           state.priceRun.done += 1;
           await sleep(120);
         }
       } else {
         chunk.forEach((id) => {
-          state.prices[id] = { m7: null, m30: null, at: Date.now(), failed: true };
+          mergePriceEntry(id, null);
         });
         state.priceRun.done += chunk.length;
       }
@@ -1137,6 +1187,39 @@
     return Math.max(0, Math.min(row.qty - 1, row.listable));
   }
 
+  /**
+   * Exemplaires réellement listables, **dernière copie incluse**.
+   * `listable` vient du serveur : c'est lui qui décide (verrou de revente, annonce
+   * déjà en ligne…). On ne force donc plus `qty - 1`, sinon une carte possédée en
+   * un seul exemplaire ne serait jamais vendable depuis l'extension.
+   */
+  function sellableAllOf(row) {
+    if (!row) return 0;
+    const listable = row.listable == null ? row.qty : Math.max(0, Number(row.listable));
+    return Math.max(0, Math.min(row.qty, listable));
+  }
+
+  /** Toutes les cartes possédées, avec ce qui est vendable et ce qui ne l'est pas. */
+  function sellRows() {
+    return ownedRows().map((row) => {
+      const sellable = sellableAllOf(row);
+      const price = row.price;
+      return {
+        ...row,
+        sellable,
+        locked: Math.max(0, row.qty - sellable),
+        hasDupes: row.qty > 1,
+        lastCopy: sellable >= row.qty && row.qty > 0
+      };
+    });
+  }
+
+  /** Ligne de collection correspondant à un id de carte. */
+  function sellRowOf(id) {
+    const key = String(id ?? '');
+    return sellRows().find((row) => String(row.id) === key) ?? null;
+  }
+
   function duplicateRows() {
     return ownedRows()
       .map((r) => ({ ...r, sellable: sellableOf(r) }))
@@ -1168,6 +1251,261 @@
     };
 
     return rows.sort(comparators[sort] ?? comparators.price_desc);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Onglet Vente : filtres, tri, marché global, fiche                   */
+  /* ------------------------------------------------------------------ */
+
+  const SELL_SORTS = [
+    ['potential_desc', 'Potentiel de vente ↓'],
+    ['change_desc', 'Évolution ↓'],
+    ['change_asc', 'Évolution ↑'],
+    ['price_desc', 'Prix ↓'],
+    ['price_asc', 'Prix ↑'],
+    ['rarity_desc', 'Rareté ↓'],
+    ['copies_desc', 'Exemplaires ↓'],
+    ['name_asc', 'Nom A→Z']
+  ];
+
+  const trendCache = new Map();
+  const historyRequested = new Set();
+
+  /**
+   * Variation en % : série journalière quand elle est en cache, sinon médiane 7 j
+   * comparée à la médiane 30 j (deux agrégats réels de l'API, pas une estimation).
+   */
+  function changePctOf(id) {
+    const key = String(id ?? '');
+    const entry = state.prices[key];
+    if (!entry) return null;
+    if (Array.isArray(entry.days) && entry.days.length >= 2) {
+      const last = entry.days[entry.days.length - 1];
+      const signature = `${entry.days.length}:${last?.day ?? ''}:${last?.median ?? ''}`;
+      const cached = trendCache.get(key);
+      if (cached && cached.signature === signature) return cached.value;
+      const value = trendOf(priceSeries(entry)).changePct;
+      trendCache.set(key, { signature, value });
+      return value;
+    }
+    const m7 = toNum(entry.m7);
+    const m30 = toNum(entry.m30);
+    if (m7 != null && m30 != null && m30 > 0) return ((m7 - m30) / m30) * 100;
+    return null;
+  }
+
+  /**
+   * Récupère la série journalière (`days`) des cartes visibles, par petits lots.
+   * `/api/me/collection/prices` ne la renvoie pas : seul `/api/market/prices/:id` l'a.
+   * On limite volontairement le nombre d'appels pour ne pas taper l'API.
+   */
+  async function loadSellHistory(ids, limit = 8) {
+    const todo = ids
+      .map(String)
+      .filter((id) => !historyRequested.has(id) && !Array.isArray(state.prices[id]?.days))
+      .slice(0, limit);
+    if (!todo.length) return;
+    for (const id of todo) historyRequested.add(id);
+
+    for (const id of todo) {
+      try {
+        const data = await api(`/api/market/prices/${encodeURIComponent(id)}`, { timeout: 15000 });
+        mergePriceEntry(id, parsePriceEntry(data));
+      } catch {
+        /* on garde les agrégats déjà connus */
+      }
+      await sleep(140);
+    }
+    persistPricesSoon();
+    render();
+  }
+
+  /** Valeur nette réalisable si la carte est vendue au prix médian. */
+  function potentialOf(row) {
+    if (row.price == null || row.sellable <= 0) return null;
+    return netOf(Math.round(row.price)) * row.sellable;
+  }
+
+  /** Séries présentes dans la collection (pour le filtre). */
+  function sellSeriesOptions() {
+    const set = new Set();
+    for (const row of sellRows()) if (row.series) set.add(row.series);
+    return [...set].sort((a, b) => a.localeCompare(b, 'fr'));
+  }
+
+  function filteredSellRows(base = sellRows()) {
+    const view = state.sellView;
+    const query = view.query.trim().toLowerCase();
+    let rows = base;
+
+    if (query) {
+      rows = rows.filter((row) => `${row.name} ${row.series}`.toLowerCase().includes(query));
+    }
+    if (view.rarity !== 'all') rows = rows.filter((row) => String(row.rarity) === view.rarity);
+    if (view.series !== 'all') rows = rows.filter((row) => String(row.series) === view.series);
+    if (view.onlySellable) rows = rows.filter((row) => row.sellable > 0);
+
+    const rarityRank = (code) => RARITY_ORDER.indexOf(String(code || 'C').toUpperCase());
+    const valueOf = (row) => (row.price == null ? -1 : row.price);
+    const changeOf = (row) => {
+      const value = changePctOf(row.id);
+      return value == null ? -Infinity : value;
+    };
+
+    const comparators = {
+      price_desc: (a, b) => valueOf(b) - valueOf(a) || b.sellable - a.sellable,
+      price_asc: (a, b) => {
+        // Les cartes sans prix restent en fin de liste.
+        if (a.price == null && b.price == null) return a.name.localeCompare(b.name, 'fr');
+        if (a.price == null) return 1;
+        if (b.price == null) return -1;
+        return a.price - b.price || b.sellable - a.sellable;
+      },
+      copies_desc: (a, b) => b.qty - a.qty || valueOf(b) - valueOf(a),
+      rarity_desc: (a, b) => rarityRank(b.rarity) - rarityRank(a.rarity) || valueOf(b) - valueOf(a),
+      name_asc: (a, b) => a.name.localeCompare(b.name, 'fr'),
+      change_desc: (a, b) => changeOf(b) - changeOf(a) || valueOf(b) - valueOf(a),
+      change_asc: (a, b) => changeOf(a) - changeOf(b) || valueOf(b) - valueOf(a),
+      potential_desc: (a, b) => (potentialOf(b) ?? -1) - (potentialOf(a) ?? -1)
+    };
+
+    return rows.sort(comparators[view.sort] ?? comparators.potential_desc);
+  }
+
+  /** Traduction des tris client vers les tris acceptés par /api/market/listings. */
+  function marketSortParam(sort) {
+    if (sort === 'price_asc' || sort === 'change_asc') return 'price_asc';
+    if (sort === 'name_asc') return 'price_asc';
+    return 'price_desc';
+  }
+
+  /**
+   * Mode « Marché global » : filtrage fait par le serveur (q, rarity, series, type),
+   * pagination réelle via `total`. Aucun scan complet de la place de marché.
+   */
+  async function loadSellMarket(append = false) {
+    const view = state.sellView;
+    if (view.marketLoading) return;
+
+    view.marketLoading = true;
+    view.marketError = null;
+    if (!append) view.marketPage = 1;
+    render();
+
+    try {
+      const params = new URLSearchParams();
+      const query = view.query.trim();
+      if (query) params.set('q', query);
+      if (view.rarity !== 'all') params.set('rarity', view.rarity);
+      if (view.type !== 'all') params.set('type', view.type);
+      params.set('sort', marketSortParam(view.sort));
+      params.set('pageSize', '24');
+      params.set('page', String(view.marketPage));
+
+      const data = await api(`/api/market/listings?${params.toString()}`, { timeout: 25000 });
+      const items = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
+      view.marketItems = append ? [...(view.marketItems ?? []), ...items] : items;
+      view.marketTotal = toNum(data?.total) ?? view.marketItems.length;
+      view.marketMeta = { at: Date.now(), query, rarity: view.rarity, series: view.series, type: view.type };
+      view.marketPage += 1;
+    } catch (err) {
+      view.marketError = friendlyError(err);
+      if (!append) view.marketItems = [];
+    } finally {
+      view.marketLoading = false;
+      render();
+    }
+  }
+
+  /** Prix connus des cartes du marché (déjà embarqués dans la réponse). */
+  function marketPriceOf(item) {
+    const embedded = item?.prices ?? null;
+    return toNum(embedded?.median7d ?? embedded?.median30d) ?? priceOf(item?.characterId ?? item?.character?.id);
+  }
+
+  /** Ouverture de la fiche détaillée : prix, concurrence, carnet d'achat. */
+  async function openCardDetail(id) {
+    const key = String(id ?? '');
+    if (!key) return;
+    const view = state.sellView;
+    view.detailId = key;
+    view.detail = null;
+    view.detailError = null;
+    view.detailLoading = true;
+    render();
+
+    const row = sellRowOf(key);
+    const card = state.characters.get(key) ?? row?.c ?? null;
+
+    const [prices, listings, book] = await Promise.all([
+      api(`/api/market/prices/${encodeURIComponent(key)}`, { timeout: 20000 }).catch(() => null),
+      api(`/api/market/listings?characterId=${encodeURIComponent(key)}&sort=price_asc&pageSize=20`, {
+        timeout: 20000
+      }).catch(() => null),
+      api(`/api/market/buy-orders?characterId=${encodeURIComponent(key)}`, { timeout: 15000 }).catch(() => null)
+    ]);
+
+    if (view.detailId !== key) return;
+
+    if (!prices && !listings) {
+      view.detailLoading = false;
+      view.detailError = 'Impossible de charger les données de marché de cette carte.';
+      render();
+      return;
+    }
+
+    if (prices) {
+      mergePriceEntry(key, parsePriceEntry(prices));
+    }
+
+    view.detail = analyzeCard({
+      prices,
+      listings,
+      book,
+      mine: row,
+      card: {
+        id: key,
+        name: row?.name ?? card?.name ?? `Carte #${key}`,
+        image: row?.image ?? imgSrc(card),
+        rarity: row?.rarity ?? String(card?.rarity ?? 'C').toUpperCase(),
+        series: row?.series ?? card?.series ?? '',
+        floor: recycleFloor(row?.rarity ?? card?.rarity)
+      }
+    });
+    view.detailLoading = false;
+    view.lastRefresh = Date.now();
+    render();
+  }
+
+  function closeCardDetail() {
+    const view = state.sellView;
+    view.detailId = null;
+    view.detail = null;
+    view.detailError = null;
+    view.detailLoading = false;
+    render();
+  }
+
+  /** Actualise prix + concurrence de la fiche ouverte, sans recharger la collection. */
+  async function refreshSellData() {
+    const view = state.sellView;
+    if (view.refreshing) return;
+    view.refreshing = true;
+    render();
+    try {
+      if (view.mode === 'market') {
+        await loadSellMarket(false);
+      } else if (view.detailId) {
+        await openCardDetail(view.detailId);
+      } else {
+        const ids = [...new Set(state.collection.map((c) => String(c.characterId ?? c.id)))];
+        await loadPrices(ids, true);
+      }
+      view.lastRefresh = Date.now();
+    } finally {
+      view.refreshing = false;
+      render();
+    }
   }
 
   function computeStats(rows) {
@@ -1265,6 +1603,343 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Analyse de marché (statistiques explicables)                        */
+  /* ------------------------------------------------------------------ */
+
+  /* ANALYSIS:BEGIN — bloc autonome, extrait par test/verify-analysis.mjs */
+  const DAY_MS = 86400000;
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  /** Pourcentage lisible en français, sans fausse précision. */
+  function fmtPct(value, digits = 1) {
+    if (value == null || !Number.isFinite(value)) return '—';
+    const factor = 10 ** digits;
+    const rounded = Math.round(value * factor) / factor;
+    return `${String(rounded).replace('.', ',')} %`;
+  }
+
+  /** Série journalière propre : `[{ day, median, n }]` triée, sans trou ni zéro. */
+  function priceSeries(prices) {
+    const raw = Array.isArray(prices?.days) ? prices.days : [];
+    const byDay = new Map();
+    for (const point of raw) {
+      const median = toNum(point?.median);
+      const day = String(point?.day ?? '');
+      if (!day || median == null || median <= 0) continue;
+      byDay.set(day, { day, median, n: Math.max(0, toNum(point?.n) ?? 0) });
+    }
+    return [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
+  }
+
+  /** Dernières ventes réelles, du plus récent au plus ancien. */
+  function lastSalesOf(prices) {
+    const raw = Array.isArray(prices?.lastSales) ? prices.lastSales : [];
+    return raw
+      .map((sale) => ({ price: toNum(sale?.price), at: sale?.at ?? null, source: sale?.source ?? '' }))
+      .filter((sale) => sale.price != null && sale.price > 0);
+  }
+
+  /**
+   * Tendance par régression linéaire sur le logarithme des médianes.
+   * Renvoie une pente en %/jour, un R² et la variation totale sur la fenêtre.
+   * Les 9 à 11 points fournis par l'API suffisent : on ne modélise rien de plus.
+   */
+  function trendOf(series) {
+    if (series.length < 2) return { slopePct: null, r2: null, changePct: null, points: series.length };
+    const base = Date.parse(`${series[0].day}T00:00:00Z`);
+    const xs = [];
+    const ys = [];
+    for (const point of series) {
+      const stamp = Date.parse(`${point.day}T00:00:00Z`);
+      if (!Number.isFinite(stamp)) continue;
+      xs.push((stamp - base) / DAY_MS);
+      ys.push(Math.log(point.median));
+    }
+    if (xs.length < 2) return { slopePct: null, r2: null, changePct: null, points: series.length };
+
+    const n = xs.length;
+    const meanX = xs.reduce((a, b) => a + b, 0) / n;
+    const meanY = ys.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0;
+    let sxx = 0;
+    for (let i = 0; i < n; i += 1) {
+      sxy += (xs[i] - meanX) * (ys[i] - meanY);
+      sxx += (xs[i] - meanX) ** 2;
+    }
+    const slope = sxx > 0 ? sxy / sxx : 0;
+
+    let ssRes = 0;
+    let ssTot = 0;
+    for (let i = 0; i < n; i += 1) {
+      const predicted = meanY + slope * (xs[i] - meanX);
+      ssRes += (ys[i] - predicted) ** 2;
+      ssTot += (ys[i] - meanY) ** 2;
+    }
+    const r2 = ssTot > 0 ? clamp(1 - ssRes / ssTot, 0, 1) : 0;
+
+    const first = series[0].median;
+    const last = series[series.length - 1].median;
+    return {
+      slopePct: (Math.exp(slope) - 1) * 100,
+      slope,
+      r2,
+      changePct: first > 0 ? ((last - first) / first) * 100 : null,
+      points: n
+    };
+  }
+
+  /** Volatilité : écart-type des rendements log quotidiens, en %. */
+  function volatilityOf(series) {
+    if (series.length < 3) return null;
+    const returns = [];
+    for (let i = 1; i < series.length; i += 1) {
+      const prev = series[i - 1].median;
+      const next = series[i].median;
+      if (prev > 0 && next > 0) returns.push(Math.log(next / prev));
+    }
+    if (returns.length < 2) return null;
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const variance = returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (returns.length - 1);
+    return Math.sqrt(variance) * 100;
+  }
+
+  /** Note de confiance 0–1, dérivée de la quantité de données réellement disponible. */
+  function confidenceOf({ points, volume, r2, volatility }) {
+    const coverage = clamp(points / 8, 0, 1);
+    const liquidity = clamp(volume / 25, 0, 1);
+    const fit = r2 == null ? 0 : clamp(r2 / 0.7, 0, 1);
+    const stability = volatility == null ? 0.5 : clamp(1 - volatility / 25, 0, 1);
+    const score = coverage * 0.3 + liquidity * 0.3 + fit * 0.25 + stability * 0.15;
+    const level = score >= 0.68 ? 'high' : score >= 0.42 ? 'medium' : 'low';
+    return { score, level };
+  }
+
+  /**
+   * Analyse complète d'une carte : tout est calculé à partir des données renvoyées
+   * par l'API. Quand une donnée manque, on renvoie `null` et l'interface l'affiche
+   * comme indisponible — aucune valeur n'est inventée.
+   */
+  function analyzeCard({ prices = null, listings = null, book = null, card = null, mine = null } = {}) {
+    const series = priceSeries(prices);
+    const sales = lastSalesOf(prices);
+    const trend = trendOf(series);
+    const volatility = volatilityOf(series);
+
+    const median7 = toNum(prices?.median7d);
+    const median30 = toNum(prices?.median30d);
+    const last = toNum(prices?.lastPrice) ?? (series.length ? series[series.length - 1].median : null);
+    const median = median7 ?? median30 ?? last ?? null;
+
+    const salePrices = sales.map((sale) => sale.price);
+    const observedHigh = salePrices.length ? Math.max(...salePrices) : null;
+    const observedLow = salePrices.length ? Math.min(...salePrices) : null;
+    const seriesHigh = series.length ? Math.max(...series.map((p) => p.median)) : null;
+    const seriesLow = series.length ? Math.min(...series.map((p) => p.median)) : null;
+
+    const volume7 = toNum(prices?.sales7d) ?? null;
+    const volume30 = toNum(prices?.sales30d) ?? null;
+    const avgPerDay = series.length
+      ? series.reduce((sum, point) => sum + point.n, 0) / series.length
+      : null;
+
+    // Variation : la série journalière est prioritaire, sinon 7 j vs 30 j.
+    let changePct = trend.changePct;
+    if (changePct == null && median7 != null && median30 != null && median30 > 0) {
+      changePct = ((median7 - median30) / median30) * 100;
+    }
+
+    // Concurrence : annonces fixes des autres vendeurs + meilleur ordre d'achat.
+    const items = Array.isArray(listings?.items) ? listings.items : Array.isArray(listings) ? listings : [];
+    const rivals = items.filter((item) => !item.isMine);
+    const rivalFixed = rivals
+      .filter((item) => String(item.type ?? 'fixed') === 'fixed')
+      .map((item) => toNum(item.price))
+      .filter((value) => value != null && value > 0)
+      .sort((a, b) => a - b);
+    const rivalAuctions = rivals
+      .filter((item) => String(item.type) === 'auction')
+      .map((item) => toNum(item.buyoutPrice) ?? toNum(item.minNextBid) ?? toNum(item.price))
+      .filter((value) => value != null && value > 0)
+      .sort((a, b) => a - b);
+
+    const orders = Array.isArray(book) ? book : Array.isArray(book?.items) ? book.items : [];
+    const bids = orders
+      .filter((order) => !order.isMine)
+      .map((order) => toNum(order?.price ?? order?.maxPrice))
+      .filter((value) => value != null && value > 0)
+      .sort((a, b) => b - a);
+
+    const lowest = rivalFixed[0] ?? rivalAuctions[0] ?? null;
+    const bestBid = bids[0] ?? null;
+    const myListing = items.find((item) => item.isMine) ?? null;
+
+    const confidence = confidenceOf({
+      points: series.length,
+      volume: volume7 ?? 0,
+      r2: trend.r2,
+      volatility
+    });
+
+    // Prévision à 7 jours : seulement si la série est exploitable.
+    let forecast = null;
+    if (series.length >= 4 && trend.slopePct != null && confidence.level !== 'low' && last != null && last > 0) {
+      const raw = last * Math.exp((trend.slope ?? 0) * 7);
+      const capped = clamp(raw, last * 0.7, last * 1.3);
+      const band = clamp((volatility ?? 5) / 100, 0.02, 0.35);
+      forecast = {
+        days: 7,
+        price: Math.max(1, Math.round(capped)),
+        low: Math.max(1, Math.round(capped * (1 - band))),
+        high: Math.max(1, Math.round(capped * (1 + band))),
+        capped: raw !== capped
+      };
+    }
+
+    const floor = card?.floor ?? null;
+    const recommend = buildRecommendations({
+      median,
+      median7,
+      median30,
+      last,
+      lowest,
+      bestBid,
+      observedHigh,
+      changePct,
+      volatility,
+      volume7,
+      floor
+    });
+
+    return {
+      card,
+      mine,
+      series,
+      sales,
+      trend,
+      volatility,
+      median,
+      median7,
+      median30,
+      last,
+      changePct,
+      observedHigh,
+      observedLow,
+      seriesHigh,
+      seriesLow,
+      volume7,
+      volume30,
+      avgPerDay,
+      lowest,
+      rivalFixed,
+      rivalAuctions,
+      bestBid,
+      myListing,
+      rivals: rivals.length,
+      orderCount: bids.length,
+      confidence,
+      forecast,
+      recommend,
+      updatedAt: toNum(prices?.lastAt) ? prices.lastAt : null,
+      insufficient: series.length < 2 && median == null
+    };
+  }
+
+  /**
+   * Trois prix de vente + justification chiffrée.
+   * `net` applique les frais réels (dépôt + taxe) déjà utilisés par la vente assistée.
+   */
+  function buildRecommendations({
+    median,
+    median7,
+    median30,
+    last,
+    lowest,
+    bestBid,
+    observedHigh,
+    changePct,
+    volatility,
+    volume7,
+    floor
+  }) {
+    const base = median ?? median7 ?? median30 ?? last ?? null;
+    if (base == null || base <= 0) return null;
+
+    const min = Math.max(1, Math.round(floor ?? 1));
+    const trend = Number.isFinite(changePct) ? changePct : 0;
+    const vol = Number.isFinite(volatility) ? volatility : null;
+    const safe = (value) => Math.max(min, Math.round(value));
+
+    // 2) Équilibrée : médiane ajustée de la tendance, bornée à ±10 %.
+    const adjust = clamp(trend / 100, -0.1, 0.1);
+    let balancedRaw = base * (1 + adjust);
+    if (lowest != null && lowest > 1) balancedRaw = Math.min(balancedRaw, Math.max(min, lowest));
+    const balanced = safe(balancedRaw);
+
+    // 1) Vente rapide : sous la moins chère, sinon −10 % vs médiane.
+    //    Elle ne dépasse jamais l'équilibrée (les trois prix restent ordonnés).
+    let quickRaw = base * 0.9;
+    if (lowest != null && lowest > 1) quickRaw = Math.min(quickRaw, lowest - 1);
+    if (bestBid != null && bestBid > min) quickRaw = Math.max(quickRaw, Math.min(bestBid, base));
+    const quick = Math.min(balanced, safe(quickRaw));
+
+    // 3) Prix maximal : haut des ventes récentes, sinon +20 % de médiane.
+    //    Toujours ≥ équilibrée, sinon la stratégie n'aurait pas de sens.
+    let maxRaw = Math.max(balanced, base * (1.2 + Math.max(0, adjust)));
+    if (observedHigh != null && observedHigh > balanced) maxRaw = Math.min(maxRaw, observedHigh);
+    maxRaw = Math.min(maxRaw, Math.max(balanced, base * 1.6));
+    const max = Math.max(balanced, safe(maxRaw));
+
+    const liquidity =
+      volume7 == null ? null : volume7 >= 20 ? 'rapide' : volume7 >= 5 ? 'moyen' : 'lent';
+
+    const reason = (price, extra) => {
+      const chunks = [`médiane ◆ ${fmt(base)}`];
+      if (lowest != null) chunks.push(`moins chère ◆ ${fmt(lowest)}`);
+      if (bestBid != null) chunks.push(`meilleur ordre ◆ ${fmt(bestBid)}`);
+      if (vol != null) chunks.push(`volatilité ${fmtPct(vol, 0)}`);
+      if (volume7 != null) chunks.push(`${fmt(volume7)} vente(s)/7j`);
+      if (extra) chunks.push(extra);
+      return chunks.join(' · ');
+    };
+
+    return {
+      quick: {
+        id: 'quick',
+        price: quick,
+        net: netOf(quick),
+        label: 'Vente rapide',
+        delay: liquidity === 'lent' ? 'délai incertain' : 'le plus rapide',
+        reason: reason(quick, quick < base ? `−${Math.round(((base - quick) / base) * 100)} % vs médiane` : null)
+      },
+      balanced: {
+        id: 'balanced',
+        price: balanced,
+        net: netOf(balanced),
+        label: 'Équilibrée',
+        delay: liquidity ? `liquidité ${liquidity}` : null,
+        reason: reason(
+          balanced,
+          Math.abs(adjust) >= 0.005
+            ? `tendance ${trend >= 0 ? '+' : ''}${fmtPct(trend, 1)}`
+            : 'au niveau du marché'
+        )
+      },
+      max: {
+        id: 'max',
+        price: max,
+        net: netOf(max),
+        label: 'Prix maximal',
+        delay: 'délai plus long',
+        reason: reason(max, observedHigh != null && observedHigh > base ? `plus haute vente ◆ ${fmt(observedHigh)}` : '+20 % vs médiane')
+      }
+    };
+  }
+  /* ANALYSIS:END */
+
+  /* ------------------------------------------------------------------ */
   /* Market info (lowest listing + best buy order)                       */
   /* ------------------------------------------------------------------ */
 
@@ -1299,13 +1974,13 @@
 
           const embedded = items.find((it) => it && it.prices)?.prices;
           if (embedded && !priceFresh(state.prices[key])) {
-            state.prices[key] = {
+            mergePriceEntry(key, {
               m7: toNum(embedded.median7d),
               m30: toNum(embedded.median30d),
               sales7d: toNum(embedded.sales7d),
               sales30d: toNum(embedded.sales30d),
               at: Date.now()
-            };
+            });
           }
 
           const orders = Array.isArray(book) ? book : Array.isArray(book?.items) ? book.items : Array.isArray(book?.orders) ? book.orders : [];
@@ -1424,21 +2099,39 @@
   /* Sell flow                                                           */
   /* ------------------------------------------------------------------ */
 
-  function prepareSell() {
-    const rows = filteredDupes().filter((r) => state.selected.has(r.id) && r.sellable > 0);
-    if (!rows.length) return;
+  /**
+   * Prépare une vente. `rows` peut venir de la sélection de l'onglet Vente ou d'une
+   * fiche carte (`openCardDetail` → bouton vendre), avec un prix imposé optionnel.
+   */
+  function prepareSell(rows, options = {}) {
+    const source =
+      Array.isArray(rows) && rows.length
+        ? rows.filter((r) => r.sellable > 0)
+        : filteredSellRows().filter((r) => state.selected.has(r.id) && r.sellable > 0);
+    if (!source.length) return;
 
-    const type = state.settings.saleType;
-    const plan = rows.map((r) => ({
-      characterId: apiId(r.rawId ?? r.id),
-      name: r.name,
-      image: r.image,
-      rarity: r.rarity,
-      qty: r.sellable,
-      median: priceOf(r.id),
-      floor: recycleFloor(r.rarity),
-      price: type === 'auction' ? auctionStartPrice(r.id, r.rarity, state.settings.auctionPct) : suggestPrice(r.id, r.rarity)
-    }));
+    const type = options.type === 'auction' ? 'auction' : options.type === 'fixed' ? 'fixed' : state.settings.saleType;
+    const plan = source.map((r) => {
+      const floor = recycleFloor(r.rarity);
+      const preset = Number(options.price);
+      return {
+        characterId: apiId(r.rawId ?? r.id),
+        id: String(r.id),
+        name: r.name,
+        image: r.image,
+        rarity: r.rarity,
+        qty: Math.max(1, Math.min(r.sellable, r.qty)),
+        totalQty: r.qty,
+        median: priceOf(r.id),
+        floor,
+        price:
+          Number.isFinite(preset) && preset > 0
+            ? Math.max(floor, Math.round(preset))
+            : type === 'auction'
+              ? auctionStartPrice(r.id, r.rarity, state.settings.auctionPct)
+              : suggestPrice(r.id, r.rarity)
+      };
+    });
 
     state.sell = {
       plan,
@@ -1447,6 +2140,8 @@
       buyoutPct: state.settings.buyoutPct,
       running: false,
       done: false,
+      // Vendre toutes les copies d'une carte (dont la dernière) demande une confirmation.
+      confirmLastCopy: false,
       log: []
     };
     render();
@@ -1506,10 +2201,15 @@
   /** Nombre d'exemplaires déjà cochés (chaque copie = une annonce). */
   function selectedCopies() {
     let copies = 0;
-    for (const row of duplicateRows()) {
+    for (const row of sellRows()) {
       if (state.selected.has(row.id)) copies += row.sellable;
     }
     return copies;
+  }
+
+  /** Cartes dont la vente emporterait la (les) dernière(s) copie(s) possédée(s). */
+  function lastCopyRows(plan) {
+    return plan.filter((row) => row.qty >= (row.totalQty ?? row.qty));
   }
 
   function sellBlocker(plan) {
@@ -1541,6 +2241,12 @@
     }
     if (state.access && state.access.allowed === false) {
       return "L'accès au marché n'est pas encore débloqué sur ce compte.";
+    }
+    // Dernière copie : autorisée, mais seulement après confirmation explicite.
+    const lastCopies = lastCopyRows(plan);
+    if (lastCopies.length && !state.sell?.confirmLastCopy) {
+      const names = lastCopies.map((row) => row.name).slice(0, 3).join(', ');
+      return `Tu vends toutes tes copies de ${names}${lastCopies.length > 3 ? '…' : ''} : ces cartes quitteront ta collection. Coche la confirmation pour continuer.`;
     }
     return '';
   }
@@ -1617,6 +2323,10 @@
     state.sell.done = true;
     log('Terminé.', 'info');
     state.selected.clear();
+    // La fiche ouverte n'est plus d'actualité : les copies vendues ont quitté la collection.
+    state.sellView.detailId = null;
+    state.sellView.detail = null;
+    state.sellView.lastRefresh = Date.now();
 
     await loadData({ keepPrices: true });
   }
@@ -1637,6 +2347,8 @@
   function renderUnsafe() {
     if (!state.mounted || !ui) return;
     ui.panel.hidden = !state.open;
+    // L'onglet Vente a besoin de place : panneau élargi, uniquement pour lui.
+    ui.panel.classList.toggle('is-wide', state.tab === 'sell');
     ui.fab.classList.toggle('is-open', state.open);
     if (!state.open) {
       renderModal();
@@ -1714,16 +2426,28 @@
     ui.stats.innerHTML = `
       <div class="kp-metric"><span>Valeur compte</span><b>◆ ${fmt(stats.total)}</b></div>
       <div class="kp-metric"><span>Chakra</span><b>${fmt(chakra)}</b></div>
-      <div class="kp-metric"><span>Doublons</span><b>${fmt(stats.dupCopies)} <small>vendables</small></b></div>
+      <div class="kp-metric"><span>Vendables</span><b>${fmt(stats.dupCopies)} <small>exemplaires</small></b></div>
     `;
+  }
+
+  /** Nombre de cartes réellement vendables, sans construire toutes les lignes. */
+  function countSellableCards() {
+    let count = 0;
+    for (const item of state.collection) {
+      const qty = Math.max(1, Number(item?.qty ?? item?.quantity ?? 1));
+      const listableRaw = item?.listable ?? item?.listableQty ?? item?.sellable;
+      const listable = listableRaw == null ? qty : Math.max(0, Number(listableRaw));
+      if (Math.min(qty, listable) > 0) count += 1;
+    }
+    return count;
   }
 
   function renderTabs() {
     if (!ui) return;
-    const dupes = duplicateRows().length;
+    const sellable = countSellableCards();
     const tabs = [
       ['account', 'Compte'],
-      ['dupes', dupes ? `Doublons (${dupes})` : 'Doublons'],
+      ['sell', sellable ? `Vente (${sellable})` : 'Vente'],
       ['market', 'Marché'],
       ['cards', 'Cartes'],
       ['auto', 'Auto-Open'],
@@ -1760,7 +2484,7 @@
     if (!ui) return;
     const fn = {
       account: viewAccount,
-      dupes: viewDupes,
+      sell: viewSell,
       market: viewMarket,
       cards: viewCards,
       auto: viewAuto,
@@ -1919,7 +2643,7 @@
       </div>
 
       <div class="kp-section">
-        <div class="kp-section-title">Ressources <span class="kp-link" data-act="tab" data-tab="dupes">${plural(dupeCount, 'doublon')} →</span></div>
+        <div class="kp-section-title">Ressources <span class="kp-link" data-act="tab" data-tab="sell">${plural(dupeCount, 'doublon')} →</span></div>
         <div class="kp-chips">
           <span class="kp-chip"><em>Boosters</em> ${booster}${boosterMax != null ? ` / ${boosterMax}` : ''}</span>
           ${bonus ? `<span class="kp-chip"><em>Bonus</em> ${bonus}</span>` : ''}
@@ -1992,93 +2716,349 @@
     `;
   }
 
-  function viewDupes() {
-    if (!state.user) return loginHTML();
-    const all = duplicateRows();
-    const rows = filteredDupes();
+  /* ------------------------------------------------------------------ */
+  /* Onglet Vente : rendu                                                */
+  /* ------------------------------------------------------------------ */
 
-    if (!all.length) {
-      return `<div class="kp-empty"><b>Aucun doublon</b>Ta collection ne contient pas encore de carte en double.</div>`;
+  function pctLabel(value) {
+    if (value == null || !Number.isFinite(value)) return null;
+    const rounded = Math.round(value * 10) / 10;
+    return `${rounded >= 0 ? '+' : ''}${String(rounded).replace('.', ',')} %`;
+  }
+
+  function deltaChip(value) {
+    if (value == null || !Number.isFinite(value)) return '';
+    const dir = value > 0.5 ? 'is-up' : value < -0.5 ? 'is-down' : 'is-flat';
+    return `<span class="kp-delta ${dir}">${pctLabel(value)}</span>`;
+  }
+
+  /** Mini-courbe SVG, sans dépendance : utilisée dans les listes. */
+  function sparkline(values, { width = 62, height = 20, color = '#60a5fa' } = {}) {
+    const clean = (values ?? []).map(Number).filter((v) => Number.isFinite(v));
+    if (clean.length < 2) return '<span class="kp-spark-empty">—</span>';
+    const min = Math.min(...clean);
+    const max = Math.max(...clean);
+    const span = max - min || 1;
+    const step = width / (clean.length - 1);
+    const points = clean
+      .map((value, i) => `${(i * step).toFixed(1)},${(height - 2 - ((value - min) / span) * (height - 4)).toFixed(1)}`)
+      .join(' ');
+    return `<svg class="kp-spark" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-hidden="true">
+      <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"></polyline>
+    </svg>`;
+  }
+
+  /** Graphique d'évolution plus lisible pour la fiche. */
+  function priceChart(analysis) {
+    const series = analysis?.series ?? [];
+    if (series.length < 2) {
+      return `<div class="kp-chart-empty">Historique journalier indisponible pour cette carte (l'API n'a pas encore assez de ventes).</div>`;
     }
+    const w = 420;
+    const h = 128;
+    const padL = 6;
+    const padR = 6;
+    const padT = 10;
+    const padB = 16;
+    const innerW = w - padL - padR;
+    const innerH = h - padT - padB;
+    const values = series.map((point) => point.median);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min || 1;
+    const step = innerW / (series.length - 1);
+    const coords = values.map((value, i) => [
+      padL + i * step,
+      padT + innerH - ((value - min) / span) * innerH
+    ]);
+    const line = coords.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+    const area = `${line} L${coords[coords.length - 1][0].toFixed(1)} ${padT + innerH} L${padL} ${padT + innerH} Z`;
+    const rising = values[values.length - 1] >= values[0];
+    const color = rising ? '#4ade80' : '#ff6b6b';
+    const gradientId = `kpGrad${Math.random().toString(36).slice(2, 8)}`;
+    const first = series[0];
+    const lastPoint = series[series.length - 1];
 
-    if (rows.length) loadMarketInfo(rows.map((r) => r.id), state.marketLimit);
+    return `<svg class="kp-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="Évolution du prix médian">
+      <defs>
+        <linearGradient id="${gradientId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${color}" stop-opacity="0.34"></stop>
+          <stop offset="100%" stop-color="${color}" stop-opacity="0"></stop>
+        </linearGradient>
+      </defs>
+      <line x1="${padL}" y1="${padT + innerH}" x2="${w - padR}" y2="${padT + innerH}" stroke="rgba(255,255,255,0.10)"></line>
+      <line x1="${padL}" y1="${padT}" x2="${w - padR}" y2="${padT}" stroke="rgba(255,255,255,0.06)"></line>
+      <path d="${area}" fill="url(#${gradientId})"></path>
+      <path d="${line}" fill="none" stroke="${color}" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"></path>
+      <circle cx="${coords[coords.length - 1][0].toFixed(1)}" cy="${coords[coords.length - 1][1].toFixed(1)}" r="3" fill="${color}"></circle>
+      <text x="${padL}" y="${h - 3}" class="kp-chart-label">${esc(first.day.slice(5))} · ◆ ${fmt(first.median)}</text>
+      <text x="${w - padR}" y="${h - 3}" text-anchor="end" class="kp-chart-label">${esc(lastPoint.day.slice(5))} · ◆ ${fmt(lastPoint.median)}</text>
+    </svg>`;
+  }
 
-    const slots = listingSlots();
-    const usedCopies = selectedCopies();
-    const freeSlots = Math.max(0, slots.remaining - usedCopies);
-    const selected = rows.filter((r) => state.selected.has(r.id));
-    const totals = sellTotals(
-      selected.map((r) => ({ qty: r.sellable, price: suggestPrice(r.id, r.rarity) }))
-    );
-    const full = usedCopies >= slots.remaining;
+  function sellModeSwitch() {
+    const view = state.sellView;
+    const owned = state.collection.length;
+    return `
+      <div class="kp-seg kp-seg-lg" role="tablist" aria-label="Source de la recherche">
+        <button class="kp-seg-btn ${view.mode === 'mine' ? 'is-active' : ''}" type="button" role="tab" aria-selected="${view.mode === 'mine'}" data-act="sell-mode" data-mode="mine">
+          Mes cartes <small>${fmt(owned)}</small>
+        </button>
+        <button class="kp-seg-btn ${view.mode === 'market' ? 'is-active' : ''}" type="button" role="tab" aria-selected="${view.mode === 'market'}" data-act="sell-mode" data-mode="market">
+          Marché global
+        </button>
+      </div>`;
+  }
+
+  function sellRarityChips(counts, withCounts = true) {
+    const view = state.sellView;
+    const total = withCounts ? counts?.all ?? 0 : null;
+    return `<div class="kp-rarities ${view.rarity !== 'all' ? 'is-focus' : ''}">
+      <button class="kp-rchip ${view.rarity === 'all' ? 'is-active' : ''}" type="button" data-act="sell-rarity" data-rarity="all">Toutes ${total != null ? `<em>${fmt(total)}</em>` : ''}</button>
+      ${RARITY_ORDER.map((code) => {
+        const info = rarityInfo(code);
+        // En mode marché, les compteurs ne concernent que la page affichée : on les masque.
+        const count = withCounts ? counts?.[code] ?? 0 : null;
+        return `<button class="kp-rchip ${view.rarity === code ? 'is-active' : ''}" type="button" data-act="sell-rarity" data-rarity="${code}" style="--rc:${info.color}" ${count === 0 ? 'disabled' : ''}>
+          ${esc(info.label)} ${count != null ? `<em>${fmt(count)}</em>` : ''}
+        </button>`;
+      }).join('')}
+    </div>`;
+  }
+
+  function sellToolbar() {
+    const view = state.sellView;
+    const disabled = view.refreshing || view.marketLoading;
+    return `
+      <div class="kp-toolbar kp-toolbar-search">
+        <input class="kp-input" type="search" data-role="sell-search" autocomplete="off"
+          placeholder="${view.mode === 'market' ? 'Chercher une carte sur le marché…' : 'Filtrer ma collection…'}"
+          value="${esc(view.query)}">
+        <button class="kp-btn ${disabled ? '' : 'is-primary'}" type="button" data-act="sell-refresh" ${disabled ? 'disabled' : ''}>
+          ${view.refreshing || view.marketLoading
+            ? '<span class="kp-spinner"></span> Actualisation…'
+            : view.mode === 'market'
+              ? 'Actualiser le marché'
+              : 'Actualiser les prix'}
+        </button>
+      </div>
+      ${view.mode === 'market' ? `<div class="kp-hint">Recherche faite par le serveur : nom, rareté et type, avec pagination réelle.</div>` : ''}`;
+  }
+
+  function sellFilters(seriesOptions) {
+    const view = state.sellView;
+    return `
+      <div class="kp-filters">
+        <label class="kp-filter">
+          <span>Trier</span>
+          <select class="kp-select" data-sell-sort>
+            ${SELL_SORTS.map(
+              ([value, label]) => `<option value="${value}" ${view.sort === value ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </label>
+        <label class="kp-filter">
+          <span>Type (marché)</span>
+          <select class="kp-select" data-sell-type>
+            ${[
+              ['all', 'Tout'],
+              ['fixed', 'Prix fixe'],
+              ['auction', 'Enchères']
+            ]
+              .map(([value, label]) => `<option value="${value}" ${view.type === value ? 'selected' : ''}>${label}</option>`)
+              .join('')}
+          </select>
+        </label>
+        ${
+          view.mode === 'mine'
+            ? `<label class="kp-filter">
+                 <span>Série</span>
+                 <select class="kp-select" data-sell-series>
+                   <option value="all">Toutes</option>
+                   ${seriesOptions
+                     .map(
+                       (name) =>
+                         `<option value="${esc(name)}" ${view.series === name ? 'selected' : ''}>${esc(name)}</option>`
+                     )
+                     .join('')}
+                 </select>
+               </label>`
+            : ''
+        }
+      </div>
+      ${
+        view.mode === 'mine'
+          ? `<div class="kp-sell-toggles">
+               <label class="kp-check">
+                 <input type="checkbox" data-sell-only-sellable ${view.onlySellable ? 'checked' : ''}>
+                 <span>Seulement les cartes vendables</span>
+               </label>
+             </div>`
+          : ''
+      }`;
+  }
+
+  function sellOwnedRow(row) {
+    const view = state.sellView;
+    const checked = state.selected.has(row.id);
+    const info = rarityInfo(row.rarity);
+    const price = state.prices[row.id];
+    const days = Array.isArray(price?.days) ? price.days.map((point) => toNum(point?.median)).filter((v) => v != null) : [];
+    const change = changePctOf(row.id);
+    const lowest = state.lowest[row.id];
+    const bid = state.buyOrders[row.id];
+    const slotsLeft = listingSlots().remaining;
+    const blocked = !checked && selectedCopies() + row.sellable > slotsLeft;
 
     return `
-      <div class="kp-toolbar">
-        <input class="kp-input" type="search" data-role="dupe-search" placeholder="Filtrer une carte…" value="${esc(state.query)}">
-        <button class="kp-mini-btn" type="button" data-act="select-all" title="Remplit les places libres dans l'ordre de tri">Remplir</button>
-        <button class="kp-mini-btn" type="button" data-act="select-none">Rien</button>
-      </div>
+      <div class="kp-sell-row ${checked ? 'is-selected' : ''} ${blocked ? 'is-disabled' : ''}"
+           data-act="sell-detail" data-id="${esc(row.id)}" title="Ouvrir la fiche de ${esc(row.name)}">
+        <input type="checkbox" data-sel="${esc(row.id)}" ${checked ? 'checked' : ''} ${blocked ? 'disabled' : ''} aria-label="Sélectionner ${esc(row.name)}">
+        <img src="${esc(row.image)}" alt="" loading="lazy">
+        <div class="kp-sell-main">
+          <div class="kp-row-name">${esc(row.name)}</div>
+          <div class="kp-row-meta">
+            <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
+            ×${fmt(row.qty)}${row.hasDupes ? ` · ${fmt(row.sellable)} vendable${row.sellable > 1 ? 's' : ''}` : row.sellable ? ' · 1 vendable' : ' · verrouillée'}
+            ${price?.sales7d != null ? ` · ${fmt(price.sales7d)} vente(s)/7j` : ''}
+          </div>
+        </div>
+        <div class="kp-sell-trend">
+          ${sparkline(days, { color: (change ?? 0) >= 0 ? '#4ade80' : '#ff6b6b' })}
+          ${deltaChip(change)}
+        </div>
+        <div class="kp-sell-price">
+          <b>${row.price != null ? `◆ ${fmt(row.price)}` : '—'}</b>
+          <small>${bid ? `ordre ◆ ${fmt(bid.price)}` : lowest != null ? `min ◆ ${fmt(lowest)}` : 'pas d’annonce'}</small>
+        </div>
+      </div>`;
+  }
 
-      <label class="kp-filter" style="margin-bottom:8px">
-        <span>Trier</span>
-        <select class="kp-select" data-setting="dupeSort">
-          ${DUPE_SORTS.map(
-            ([value, label]) => `<option value="${value}" ${state.settings.dupeSort === value ? 'selected' : ''}>${label}</option>`
-          ).join('')}
-        </select>
-      </label>
+  function sellMarketRow(item, ownedMap) {
+    const id = String(item?.characterId ?? item?.character?.id ?? '');
+    const card = item?.character ?? state.characters.get(id) ?? null;
+    const info = rarityInfo(card?.rarity);
+    const owned = ownedMap?.get(id) ?? null;
+    const median = marketPriceOf(item);
+    const embedded = item?.prices ?? null;
+    const change =
+      embedded?.median7d != null && embedded?.median30d != null && embedded.median30d > 0
+        ? ((embedded.median7d - embedded.median30d) / embedded.median30d) * 100
+        : changePctOf(id);
+    const price = toNum(item?.buyoutPrice) ?? toNum(item?.minNextBid ?? item?.price);
+    const isAuction = String(item?.type) === 'auction';
 
-      <div class="kp-slots ${full ? 'is-full' : ''}">
-        <b>${usedCopies} / ${slots.remaining}</b>
-        annonce(s) sélectionnée(s) · ${freeSlots} place(s) libre(s) sur ${slots.max}
-        ${slots.active ? `<small>(${slots.active} annonce(s) active(s) déjà en ligne)</small>` : ''}
-      </div>
+    return `
+      <div class="kp-sell-row kp-is-clickable" data-act="sell-detail" data-id="${esc(id)}" title="Voir la fiche de ${esc(card?.name ?? 'cette carte')}">
+        <span class="kp-sell-owned">${owned ? `×${fmt(owned.qty)}` : '+'}</span>
+        <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
+        <div class="kp-sell-main">
+          <div class="kp-row-name">${esc(card?.name ?? `Carte #${id}`)}</div>
+          <div class="kp-row-meta">
+            <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
+            ${isAuction ? 'enchère' : 'prix fixe'}
+            ${item?.seller?.pseudo ? ` · ${esc(item.seller.pseudo)}` : ''}
+            ${owned ? '' : ' · pas dans ta collection'}
+          </div>
+        </div>
+        <div class="kp-sell-trend">${deltaChip(change)}</div>
+        <div class="kp-sell-price">
+          <b>◆ ${fmt(price)}</b>
+          <small>méd. ◆ ${fmt(median)}</small>
+        </div>
+      </div>`;
+  }
 
-      <div class="kp-hint">${rows.length} carte(s) · ${rows.reduce((s, r) => s + r.sellable, 0)} exemplaire(s) vendable(s) ${state.marketLoading ? '<span class="kp-spinner"></span>' : ''}
-        ${!state.marketLoading && state.marketLoaded.size < rows.length ? ` · <span class="kp-link" data-act="load-market-more">charger plus de prix marché</span>` : ''}
-      </div>
-      <div class="kp-table">
-        ${rows
-          .map((r) => {
-            const checked = state.selected.has(r.id);
-            const ri = rarityInfo(r.rarity);
-            const bid = state.buyOrders[r.id];
-            const lowest = state.lowest[r.id];
-            const pp = state.prices[r.id];
-            const disabled = !checked && full;
-            return `
-              <label class="kp-row ${checked ? 'is-selected' : ''} ${disabled ? 'is-disabled' : ''}">
-                <input type="checkbox" data-sel="${esc(r.id)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
-                <img src="${esc(r.image)}" alt="" loading="lazy">
-                <div class="kp-row-main">
-                  <div class="kp-row-name">${esc(r.name)}</div>
-                  <div class="kp-row-meta">
-                    <span class="kp-rar" style="--rc:${ri.color}">${esc(ri.label)}</span>
-                    ×${r.qty} · ${r.sellable} vendable${r.sellable > 1 ? 's' : ''}${pp?.sales7d != null ? ` · ${pp.sales7d} vente(s)/7j` : ''} · ♻ ${recycleOf(r.rarity)}
-                  </div>
-                </div>
-                <div class="kp-row-price">
-                  <b>${r.price != null ? `◆ ${fmt(r.price)}` : '—'}</b>
-                  <small class="${bid ? 'is-good' : ''}">${
-                    bid
-                      ? `achat imm. ◆ ${fmt(bid.price)}`
-                      : lowest != null
-                        ? `plus bas ◆ ${fmt(lowest)}`
-                        : 'pas d’annonce'
-                  }</small>
-                </div>
-              </label>`;
-          })
-          .join('')}
-      </div>
+  function sellSelectionBar(rows) {
+    const selected = rows.filter((row) => state.selected.has(row.id));
+    const copies = selected.reduce((sum, row) => sum + row.sellable, 0);
+    const totals = sellTotals(selected.map((row) => ({ qty: row.sellable, price: row.price ?? 1 })));
+    const slots = listingSlots();
+    return `
       <div class="kp-sellbar">
         <div class="kp-sellbar-info">
-          <b>${selected.length} carte(s) · ◆ ${fmt(totals.net)} net</b>
-          <span>${totals.copies} annonce(s) · frais ◆ ${fmt(totals.fees)}</span>
+          <b>${selected.length} carte(s) · ◆ ${fmt(totals.net)} net estimé</b>
+          <span>${copies} annonce(s) · ${slots.remaining} place(s) libre(s) · frais ◆ ${fmt(totals.fees)}</span>
         </div>
         <button class="kp-btn is-primary" type="button" data-act="prepare-sell" ${selected.length ? '' : 'disabled'}>Préparer la vente</button>
+      </div>`;
+  }
+
+  function viewSell() {
+    if (!state.user) return loginHTML();
+    const view = state.sellView;
+    const slots = listingSlots();
+
+    if (view.mode === 'market') {
+      const items = view.marketItems ?? [];
+      // Index construit une seule fois : évite un scan complet de la collection par ligne.
+      const ownedMap = new Map(sellRows().map((row) => [String(row.id), row]));
+      const hasQuery = Boolean(view.query.trim()) || view.rarity !== 'all' || view.type !== 'all';
+      return `
+        ${sellModeSwitch()}
+        ${sellToolbar()}
+        ${sellFilters([])}
+        ${sellRarityChips(null, false)}
+        ${
+          view.marketLoading && !items.length
+            ? '<div class="kp-empty"><span class="kp-spinner"></span> Recherche sur le marché…</div>'
+            : view.marketError
+              ? `<div class="kp-empty"><b>Recherche impossible</b>${esc(view.marketError)}</div>`
+              : !items.length
+                ? `<div class="kp-empty"><b>Aucun résultat</b>${
+                    hasQuery ? 'Aucune annonce ne correspond à ces filtres.' : 'Lance une recherche pour interroger le marché.'
+                  }</div>`
+                : `<div class="kp-hint">${fmt(items.length)} affichée(s) sur ${fmt(view.marketTotal)} annonce(s)${
+                    view.marketMeta?.at ? ` · actualisé ${nowTime(view.marketMeta.at)}` : ''
+                  }</div>
+                   <div class="kp-sell-list">${items
+                     .map((item) => sellMarketRow(item, ownedMap))
+                     .join('')}</div>
+                   ${
+                     items.length < view.marketTotal
+                       ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="sell-more" ${view.marketLoading ? 'disabled' : ''}>Afficher plus</button></div>`
+                       : ''
+                   }`
+        }`;
+    }
+
+    const all = sellRows();
+    const rows = filteredSellRows(all);
+    const sellableCopies = all.reduce((sum, row) => sum + row.sellable, 0);
+    const priced = rows.filter((row) => row.price != null);
+    const counts = { all: all.length };
+    for (const row of all) counts[row.rarity] = (counts[row.rarity] ?? 0) + 1;
+
+    if (!all.length) {
+      return `${sellModeSwitch()}<div class="kp-empty"><b>Collection vide</b>Le site n'a renvoyé aucune carte pour ce compte.</div>`;
+    }
+
+    // Prix marché des lignes affichées uniquement, par petits lots.
+    if (rows.length) {
+      loadMarketInfo(rows.slice(0, 24).map((row) => row.id), Math.min(24, state.marketLimit));
+      loadSellHistory(rows.slice(0, 10).map((row) => row.id), 8);
+    }
+
+    const visible = rows.slice(0, view.limit);
+
+    return `
+      ${sellModeSwitch()}
+      ${sellToolbar()}
+      ${sellFilters(sellSeriesOptions())}
+      ${sellRarityChips(counts)}
+      <div class="kp-hint">
+        ${fmt(all.length)} carte(s) · ${fmt(sellableCopies)} exemplaire(s) vendable(s) · ${fmt(priced.length)} valorisée(s)
+        · ${slots.remaining} place(s) d'annonce libre(s)
+        ${state.marketLoading ? ' <span class="kp-spinner"></span>' : ''}
+        ${view.lastRefresh ? ` · actualisé ${nowTime(view.lastRefresh)}` : ''}
       </div>
-    `;
+      <div class="kp-sell-list">${visible.map(sellOwnedRow).join('')}</div>
+      ${
+        rows.length > visible.length
+          ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="sell-more-rows">Afficher plus (${fmt(rows.length - visible.length)})</button></div>`
+          : ''
+      }
+      ${sellSelectionBar(rows)}`;
   }
 
   function viewMarket() {
@@ -4778,13 +5758,215 @@
   /* Modal                                                               */
   /* ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ */
+  /* Fiche carte (onglet Vente)                                          */
+  /* ------------------------------------------------------------------ */
+
+  const CONFIDENCE_LABEL = { low: 'Faible', medium: 'Moyenne', high: 'Élevée' };
+
+  function statTile(label, value, hint = '') {
+    return `<div class="kp-stat-tile"><span>${esc(label)}</span><b>${value}</b>${hint ? `<small>${hint}</small>` : ''}</div>`;
+  }
+
+  function renderSellDetail() {
+    const view = state.sellView;
+    const analysis = view.detail;
+
+    if (view.detailLoading && !analysis) {
+      return `
+        <div class="kp-modal-head">
+          <b>Fiche carte</b>
+          <button class="kp-icon-btn" type="button" data-act="sell-detail-close">✕</button>
+        </div>
+        <div class="kp-modal-body"><div class="kp-empty"><span class="kp-spinner"></span> Chargement des données de marché…</div></div>`;
+    }
+
+    if (view.detailError && !analysis) {
+      return `
+        <div class="kp-modal-head">
+          <b>Fiche carte</b>
+          <button class="kp-icon-btn" type="button" data-act="sell-detail-close">✕</button>
+        </div>
+        <div class="kp-modal-body">
+          <div class="kp-alert is-bad">${esc(view.detailError)}</div>
+          <div class="kp-toolbar"><button class="kp-btn" type="button" data-act="sell-detail-retry" data-id="${esc(view.detailId ?? '')}">Réessayer</button></div>
+        </div>`;
+    }
+
+    if (!analysis) return '';
+
+    const card = analysis.card;
+    const info = rarityInfo(card.rarity);
+    const trend = analysis.trend;
+    const conf = analysis.confidence;
+    const owned = analysis.mine;
+    const change = analysis.changePct;
+    const dir = change == null ? 'is-flat' : change > 0.5 ? 'is-up' : change < -0.5 ? 'is-down' : 'is-flat';
+
+    const trendText =
+      trend.slopePct == null
+        ? 'Série trop courte pour une tendance'
+        : Math.abs(trend.slopePct) < 0.05
+          ? 'Stable'
+          : `${trend.slopePct > 0 ? 'Haussière' : 'Baissière'} · ${pctLabel(trend.slopePct)}/jour`;
+
+    const forecast = analysis.forecast;
+    const rec = analysis.recommend;
+
+    return `
+      <div class="kp-modal-head">
+        <div class="kp-detail-head">
+          <img src="${esc(card.image)}" alt="">
+          <div>
+            <b>${esc(card.name)}</b>
+            <small>${esc(info.label)}${card.series ? ` · ${esc(card.series)}` : ''}${
+              owned ? ` · ${fmt(owned.qty)} en collection (${fmt(owned.sellable)} vendable${owned.sellable > 1 ? 's' : ''})` : ' · pas dans ta collection'
+            }</small>
+          </div>
+        </div>
+        <button class="kp-icon-btn" type="button" data-act="sell-detail-close">✕</button>
+      </div>
+
+      <div class="kp-modal-body">
+        <div class="kp-price-hero ${dir}">
+          <div>
+            <span>Prix médian 7 j</span>
+            <b>◆ ${analysis.median7 != null ? fmt(analysis.median7) : analysis.median != null ? fmt(analysis.median) : '—'}</b>
+          </div>
+          <div class="kp-price-hero-side">
+            ${deltaChip(change)}
+            <small>${change == null ? 'évolution indisponible' : 'sur la période disponible'}</small>
+          </div>
+        </div>
+
+        ${priceChart(analysis)}
+
+        <div class="kp-stat-grid">
+          ${statTile('Dernière vente', analysis.last != null ? `◆ ${fmt(analysis.last)}` : '—', analysis.updatedAt ? `le ${esc(String(analysis.updatedAt).slice(0, 10))}` : '')}
+          ${statTile('Médiane 30 j', analysis.median30 != null ? `◆ ${fmt(analysis.median30)}` : '—')}
+          ${statTile('Plus haut observé', analysis.observedHigh != null ? `◆ ${fmt(analysis.observedHigh)}` : '—', analysis.observedHigh != null ? '20 dernières ventes' : 'aucune vente')}
+          ${statTile('Plus bas observé', analysis.observedLow != null ? `◆ ${fmt(analysis.observedLow)}` : '—')}
+          ${statTile('Volatilité', analysis.volatility != null ? fmtPct(analysis.volatility) : '—', 'écart-type quotidien')}
+          ${statTile('Ventes 7 j', analysis.volume7 != null ? fmt(analysis.volume7) : '—', analysis.avgPerDay != null ? `${Math.round(analysis.avgPerDay * 10) / 10}/jour` : '')}
+          ${statTile('Concurrence', fmt(analysis.rivals), analysis.lowest != null ? `dès ◆ ${fmt(analysis.lowest)}` : 'aucune annonce')}
+          ${statTile('Meilleur ordre', analysis.bestBid != null ? `◆ ${fmt(analysis.bestBid)}` : '—', analysis.orderCount ? `${analysis.orderCount} ordre(s)` : '')}
+        </div>
+
+        <div class="kp-analysis">
+          <div class="kp-analysis-row">
+            <span>Tendance</span>
+            <b class="${dir}">${esc(trendText)}</b>
+          </div>
+          <div class="kp-analysis-row">
+            <span>Confiance de l'estimation</span>
+            <b class="kp-conf is-${conf.level}">${CONFIDENCE_LABEL[conf.level]} · ${Math.round(conf.score * 100)} %</b>
+          </div>
+          ${
+            forecast
+              ? `<div class="kp-analysis-row">
+                   <span>Projection à 7 jours</span>
+                   <b>◆ ${fmt(forecast.price)} <small>(◆ ${fmt(forecast.low)} – ◆ ${fmt(forecast.high)})</small></b>
+                 </div>
+                 <div class="kp-hint">Estimation statistique, pas une garantie : elle prolonge la tendance des ${trend.points} jours disponibles.</div>`
+              : `<div class="kp-hint">Pas de projection chiffrée : trop peu de points ou confiance insuffisante. La tendance reste affichée telle quelle.</div>`
+          }
+        </div>
+
+        ${
+          rec
+            ? `<div class="kp-explain-sub">Prix de vente recommandé</div>
+               <div class="kp-reco-list">
+                 ${['quick', 'balanced', 'max']
+                   .map((key) => {
+                     const option = rec[key];
+                     return `
+                     <div class="kp-reco is-${key}">
+                       <div class="kp-reco-head">
+                         <b>${esc(option.label)}</b>
+                         <span>◆ ${fmt(option.price)} <small>net ◆ ${fmt(option.net)}</small></span>
+                       </div>
+                       <div class="kp-reco-reason">${esc(option.reason)}</div>
+                       ${
+                         owned && owned.sellable > 0
+                           ? `<div class="kp-reco-actions">
+                                <button class="kp-btn is-primary" type="button" data-act="sell-card" data-id="${esc(card.id)}" data-price="${option.price}" data-type="fixed">Vendre à ce prix</button>
+                                <button class="kp-btn" type="button" data-act="sell-card" data-id="${esc(card.id)}" data-price="${option.price}" data-type="auction">Enchère</button>
+                              </div>`
+                           : `<div class="kp-hint">Carte absente de ta collection : prix indicatif pour un achat.</div>`
+                       }
+                     </div>`;
+                   })
+                   .join('')}
+               </div>`
+            : `<div class="kp-hint">Pas assez de données pour recommander un prix.</div>`
+        }
+
+        ${
+          analysis.myListing
+            ? `<div class="kp-alert" style="margin-top:10px">Tu as déjà une annonce sur cette carte (${esc(
+                analysis.myListing.type === 'auction' ? 'enchère' : 'prix fixe'
+              )} · ◆ ${fmt(analysis.myListing.buyoutPrice ?? analysis.myListing.currentBid ?? analysis.myListing.price)}).</div>`
+            : ''
+        }
+
+        <div class="kp-hint">Dernière actualisation : ${esc(
+          analysis.updatedAt ? String(analysis.updatedAt).slice(0, 16).replace('T', ' ') : 'inconnue'
+        )} · historique limité aux ${analysis.series.length} jour(s) fournis par l'API Kyara.</div>
+      </div>
+
+      <div class="kp-modal-foot">
+        <button class="kp-btn is-ghost" type="button" data-act="sell-detail-close">Fermer</button>
+        <button class="kp-btn" type="button" data-act="sell-detail-refresh" ${view.detailLoading ? 'disabled' : ''}>${
+          view.detailLoading ? '<span class="kp-spinner"></span> Actualisation…' : 'Actualiser'
+        }</button>
+      </div>`;
+  }
+
+  /** Analyse exploitable pour la modale de vente (une seule carte). */
+  function sellModalAnalysis() {
+    const sell = state.sell;
+    if (!sell || sell.plan.length !== 1) return null;
+    const row = sell.plan[0];
+    const detail = state.sellView.detail;
+    if (detail && String(detail.card?.id) === String(row.id)) return detail;
+
+    const cached = state.prices[String(row.id)];
+    if (!cached) return null;
+    return analyzeCard({
+      prices: {
+        median7d: cached.m7,
+        median30d: cached.m30,
+        lastPrice: cached.last,
+        sales7d: cached.sales7d,
+        sales30d: cached.sales30d,
+        days: cached.days,
+        lastSales: cached.lastSales,
+        lastAt: cached.lastAt
+      },
+      card: { id: String(row.id), name: row.name, rarity: row.rarity, floor: row.floor },
+      mine: sellRowOf(row.id)
+    });
+  }
+
   function renderModal() {
     if (!ui) return;
+
+    // Fiche carte ouverte : elle prend la modale tant qu'aucune vente n'est préparée.
+    if (!state.sell && state.sellView.detailId) {
+      ui.modal.hidden = false;
+      ui.modalCard.classList.add('is-wide');
+      ui.modalCard.innerHTML = renderSellDetail();
+      return;
+    }
+
     if (!state.sell) {
       ui.modal.hidden = true;
+      ui.modalCard.classList.remove('is-wide');
       ui.modalCard.innerHTML = '';
       return;
     }
+
+    ui.modalCard.classList.toggle('is-wide', state.sell.plan.length === 1);
 
     const plan = state.sell.plan;
     const isAuction = state.sell.type === 'auction';
@@ -4797,6 +5979,8 @@
       ? buyoutPriceFor(plan[0]?.price ?? 0, state.sell.buyoutPct)
       : null;
     const durations = getCfg().durations;
+    const lastCopies = lastCopyRows(plan);
+    const modalAnalysis = sellModalAnalysis();
 
     ui.modal.hidden = false;
     ui.modalCard.innerHTML = `
@@ -4846,6 +6030,38 @@
         } h · chakra dispo ◆ ${fmt(chakra)} · ${esc(
           state.settings.dryRun ? 'mode simulation' : `délai ${state.settings.gapMs} ms`
         )}${isAuction ? ' · le prix final dépend des enchérisseurs' : ''}</div>
+
+        ${
+          modalAnalysis?.recommend
+            ? `<div class="kp-explain-sub">Prix recommandé</div>
+               <div class="kp-strategy-row">
+                 ${['quick', 'balanced', 'max']
+                   .map((key) => {
+                     const option = modalAnalysis.recommend[key];
+                     const active = Number(plan[0]?.price) === option.price;
+                     return `<button class="kp-strategy ${active ? 'is-active' : ''}" type="button" data-act="sell-strategy" data-price="${option.price}" ${running ? 'disabled' : ''}>
+                       <b>${esc(option.label)}</b>
+                       <span>◆ ${fmt(option.price)} <small>net ◆ ${fmt(option.net)}</small></span>
+                     </button>`;
+                   })
+                   .join('')}
+               </div>
+               <div class="kp-hint">${esc(modalAnalysis.recommend.balanced.reason)}</div>`
+            : ''
+        }
+
+        ${
+          lastCopies.length
+            ? `<div class="kp-alert is-bad" style="margin-top:8px">
+                 <b>Tu vends ta dernière copie</b><br>
+                 ${esc(lastCopies.map((row) => row.name).join(', '))} quittera${lastCopies.length > 1 ? 'ont' : ''} définitivement ta collection.
+                 <label class="kp-check" style="margin-top:6px">
+                   <input type="checkbox" data-sell-confirm-lastcopy ${state.sell.confirmLastCopy ? 'checked' : ''} ${running ? 'disabled' : ''}>
+                   <span>Je confirme vouloir vendre toutes mes copies</span>
+                 </label>
+               </div>`
+            : ''
+        }
 
         ${blocker ? `<div class="kp-alert is-bad">${esc(blocker)}</div>` : ''}
 
@@ -4901,6 +6117,9 @@
     if (!el || !shadow.contains(el)) return;
     const act = el.getAttribute('data-act');
 
+    // La ligne Vente est cliquable, mais la case à cocher ne doit pas ouvrir la fiche.
+    if (act === 'sell-detail' && target.closest('input[data-sel]')) return;
+
     switch (act) {
       case 'toggle':
         toggle();
@@ -4941,7 +6160,11 @@
           state.profile.view = 'self';
           state.profile.error = null;
         }
-        if (state.tab === 'dupes') state.query = '';
+        if (state.tab === 'sell') {
+          state.sellView.query = '';
+          // Première ouverture : on charge le marché global en arrière-plan si besoin.
+          if (state.sellView.mode === 'market' && !state.sellView.marketItems) loadSellMarket(false);
+        }
         render();
         break;
       case 'open-site':
@@ -4971,12 +6194,79 @@
         loadPrices(ids, true);
         break;
       }
+      case 'sell-mode': {
+        const mode = el.getAttribute('data-mode') === 'market' ? 'market' : 'mine';
+        if (state.sellView.mode === mode) break;
+        state.sellView.mode = mode;
+        state.sellView.limit = 40;
+        render();
+        if (mode === 'market' && !state.sellView.marketItems) loadSellMarket(false);
+        break;
+      }
+      case 'sell-rarity': {
+        state.sellView.rarity = el.getAttribute('data-rarity') || 'all';
+        state.sellView.limit = 40;
+        render();
+        if (state.sellView.mode === 'market') loadSellMarket(false);
+        break;
+      }
+      case 'sell-refresh':
+        refreshSellData();
+        break;
+      case 'sell-more':
+        loadSellMarket(true);
+        break;
+      case 'sell-more-rows':
+        state.sellView.limit += 40;
+        render();
+        break;
+      case 'sell-detail': {
+        const id = el.getAttribute('data-id');
+        if (id) openCardDetail(id);
+        break;
+      }
+      case 'sell-detail-close':
+        closeCardDetail();
+        break;
+      case 'sell-detail-refresh':
+      case 'sell-detail-retry': {
+        const id = el.getAttribute('data-id') || state.sellView.detailId;
+        if (id) openCardDetail(id);
+        break;
+      }
+      case 'sell-card': {
+        const id = el.getAttribute('data-id');
+        const row = sellRowOf(id);
+        if (!row) {
+          notify('Carte introuvable dans la collection.');
+          break;
+        }
+        if (row.sellable < 1) {
+          notify('Cette carte n’est pas vendable (verrouillée ou déjà en vente).');
+          break;
+        }
+        const price = Number(el.getAttribute('data-price'));
+        const type = el.getAttribute('data-type');
+        prepareSell([row], { price: Number.isFinite(price) ? price : undefined, type });
+        break;
+      }
+      case 'sell-strategy': {
+        if (!state.sell || state.sell.running) break;
+        const price = Number(el.getAttribute('data-price'));
+        const row = state.sell.plan[0];
+        if (row && Number.isFinite(price) && price > 0) {
+          row.price = Math.max(Math.round(row.floor ?? 1), Math.round(price));
+          render();
+        }
+        break;
+      }
       case 'select-all': {
         // Remplit les places libres restantes, sans jamais dépasser la limite du site.
         const { remaining } = listingSlots();
-        let used = selectedCopies();
+        let used = 0;
         state.selected.clear();
-        for (const row of filteredDupes()) {
+        for (const row of filteredSellRows()) {
+          if (row.sellable < 1) continue;
           if (used + row.sellable > remaining) continue;
           state.selected.add(row.id);
           used += row.sellable;
@@ -4984,7 +6274,7 @@
         }
         if (!state.selected.size && remaining > 0) {
           // Aucune carte ne rentre entièrement : on en prend au moins une.
-          const first = filteredDupes()[0];
+          const first = filteredSellRows().find((row) => row.sellable > 0);
           if (first) state.selected.add(first.id);
         }
         render();
@@ -5199,10 +6489,16 @@
       }
 
       // Une place par exemplaire : on refuse de dépasser les emplacements libres.
-      const row = duplicateRows().find((r) => r.id === id);
+      const row = sellRowOf(id);
       const { remaining } = listingSlots();
       const already = selectedCopies();
       const need = row ? row.sellable : 0;
+
+      if (need < 1) {
+        notify('Cette carte n’est pas vendable (verrouillée ou déjà en vente).');
+        render();
+        return;
+      }
 
       if (already + need > remaining) {
         const free = Math.max(0, remaining - already);
@@ -5216,6 +6512,46 @@
       }
 
       state.selected.add(id);
+      render();
+      return;
+    }
+
+    // --- Onglet Vente : filtres et options ---
+    const sellSort = target.closest('[data-sell-sort]');
+    if (sellSort) {
+      state.sellView.sort = String(sellSort.value);
+      state.sellView.limit = 40;
+      render();
+      if (state.sellView.mode === 'market') loadSellMarket(false);
+      return;
+    }
+
+    const sellType = target.closest('[data-sell-type]');
+    if (sellType) {
+      state.sellView.type = String(sellType.value) || 'all';
+      render();
+      if (state.sellView.mode === 'market') loadSellMarket(false);
+      return;
+    }
+
+    const sellSeries = target.closest('[data-sell-series]');
+    if (sellSeries) {
+      state.sellView.series = String(sellSeries.value) || 'all';
+      state.sellView.limit = 40;
+      render();
+      return;
+    }
+
+    const sellOnlySellable = target.closest('[data-sell-only-sellable]');
+    if (sellOnlySellable) {
+      state.sellView.onlySellable = Boolean(sellOnlySellable.checked);
+      render();
+      return;
+    }
+
+    const confirmLastCopy = target.closest('[data-sell-confirm-lastcopy]');
+    if (confirmLastCopy && state.sell) {
+      state.sell.confirmLastCopy = Boolean(confirmLastCopy.checked);
       render();
       return;
     }
@@ -5342,12 +6678,14 @@
       return;
     }
 
-    const search = target.closest('[data-role="dupe-search"]');
+    const search = target.closest('[data-role="sell-search"]');
     if (!search) return;
-    state.query = search.value;
-    render();
-    const again = qs('[data-role="dupe-search"]');
-    if (again) {
+    state.sellView.query = search.value;
+    state.sellView.limit = 40;
+    // Le champ est reconstruit à chaque rendu : on restaure le focus et le curseur.
+    const restoreFocus = () => {
+      const again = qs('[data-role="sell-search"]');
+      if (!again) return;
       again.focus();
       const pos = again.value.length;
       try {
@@ -5355,8 +6693,31 @@
       } catch {
         /* type=search may not support it */
       }
+    };
+
+    if (state.sellView.mode === 'market') {
+      render();
+      restoreFocus();
+      // Requête serveur différée : on ne tape pas l'API à chaque lettre.
+      if (sellSearchTimer) clearTimeout(sellSearchTimer);
+      sellSearchTimer = setTimeout(() => {
+        sellSearchTimer = null;
+        loadSellMarket(false);
+      }, 400);
+      return;
     }
+
+    // Collection : filtrage local différé, pour rester fluide sur une grosse collection.
+    if (sellRenderTimer) clearTimeout(sellRenderTimer);
+    sellRenderTimer = setTimeout(() => {
+      sellRenderTimer = null;
+      render();
+      restoreFocus();
+    }, 160);
   }
+
+  let sellSearchTimer = null;
+  let sellRenderTimer = null;
 
   async function copyText(text) {
     try {

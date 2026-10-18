@@ -69,7 +69,7 @@
         { characterId: 282077, qty: 3, listable: 2 },
         { characterId: 21122, qty: 1, listable: 0 },
         { characterId: 999001, qty: 2, listable: 1 },
-        { characterId: 999002, qty: 1, listable: 0 }
+        { characterId: 999002, qty: 1, listable: 1 }
       ];
 
       const CONFIG = {
@@ -287,13 +287,48 @@
         const priceMatch = url.match(/\/api\/market\/prices\/(\d+)/);
         if (priceMatch) {
           const id = priceMatch[1];
-          return json({ characterId: Number(id), ...(PRICES[id] || { median7d: null, median30d: null, sales7d: 0 }) });
+          const base = PRICES[id] || { median7d: null, median30d: null, sales7d: 0, sales30d: 0 };
+          // Série journalière simulée : 10 jours, tendance +3 %/jour, volume variable.
+          const median = base.median7d ?? 10;
+          const days = Array.from({ length: 10 }, (_, i) => {
+            const d = new Date(Date.now() - (9 - i) * 86400000);
+            return {
+              day: d.toISOString().slice(0, 10),
+              median: Math.max(1, Math.round(median * Math.pow(0.97, 9 - i))),
+              n: 2 + ((i * 3) % 8)
+            };
+          });
+          const lastSales = Array.from({ length: 20 }, (_, i) => ({
+            price: Math.max(1, Math.round(median * (0.85 + ((i * 7) % 30) / 100))),
+            at: new Date(Date.now() - i * 3600e3).toISOString(),
+            source: i % 3 === 0 ? 'auction' : i % 5 === 0 ? 'buy_order' : 'listing'
+          }));
+          return json({
+            characterId: Number(id),
+            ...base,
+            lastPrice: lastSales[0].price,
+            lastAt: lastSales[0].at,
+            days,
+            lastSales
+          });
         }
 
         if (url.includes('/api/market/buy-orders')) {
           const id = new URL(url, location.href).searchParams.get('characterId');
           const p = PRICES[id];
-          return json(p ? [{ price: Math.max(1, p.median7d - 1), qty: 2, status: 'open' }] : []);
+          return json(
+            p
+              ? [
+                  { price: Math.max(1, Math.round(p.median7d * 0.95)), qty: 2, status: 'open' },
+                  { price: Math.max(1, Math.round(p.median7d * 0.8)), qty: 1, status: 'open' }
+                ]
+              : []
+          );
+        }
+
+        if (url.includes('/api/market/listings') && String(init?.method || 'GET').toUpperCase() === 'POST') {
+          log('   -> listing créé: ' + (init?.body || ''));
+          return json({ ok: true, id: 'new-listing-' + Date.now() });
         }
 
         if (url.includes('/api/market/listings')) {
@@ -302,16 +337,33 @@
           if (id) {
             const p = PRICES[id];
             const c = CHARACTERS.find((x) => String(x.id) === String(id));
-            return json({ items: p ? [{ id: 'l-' + id, characterId: Number(id), character: c, type: 'fixed', price: p.median7d + 2, prices: p }] : [], total: 1 });
+            return json({
+              items: p
+                ? [
+                    { id: 'l-' + id, characterId: Number(id), character: c, type: 'fixed', price: p.median7d + 2, prices: p },
+                    { id: 'm-' + id, characterId: Number(id), character: c, type: 'auction', price: Math.round(p.median7d * 0.8), buyoutPrice: p.median7d, prices: p }
+                  ]
+                : [],
+              total: p ? 2 : 0
+            });
           }
-          return json({
-            items: [
-              { id: 'a', characterId: 10668, character: CHARACTERS[1], type: 'auction', price: 1, buyoutPrice: 9, prices: PRICES[10668] },
-              { id: 'b', characterId: 282077, character: CHARACTERS[2], type: 'fixed', price: 7, buyoutPrice: null, prices: PRICES[282077] },
-              { id: 'c', characterId: 999001, character: CHARACTERS[4], type: 'auction', price: 30, buyoutPrice: 70, prices: PRICES[999001] }
-            ],
-            total: 3
-          });
+          // Recherche marché : on filtre comme le ferait le serveur.
+          const q = (params.get('q') || '').toLowerCase();
+          const rarity = params.get('rarity');
+          const type = params.get('type');
+          const pool = [
+            { id: 'a', characterId: 10668, character: CHARACTERS[1], type: 'auction', price: 1, buyoutPrice: 9, prices: PRICES[10668] },
+            { id: 'b', characterId: 282077, character: CHARACTERS[2], type: 'fixed', price: 7, buyoutPrice: null, prices: PRICES[282077] },
+            { id: 'c', characterId: 999001, character: CHARACTERS[4], type: 'auction', price: 30, buyoutPrice: 70, prices: PRICES[999001] },
+            { id: 'd', characterId: 127691, character: CHARACTERS[0], type: 'fixed', price: 1200, buyoutPrice: null, prices: PRICES[127691] }
+          ];
+          const items = pool.filter(
+            (item) =>
+              (!q || `${item.character.name} ${item.character.series}`.toLowerCase().includes(q)) &&
+              (!rarity || item.character.rarity === rarity) &&
+              (!type || item.type === type)
+          );
+          return json({ items, total: items.length });
         }
 
         return json({});

@@ -1,18 +1,21 @@
 # Kyareeh+
 
-Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de compte, valorisation de la collection en chakra, vente assistée et mise en enchère des doublons.
+Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de compte, valorisation de la collection en chakra, analyse du marché, vente assistée et mise en enchère des cartes.
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.10.2)
+## Fonctionnalités (v0.11.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
 - **Valeur des doublons** : brut, net après taxe de vente (5 %) et frais de dépôt (2 %, min 1 ◆), plus la valeur de recyclage.
 - **Top cartes**, **répartition de la valeur par rareté** et **complétion par série**.
 - **Ressources** : chakra, boosters gratuits / max, bonus, pity, accès au marché.
-- **Onglet Doublons** : tri (prix unitaire, valeur du lot, exemplaires, rareté, nom), quantité, exemplaires vendables, prix médian, annonce la plus basse, meilleur ordre d'achat, liquidité (ventes 7 j), valeur de recyclage. La sélection est plafonnée aux **places d'annonce libres** du site (10 par défaut, moins les annonces actives) : les lignes qui ne rentrent plus sont désactivées et un compteur `sélection / places` reste visible. Le bouton **Remplir** complète automatiquement les places libres dans l'ordre de tri.
-- **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → **durée de l'annonce (12 h par défaut, 12/24/48)** → validation → création des annonces, avec délai configurable, arrêt d'urgence et mode simulation.
+- **Onglet Vente** (ex-« Doublons ») : **toutes** tes cartes, pas seulement les doublons. Deux modes via un sélecteur : **Mes cartes** (recherche locale nom + série, filtres rareté/série, tri par potentiel de vente, évolution, prix, rareté, exemplaires ou nom) et **Marché global** (recherche faite par le serveur : nom, rareté, type, pagination réelle via `total`, avec le nombre d'exemplaires possédés). Chaque ligne affiche une **mini-courbe** du prix et sa variation. La sélection reste plafonnée aux **places d'annonce libres** du site (10 par défaut).
+- **Fiche carte** : prix médian 7 j / 30 j, dernière vente, plus haut et plus bas observés (20 dernières ventes), **graphique d'évolution** issu de la série journalière de l'API, volatilité, volume de ventes, concurrence la moins chère, meilleur ordre d'achat, fraîcheur des données.
+- **Analyse & prévision** : tendance en %/jour par régression sur le log des médianes, volatilité (écart-type des rendements), note de **confiance** (couverture, liquidité, R², stabilité) et projection à 7 jours **bornée à ±30 %**, affichée seulement si les données suffisent. Rien n'est inventé : une donnée absente est affichée comme indisponible.
+- **Prix recommandé** : trois stratégies — **Vente rapide**, **Équilibrée**, **Prix maximal** — avec justification chiffrée (médiane, moins chère annonce, meilleur ordre, volatilité, ventes/7 j) et **net après frais**. Un clic applique le prix dans la vente assistée.
+- **Vente assistée** : sélection → aperçu du brut / frais / taxe / net → **durée de l'annonce (12 h par défaut, 12/24/48)** → validation → création des annonces, avec délai configurable, arrêt d'urgence et mode simulation. La vente d'une **dernière copie** est possible mais demande une confirmation explicite.
 - **Mise en enchère** : au lieu du prix fixe, mise à prix calculée à *médiane − X %* (réglable par lot, 15 % par défaut), avec achat immédiat facultatif à *+ Y %*.
 - **Marché** : scan configurable (tri prix croissant/décroissant/plus récentes/fin proche, jusqu'à 20 pages de 50 annonces, seuil de remise réglable, filtre prix fixe/enchères), classé par économie réelle par rapport à la médiane 7 jours.
 - **Cartes (nouvel onglet)** : en tête, la *chasse à la carte* — probabilité exacte par booster, pour **tous** les boosters disponibles (pool réel, vedettes et pack doré inclus), nombre de boosters attendus, coût moyen et chance d'au moins une sur 100 boosters. Une fois la carte choisie, seule cette carte reste affichée. En dessous, l'espérance de chakra par booster (retour en %) et les prix moyens par rareté.

@@ -85,6 +85,17 @@ select {
   display: none !important;
 }
 
+/* Onglet Vente : panneau élargi pour les graphiques et les listes denses. */
+.kp-panel.is-wide {
+  width: 720px;
+}
+
+@media (max-width: 780px) {
+  .kp-panel.is-wide {
+    width: calc(100vw - 24px);
+  }
+}
+
 .kp-head {
   display: flex;
   align-items: center;
@@ -1364,6 +1375,456 @@ img.kp-avatar {
 .kp-seg-btn.is-active {
   background: rgba(255, 77, 46, 0.16);
   color: #ff8a6d;
+}
+
+/* Sélecteur augmenté « Mes cartes / Marché global » */
+.kp-seg-lg {
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 4px;
+  border-radius: 13px;
+}
+
+.kp-seg-lg .kp-seg-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+
+.kp-seg-lg .kp-seg-btn small {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--kp-muted);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.kp-seg-lg .kp-seg-btn.is-active small {
+  background: rgba(255, 77, 46, 0.24);
+  color: #ffb3a3;
+}
+
+.kp-toolbar-search {
+  align-items: stretch;
+}
+
+.kp-toolbar-search .kp-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.kp-sell-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 2px 0 10px;
+}
+
+/* Liste de l'onglet Vente */
+.kp-sell-list {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.kp-sell-row {
+  display: grid;
+  grid-template-columns: 16px 38px minmax(0, 1fr) 78px auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--kp-bg-2);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.kp-sell-row:hover {
+  border-color: var(--kp-line);
+}
+
+.kp-sell-row.is-selected {
+  border-color: rgba(255, 77, 46, 0.4);
+  background: rgba(255, 77, 46, 0.08);
+}
+
+.kp-sell-row.is-disabled {
+  opacity: 0.45;
+}
+
+.kp-sell-row input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--kp-accent);
+  cursor: pointer;
+}
+
+.kp-sell-row img {
+  display: block;
+  width: 38px;
+  height: 52px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--kp-bg-3);
+}
+
+.kp-is-clickable {
+  cursor: pointer;
+}
+
+.kp-sell-main {
+  min-width: 0;
+  cursor: pointer;
+}
+
+.kp-sell-trend {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.kp-sell-price {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.kp-sell-price b {
+  display: block;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.kp-sell-price small {
+  color: var(--kp-muted);
+  font-size: 9.5px;
+}
+
+.kp-sell-owned {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--kp-muted);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.kp-spark {
+  display: block;
+  overflow: visible;
+}
+
+.kp-spark-empty {
+  color: var(--kp-muted);
+  font-size: 10px;
+}
+
+.kp-delta {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
+.kp-delta.is-up {
+  background: rgba(74, 222, 128, 0.12);
+  color: var(--kp-good);
+}
+
+.kp-delta.is-down {
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--kp-bad);
+}
+
+.kp-delta.is-flat {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--kp-muted);
+}
+
+/* --- Fiche carte -------------------------------------------------- */
+
+.kp-modal-card.is-wide {
+  width: min(620px, calc(100vw - 24px));
+}
+
+.kp-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.kp-detail-head img {
+  width: 40px;
+  height: 56px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--kp-bg-3);
+}
+
+.kp-detail-head b {
+  display: block;
+  font-size: 13.5px;
+}
+
+.kp-detail-head small {
+  display: block;
+  color: var(--kp-muted);
+  font-size: 10px;
+}
+
+.kp-price-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 11px 13px;
+  border: 1px solid var(--kp-line);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(255, 77, 46, 0.10), transparent 70%), var(--kp-bg-2);
+}
+
+.kp-price-hero > div:first-child span {
+  display: block;
+  color: var(--kp-muted);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.kp-price-hero b {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 20px;
+}
+
+.kp-price-hero-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.kp-price-hero-side small {
+  color: var(--kp-muted);
+  font-size: 9px;
+}
+
+.kp-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-bottom: 10px;
+}
+
+.kp-chart-label {
+  fill: var(--kp-muted);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 8.5px;
+}
+
+.kp-chart-empty {
+  margin-bottom: 10px;
+  padding: 14px;
+  border: 1px dashed var(--kp-line);
+  border-radius: 10px;
+  color: var(--kp-muted);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.kp-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+@media (max-width: 560px) {
+  .kp-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.kp-stat-tile {
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: var(--kp-bg-2);
+}
+
+.kp-stat-tile span {
+  display: block;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.kp-stat-tile b {
+  display: block;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.kp-stat-tile small {
+  display: block;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-analysis {
+  margin-bottom: 10px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: var(--kp-bg-2);
+}
+
+.kp-analysis-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 10.5px;
+}
+
+.kp-analysis-row > span {
+  color: var(--kp-muted);
+}
+
+.kp-analysis-row b {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.kp-analysis-row b.is-up {
+  color: var(--kp-good);
+}
+
+.kp-analysis-row b.is-down {
+  color: var(--kp-bad);
+}
+
+.kp-conf.is-low {
+  color: var(--kp-bad);
+}
+
+.kp-conf.is-medium {
+  color: var(--kp-warn);
+}
+
+.kp-conf.is-high {
+  color: var(--kp-good);
+}
+
+.kp-reco-list {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.kp-reco {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: var(--kp-bg-2);
+}
+
+.kp-reco.is-balanced {
+  border-color: rgba(255, 77, 46, 0.34);
+  background: rgba(255, 77, 46, 0.07);
+}
+
+.kp-reco-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kp-reco-head b {
+  font-size: 11.5px;
+}
+
+.kp-reco-head span {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12.5px;
+}
+
+.kp-reco-head small {
+  color: var(--kp-muted);
+  font-size: 9.5px;
+}
+
+.kp-reco-reason {
+  margin-top: 2px;
+  color: var(--kp-muted);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+.kp-reco-actions {
+  display: flex;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.kp-strategy-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 6px;
+}
+
+.kp-strategy {
+  padding: 6px 7px;
+  border: 1px solid var(--kp-line);
+  border-radius: 9px;
+  background: var(--kp-bg-2);
+  color: var(--kp-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kp-strategy:hover {
+  border-color: #3d414d;
+}
+
+.kp-strategy.is-active {
+  border-color: rgba(255, 77, 46, 0.55);
+  background: rgba(255, 77, 46, 0.12);
+}
+
+.kp-strategy b {
+  display: block;
+  font-size: 9.5px;
+}
+
+.kp-strategy span {
+  display: block;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.kp-strategy small {
+  color: var(--kp-muted);
+  font-size: 8.5px;
 }
 
 .kp-opt-row {
