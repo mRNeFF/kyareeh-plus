@@ -2114,13 +2114,17 @@
     const plan = source.map((r) => {
       const floor = recycleFloor(r.rarity);
       const preset = Number(options.price);
+      // Une carte cochée = UNE annonce par défaut ; la quantité reste réglable ensuite.
+      const maxQty = Math.max(1, Math.min(r.sellable, r.qty));
+      const wanted = Math.round(Number(options.qty));
       return {
         characterId: apiId(r.rawId ?? r.id),
         id: String(r.id),
         name: r.name,
         image: r.image,
         rarity: r.rarity,
-        qty: Math.max(1, Math.min(r.sellable, r.qty)),
+        qty: Number.isFinite(wanted) && wanted > 0 ? Math.min(maxQty, wanted) : 1,
+        maxQty,
         totalQty: r.qty,
         median: priceOf(r.id),
         floor,
@@ -2198,11 +2202,11 @@
     return { max, active, remaining: Math.max(0, max - active) };
   }
 
-  /** Nombre d'exemplaires déjà cochés (chaque copie = une annonce). */
+  /** Nombre d'annonces prévues par la sélection : une par carte cochée. */
   function selectedCopies() {
     let copies = 0;
     for (const row of sellRows()) {
-      if (state.selected.has(row.id)) copies += row.sellable;
+      if (state.selected.has(row.id) && row.sellable > 0) copies += 1;
     }
     return copies;
   }
@@ -2219,6 +2223,16 @@
     const isAuction = state.sell?.type === 'auction';
 
     if (!plan.length) return 'Aucune carte sélectionnée.';
+
+    const badQty = plan.find(
+      (row) =>
+        !Number.isInteger(row.qty) ||
+        row.qty < 1 ||
+        row.qty > Math.max(1, row.maxQty ?? row.qty)
+    );
+    if (badQty) {
+      return `${badQty.name} : tu peux mettre en vente entre 1 et ${Math.max(1, badQty.maxQty ?? 1)} exemplaire(s).`;
+    }
 
     const invalid = plan.find((row) => !Number.isInteger(row.price) || row.price < Math.max(1, row.floor ?? 1));
     if (invalid) {
@@ -2908,7 +2922,7 @@
     const lowest = state.lowest[row.id];
     const bid = state.buyOrders[row.id];
     const slotsLeft = listingSlots().remaining;
-    const blocked = !checked && selectedCopies() + row.sellable > slotsLeft;
+    const blocked = !checked && selectedCopies() + 1 > slotsLeft;
 
     return `
       <div class="kp-sell-row ${checked ? 'is-selected' : ''} ${blocked ? 'is-disabled' : ''}"
@@ -2971,8 +2985,8 @@
 
   function sellSelectionBar(rows) {
     const selected = rows.filter((row) => state.selected.has(row.id));
-    const copies = selected.reduce((sum, row) => sum + row.sellable, 0);
-    const totals = sellTotals(selected.map((row) => ({ qty: row.sellable, price: row.price ?? 1 })));
+    const copies = selected.length;
+    const totals = sellTotals(selected.map((row) => ({ qty: 1, price: row.price ?? 1 })));
     const slots = listingSlots();
     return `
       <div class="kp-sellbar">
@@ -6070,7 +6084,11 @@
             .map(
               (row) => `
             <div class="kp-plan-row">
-              <div class="kp-name">${esc(row.name)} <small>×${row.qty}${row.median != null ? ` · méd. ◆ ${fmt(row.median)}` : ''}</small></div>
+              <div class="kp-name">${esc(row.name)} <small>${
+                (row.maxQty ?? 1) > 1 ? `${row.maxQty} vendable(s)` : 'seule copie'
+              }${row.median != null ? ` · méd. ◆ ${fmt(row.median)}` : ''}</small></div>
+              <input type="number" min="1" max="${Math.max(1, row.maxQty ?? 1)}" step="1" value="${row.qty}"
+                data-sell-qty="${esc(row.characterId)}" title="Nombre d'exemplaires à mettre en vente" ${running ? 'disabled' : ''}>
               <input type="number" min="${Math.max(1, row.floor ?? 1)}" step="1" value="${row.price}" data-sell-price="${esc(row.characterId)}" ${running ? 'disabled' : ''}>
               <div class="kp-net">◆ ${fmt(netOf(row.price) * row.qty)}</div>
             </div>`
@@ -6261,21 +6279,14 @@
         break;
       }
       case 'select-all': {
-        // Remplit les places libres restantes, sans jamais dépasser la limite du site.
+        // Une carte = une annonce : on remplit les places libres, sans dépasser la limite.
         const { remaining } = listingSlots();
-        let used = 0;
+        const list = filteredSellRows();
         state.selected.clear();
-        for (const row of filteredSellRows()) {
+        for (const row of list) {
           if (row.sellable < 1) continue;
-          if (used + row.sellable > remaining) continue;
+          if (state.selected.size >= remaining) break;
           state.selected.add(row.id);
-          used += row.sellable;
-          if (used >= remaining) break;
-        }
-        if (!state.selected.size && remaining > 0) {
-          // Aucune carte ne rentre entièrement : on en prend au moins une.
-          const first = filteredSellRows().find((row) => row.sellable > 0);
-          if (first) state.selected.add(first.id);
         }
         render();
         break;
@@ -6488,13 +6499,13 @@
         return;
       }
 
-      // Une place par exemplaire : on refuse de dépasser les emplacements libres.
+      // Une place par carte cochée (une annonce par défaut).
       const row = sellRowOf(id);
       const { remaining } = listingSlots();
       const already = selectedCopies();
-      const need = row ? row.sellable : 0;
+      const need = 1;
 
-      if (need < 1) {
+      if (!row || row.sellable < 1) {
         notify('Cette carte n’est pas vendable (verrouillée ou déjà en vente).');
         render();
         return;
@@ -6504,7 +6515,7 @@
         const free = Math.max(0, remaining - already);
         notify(
           free > 0
-            ? `Pas assez de places : ${free} exemplaire(s) possible(s) pour cette carte (${remaining} place(s) libre(s) au total).`
+            ? `Il te reste ${free} place(s) d'annonce : retire une annonce ou décoche une carte.`
             : `Limite d'annonces actives atteinte (${listingSlots().active}/${listingSlots().max}). Retire une annonce ou décoche une carte.`
         );
         render();
@@ -6629,6 +6640,21 @@
       const row = state.sell.plan.find((r) => String(r.characterId) === String(id));
       if (row) {
         row.price = Math.max(1, Math.round(Number(priceInput.value) || 1));
+        renderModal();
+      }
+      return;
+    }
+
+    const qtyInput = target.closest('[data-sell-qty]');
+    if (qtyInput && state.sell) {
+      const id = qtyInput.getAttribute('data-sell-qty');
+      const row = state.sell.plan.find((r) => String(r.characterId) === String(id));
+      if (row) {
+        const maxQty = Math.max(1, row.maxQty ?? 1);
+        const value = Math.round(Number(qtyInput.value));
+        row.qty = Number.isFinite(value) ? Math.min(maxQty, Math.max(1, value)) : 1;
+        // Changer la quantité peut retirer la « dernière copie » : la confirmation repart de zéro.
+        if (state.sell) state.sell.confirmLastCopy = false;
         renderModal();
       }
     }

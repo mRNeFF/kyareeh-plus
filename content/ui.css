@@ -1292,8 +1292,8 @@ img.kp-avatar {
 
 .kp-plan-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 70px 54px;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 46px 70px 54px;
+  gap: 6px;
   align-items: center;
   padding: 6px 8px;
   border-radius: 8px;
