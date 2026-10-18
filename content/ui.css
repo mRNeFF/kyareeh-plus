@@ -573,6 +573,41 @@ select {
   margin-top: 10px;
 }
 
+.kp-auto-log {
+  max-height: 190px;
+  overflow-y: auto;
+  margin-top: 6px;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+  background: var(--kp-bg-2);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 9.5px;
+  line-height: 1.55;
+}
+
+.kp-auto-log > div {
+  display: flex;
+  gap: 7px;
+  padding: 1px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.kp-auto-log > div:last-child {
+  border-bottom: 0;
+}
+
+.kp-auto-log i {
+  flex: 0 0 auto;
+  color: var(--kp-muted);
+  font-style: normal;
+}
+
+.kp-auto-log span {
+  color: var(--kp-text);
+  word-break: break-word;
+}
+
 .kp-auto-progress .kp-progress {
   height: 5px;
   overflow: hidden;

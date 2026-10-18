@@ -22,13 +22,18 @@
       window.addEventListener('error', (e) => log('ERROR: ' + e.message));
       window.addEventListener('unhandledrejection', (e) => log('REJECTION: ' + (e.reason?.message || e.reason)));
 
-      const store = {};
+      // Stockage persistant (localStorage) pour pouvoir tester la reprise après rechargement.
+      const store = JSON.parse(localStorage.getItem('kp-harness-store') || '{}');
+      const saveStore = () => localStorage.setItem('kp-harness-store', JSON.stringify(store));
       window.__harnessStore = store;
       window.browser = {
         storage: {
           local: {
             get: async (key) => ({ [key]: store[key] }),
-            set: async (obj) => Object.assign(store, obj)
+            set: async (obj) => {
+              Object.assign(store, obj);
+              saveStore();
+            }
           }
         },
         runtime: {

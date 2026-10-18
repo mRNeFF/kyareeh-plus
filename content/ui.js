@@ -201,7 +201,14 @@
       error: null,
       status: '',
       passNeeded: false,
-      startedAt: 0
+      startedAt: 0,
+      // Garde-fous : génération de boucle, échéance de réveil, dernier battement.
+      gen: 0,
+      wakeAt: 0,
+      beatAt: 0,
+      lastOpenAt: 0,
+      restarts: 0,
+      log: []
     },
     reloadArmed: false,
     reloadTimer: null,
@@ -718,16 +725,37 @@
     }
     await mount();
     await loadData();
+    await loadAutoLog();
     startAutoRefreshLoop();
     installAntiAfk();
+    startAutoWatchdog();
     // Vérifie une fois au démarrage si une version plus récente existe sur GitHub.
     setTimeout(() => checkRemoteVersion(), 2500);
     // Reprise de l'auto-open s'il tournait avant un rechargement de page.
     setTimeout(() => resumeAutoOpenIfNeeded(), 1500);
   }
 
+  /** Vigile de la boucle : la relance si elle se tait alors qu'elle est active. */
+  let autoWatchdogTimer = null;
+  function startAutoWatchdog() {
+    if (autoWatchdogTimer) return;
+    autoWatchdogTimer = setInterval(() => {
+      try {
+        ensureAutoAlive();
+        updateCountdownText();
+      } catch {
+        /* jamais bloquant */
+      }
+    }, 20000);
+    // Au retour sur l'onglet (ou après une mise en veille), on vérifie tout de suite.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      ensureAutoAlive();
+    });
+  }
+
   /** L'auto-open ne s'arrête que sur demande : on le relance après un rechargement. */
-  async function resumeAutoOpenIfNeeded() {
+  async function resumeAutoOpenIfNeeded(attempt = 1) {
     if (state.autoOpen.running) return;
     const saved = await storageGet(AUTO_ACTIVE_KEY, null);
     if (!saved || !saved.at) return;
@@ -736,7 +764,11 @@
       await storageSet(AUTO_ACTIVE_KEY, { at: 0 });
       return;
     }
-    if (!state.user) return;
+    if (!state.user) {
+      // Compte pas encore chargé (réseau lent, 429 au démarrage) : on retente.
+      if (attempt < 5) setTimeout(() => resumeAutoOpenIfNeeded(attempt + 1), 15000);
+      return;
+    }
     startAutoOpen({ resume: true });
   }
 
@@ -840,13 +872,29 @@
     }
   }
 
+  /**
+   * Fusionne un patch de compte sans jamais écraser une valeur connue par `undefined`.
+   * Certaines réponses d'API sont partielles : si `/api/me` omet `freePacks`, on garde
+   * la dernière valeur au lieu de croire qu'il n'y a plus aucun booster offert.
+   */
+  function mergeUser(patch) {
+    if (!patch || typeof patch !== 'object') return;
+    const base = state.user && typeof state.user === 'object' ? state.user : {};
+    const next = { ...base };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined || value === null) continue;
+      next[key] = value;
+    }
+    state.user = next;
+  }
+
   async function refreshLight() {
     try {
       const [me, coll] = await Promise.all([
         api('/api/me').catch(() => null),
         api('/api/me/collection?lean=1').catch(() => null)
       ]);
-      if (me) state.user = me;
+      if (me) mergeUser(me);
       if (Array.isArray(coll)) state.collection = coll;
       state.lastSync = Date.now();
       render();
@@ -860,12 +908,14 @@
 
   async function autoRefreshTick(force = false) {
     if (state.loading) return;
-    if (!force && document.hidden) return;
+    // On ne saute plus le tick quand l'onglet est en arrière-plan : c'est justement
+    // la situation d'une nuit entière, et l'auto-open a besoin de voir arriver les boosters.
+    if (!force && Date.now() - (state.lastAutoRefresh || 0) < 30 * 1000) return;
     try {
       const me = await api('/api/me', { timeout: 20000 }).catch(() => null);
-      if (me && typeof me === 'object') state.user = me;
-      await loadPackState(true);
-      await loadPacks(true);
+      if (me && typeof me === 'object') mergeUser(me);
+      await loadPackState(true).catch(() => {});
+      await loadPacks(true).catch(() => {});
       state.lastAutoRefresh = Date.now();
       render();
     } catch {
@@ -1428,7 +1478,7 @@
 
   /**
    * Emplacements d'annonce restants. Le site plafonne les annonces actives
-   * (5 par défaut) ; chaque exemplaire mis en vente occupe une place.
+   * (10 par défaut) ; chaque exemplaire mis en vente occupe une place.
    */
   function listingSlots() {
     const cfg = getCfg();
@@ -1439,7 +1489,9 @@
       toNum(state.access?.limit) ??
       toNum(state.mine?.maxActiveListings) ??
       toNum(state.mine?.limit);
-    const max = fromApi == null ? 5 : fromApi;
+    // Le site ne renvoie pas toujours sa limite : 10 places par défaut.
+    // Si l'API annonce moins, on garde malgré tout 10 (Axel veut pouvoir en préparer 10).
+    const max = Math.max(LISTING_SLOTS_FALLBACK, fromApi ?? 0);
     const active = activeListings();
     return { max, active, remaining: Math.max(0, max - active) };
   }
@@ -1567,6 +1619,15 @@
   /* ------------------------------------------------------------------ */
 
   function render() {
+    // Le rendu ne doit jamais casser la boucle auto-open : on isole les erreurs.
+    try {
+      renderUnsafe();
+    } catch (err) {
+      pushDebug({ method: 'render', path: '', status: 0, ms: 0, ok: false, error: String(err?.message || err) });
+    }
+  }
+
+  function renderUnsafe() {
     if (!state.mounted || !ui) return;
     ui.panel.hidden = !state.open;
     ui.fab.classList.toggle('is-open', state.open);
@@ -2776,8 +2837,12 @@
   const AUTO_MIN_GAP = 10000;
   const AUTO_REMAINING_CAP = 9;
   const AUTO_IDLE_WAIT = 30000;
+  const AUTO_IDLE_MAX = 5 * 60 * 1000;
+  const AUTO_STALL_GRACE = 2 * 60 * 1000;
   const AUTO_ACTIVE_KEY = 'kyareeh.autoactive.v1';
+  const AUTO_LOG_KEY = 'kyareeh.autolog.v1';
   const AUTO_REFRESH_DEFAULT = 10;
+  const LISTING_SLOTS_FALLBACK = 10;
 
   /** Boosters cochés, dans l'ordre du serveur. */
   function autoSelectedPacks() {
@@ -2920,18 +2985,19 @@
 
   /**
    * Cadence des ouvertures : un booster à la fois, puis un délai tiré au hasard entre
-   * 10 s (minimum) et « minutes par booster × 9 » au maximum, jusqu'à ce qu'on arrête.
+   * 10 s (minimum) et « minutes par booster × boosters restants » (plafonné à 9).
    */
-  function autoDelayRange() {
+  function autoDelayRange(remaining = AUTO_REMAINING_CAP) {
     const perBoosterMs =
       Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10)) * 60000;
-    const max = Math.max(AUTO_MIN_GAP, perBoosterMs * AUTO_REMAINING_CAP);
-    return { min: AUTO_MIN_GAP, max, perBoosterMs };
+    const cap = Math.min(AUTO_REMAINING_CAP, Math.max(1, Math.round(Number(remaining) || AUTO_REMAINING_CAP)));
+    const max = Math.max(AUTO_MIN_GAP, perBoosterMs * cap);
+    return { min: AUTO_MIN_GAP, max, perBoosterMs, cap };
   }
 
   /** Délai aléatoire avant le prochain booster. */
-  function autoDelay() {
-    const { min, max } = autoDelayRange();
+  function autoDelay(remaining = AUTO_REMAINING_CAP) {
+    const { min, max } = autoDelayRange(remaining);
     return Math.round(min + Math.random() * (max - min));
   }
 
@@ -3157,16 +3223,91 @@
     return pulled;
   }
 
+  /* --- Journal de la boucle ----------------------------------------- */
+
+  let autoLogTimer = null;
+  let autoPersistTimer = null;
+
+  /**
+   * Trace horodatée de tout ce que fait l'auto-open (ouvertures, attentes, erreurs,
+   * relances). Persistée dans le stockage de l'extension pour pouvoir comprendre
+   * après coup pourquoi la boucle s'est arrêtée pendant la nuit.
+   */
+  function autoLog(message) {
+    const a = state.autoOpen;
+    const entry = { t: Date.now(), m: String(message) };
+    a.log = [...(a.log ?? []), entry].slice(-80);
+    if (autoLogTimer) return;
+    autoLogTimer = setTimeout(() => {
+      autoLogTimer = null;
+      storageGet(AUTO_LOG_KEY, []).then((saved) => {
+        const list = Array.isArray(saved) ? saved : [];
+        const seen = new Set(list.map((e) => `${e.t}:${e.m}`));
+        const fresh = (state.autoOpen.log ?? []).filter((e) => !seen.has(`${e.t}:${e.m}`));
+        storageSet(AUTO_LOG_KEY, [...list, ...fresh].slice(-250));
+      });
+    }, 2000);
+  }
+
+  function fmtClock(ts) {
+    try {
+      return new Date(ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch {
+      return '--:--:--';
+    }
+  }
+
+  /** Sauvegarde les compteurs et le drapeau de reprise (throttlé). */
+  function persistAutoSoon() {
+    if (autoPersistTimer) return;
+    autoPersistTimer = setTimeout(() => {
+      autoPersistTimer = null;
+      const a = state.autoOpen;
+      const alive = a.running && !a.stop;
+      storageSet(
+        AUTO_ACTIVE_KEY,
+        alive
+          ? {
+              at: Date.now(),
+              opened: a.opened,
+              spent: a.spent,
+              cardCount: a.cardCount,
+              lastOpenAt: a.lastOpenAt || 0
+            }
+          : { at: 0 }
+      );
+    }, 1500);
+  }
+
+  async function loadAutoLog() {
+    const saved = await storageGet(AUTO_LOG_KEY, []);
+    if (Array.isArray(saved)) state.autoOpen.log = saved.slice(-80);
+  }
+
   /** Dormir, mais se réveiller tout de suite si l'utilisateur clique sur « Arrêter ». */
+  let autoSleepCancel = null;
   function autoSleep(ms) {
     return new Promise((resolve) => {
+      const a = state.autoOpen;
+      if (a.stop) {
+        resolve();
+        return;
+      }
+      let done = false;
       const end = Date.now() + Math.max(0, ms);
-      const timer = setInterval(() => {
-        if (state.autoOpen.stop || Date.now() >= end) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 250);
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (autoSleepCancel === finish) autoSleepCancel = null;
+        a.wakeAt = 0;
+        resolve();
+      };
+      const timer = setTimeout(finish, Math.max(0, ms));
+      autoSleepCancel = finish;
+      // Le watchdog compare cette échéance : si elle est dépassée sans réveil,
+      // c'est que les timers de l'onglet ont été gelés et on relance la boucle.
+      a.wakeAt = end;
     });
   }
 
@@ -3205,27 +3346,28 @@
       if (first) state.settings.autoPackIds = [String(first.id)];
     }
 
-    let packs = autoSelectedPacks();
-    if (!packs.length) {
-      // On démarre quand même : la boucle attendra qu'une sélection existe.
-      a.loop = true;
-    }
-
-    await loadPackState(true);
+    await loadPackState(true).catch(() => {});
     // On relit le compte juste avant : le chakra et les boosters gratuits ont pu bouger.
     try {
       const me = await api('/api/me', { timeout: 15000 });
-      if (me && typeof me === 'object') state.user = me;
+      if (me && typeof me === 'object') mergeUser(me);
     } catch {
       /* on garde les valeurs connues */
+    }
+
+    // Compteurs repris d'une session interrompue par un rechargement de page.
+    let saved = null;
+    if (opts.resume) {
+      saved = await storageGet(AUTO_ACTIVE_KEY, null);
+      if (saved && !(Number(saved.at) > 0 && Date.now() - Number(saved.at) < 12 * 3600 * 1000)) saved = null;
     }
 
     Object.assign(a, {
       running: true,
       stop: false,
-      opened: 0,
-      spent: 0,
-      cardCount: 0,
+      opened: Number(saved?.opened) || 0,
+      spent: Number(saved?.spent) || 0,
+      cardCount: Number(saved?.cardCount) || 0,
       cards: [],
       best: [],
       counts: {},
@@ -3235,124 +3377,185 @@
       passNeeded: false,
       status: opts.resume ? 'Reprise de l’auto-open…' : 'Auto-open activé · en attente de boosters…',
       startedAt: Date.now(),
+      beatAt: Date.now(),
+      wakeAt: 0,
+      lastOpenAt: Number(saved?.lastOpenAt) || 0,
       nextGapMs: 0,
       nextAt: 0
     });
+    autoLog(opts.resume ? 'reprise après rechargement' : 'auto-open démarré');
     // Le drapeau permet de reprendre après un rechargement de page.
-    await storageSet(AUTO_ACTIVE_KEY, { at: Date.now() });
+    persistAutoSoon();
     await persistSettings();
     render();
 
     await autoOpenLoop();
   }
 
+  /**
+   * Cœur de l'auto-open. Rien ne doit pouvoir en sortir par une exception :
+   * tout le corps est protégé, et un watchdog relance la boucle si elle se tait.
+   */
   async function autoOpenLoop() {
     const a = state.autoOpen;
+    const gen = ++a.gen;
+    const alive = () => !a.stop && a.gen === gen;
     let rateHits = 0;
-    while (!a.stop) {
-      const packs = autoSelectedPacks();
-      if (!packs.length) {
-        // Aucune sélection : on ne s'arrête pas, on réessaie (le compte peut changer).
-        a.status = 'En attente : aucun booster sélectionné';
-        render();
-        await autoSleep(AUTO_IDLE_WAIT);
-        if (a.stop) break;
-        await loadPacks(true);
-        continue;
-      }
-
-      const pack = pickAutoPack(packs);
-      if (!pack) {
-        // Plus rien à ouvrir : on patiente et on re-vérifie le compte régulièrement.
-        a.status = `En attente de boosters… ${a.opened} ouvert(s)`;
-        render();
-        await autoSleep(AUTO_IDLE_WAIT);
-        if (a.stop) break;
-        try {
-          const me = await api('/api/me', { timeout: 15000 });
-          if (me && typeof me === 'object') state.user = me;
-        } catch {
-          /* on réessaiera */
-        }
-        await loadPackState(true);
-        continue;
-      }
-
-      const allowChakra = state.settings.autoAllowChakra !== false;
-      const cost = autoCost(pack, 1, allowChakra);
-
+    let idleStep = 0;
+    let idleReason = '';
+    const allowChakra = state.settings.autoAllowChakra !== false;
+    while (alive()) {
+      a.beatAt = Date.now();
       try {
-        const data = await api(`/api/packs/${encodeURIComponent(pack.id)}/open-many`, {
-          method: 'POST',
-          body: { count: 1, maxChakra: cost.chakra },
-          timeout: 45000
-        });
+        const packs = autoSelectedPacks();
+        if (!packs.length) {
+          // Aucune sélection : on ne s'arrête pas, on réessaie (le compte peut changer).
+          a.status = 'En attente : aucun booster sélectionné';
+          render();
+          await autoSleep(AUTO_IDLE_WAIT);
+          if (!alive()) break;
+          await loadPacks(true).catch(() => {});
+          continue;
+        }
+
+        const pack = pickAutoPack(packs);
+        if (!pack) {
+          // Plus rien à ouvrir : on patiente et on re-vérifie le compte régulièrement.
+          idleStep = Math.min(idleStep + 1, 5);
+          const wait = Math.min(AUTO_IDLE_MAX, AUTO_IDLE_WAIT * idleStep);
+          // Décompte des ressources pour que le statut explique le blocage.
+          let grants = 0;
+          let free = 0;
+          for (const item of packs) {
+            grants += Math.max(0, toNum(state.packState?.grants?.[String(item.id)]) ?? 0);
+            if (item.usesFreePacks) {
+              free += Math.max(0, toNum(state.user?.freePacks) ?? 0) + Math.max(0, toNum(state.user?.bonusPacks) ?? 0);
+            }
+          }
+          const chakra = Math.max(0, toNum(state.user?.chakra) ?? 0);
+          const reason = `dons ${grants} · offerts ${free} · chakra ${chakra}`;
+          a.status = `En attente de boosters (${reason}) · ${a.opened} ouvert(s)`;
+          if (reason !== idleReason) {
+            idleReason = reason;
+            autoLog(`en attente : ${reason}${allowChakra ? '' : ' (chakra non autorisé)'}`);
+          }
+          render();
+          await autoSleep(wait);
+          if (!alive()) break;
+          await refreshAutoAccount();
+          continue;
+        }
+
+        const cost = autoCost(pack, 1, allowChakra);
+
+        let data;
+        try {
+          data = await api(`/api/packs/${encodeURIComponent(pack.id)}/open-many`, {
+            method: 'POST',
+            body: { count: 1, maxChakra: cost.chakra },
+            timeout: 45000
+          });
+        } catch (err) {
+          const code = err?.code ?? (err?.message === 'pass_required' ? 'pass_required' : null);
+          if (code === 'pass_required') {
+            a.passNeeded = true;
+            a.status = 'Laissez-passer expiré : ouvre un booster une fois sur le site, puis relance.';
+            autoLog('laissez-passer expiré : boucle en pause');
+            break;
+          }
+          if (code === 'insufficient_chakra' || code === 'no_funds') {
+            // Pas d'arrêt : le chakra revient avec le temps, on patiente.
+            a.status = `En attente de chakra… ${a.opened} ouvert(s)`;
+            autoLog('chakra insuffisant : attente');
+            render();
+            await autoSleep(AUTO_IDLE_WAIT);
+            if (!alive()) break;
+            await refreshAutoAccount();
+            continue;
+          }
+          if (code === 'rate_limited' || err?.status === 429) {
+            rateHits = Math.min(rateHits + 1, 5);
+            const wait = Math.min(10 * 60 * 1000, 4000 * 2 ** rateHits);
+            a.status = `Trop de requêtes : pause ${Math.round(wait / 1000)} s…`;
+            autoLog(`limite de requêtes (${rateHits}) : pause ${Math.round(wait / 1000)} s`);
+            render();
+            await autoSleep(wait);
+            continue;
+          }
+          // Erreur réseau / 5xx : on ne s'arrête pas, on retente.
+          const msg = friendlyError(err);
+          a.status = `Erreur : ${msg} · nouvelle tentative dans 1 min`;
+          autoLog(`échec d'ouverture : ${msg}`);
+          render();
+          await autoSleep(60000);
+          continue;
+        }
 
         const results = Array.isArray(data?.results) ? data.results : [];
         if (!results.length) {
-          a.status = data?.stopped
-            ? `Arrêté par le serveur : ${autoStoppedText(data.stopped)}.`
-            : 'Le serveur n’a renvoyé aucune carte.';
-          break;
+          const why = data?.stopped ? autoStoppedText(data.stopped) : 'réponse vide';
+          a.status = `En attente : ${why} · ${a.opened} ouvert(s)`;
+          autoLog(`aucune carte renvoyée (${why})`);
+          render();
+          await autoSleep(AUTO_IDLE_WAIT);
+          if (!alive()) break;
+          await refreshAutoAccount();
+          continue;
         }
 
         const pulled = recordAutoResults(pack, results, cost, 1);
-        if (data?.user && typeof data.user === 'object') state.user = data.user;
+        if (data?.user && typeof data.user === 'object') mergeUser(data.user);
         rateHits = 0;
+        idleStep = 0;
+        a.lastOpenAt = Date.now();
+        persistAutoSoon();
+
+        autoLog(
+          `ouvert ${packName(pack)} → ${pulled.length} carte(s)` +
+            (pulled.length ? ` : ${pulled.map((c) => `${c.name} (${c.rarity})`).slice(0, 4).join(', ')}` : '')
+        );
 
         // Un bruit par booster ouvert, plus riche si une belle carte tombe.
-        playOpenSound(pulledTier(pulled));
+        try {
+          playOpenSound(pulledTier(pulled));
+        } catch {
+          /* audio indisponible : on continue */
+        }
 
         if (data?.stopped) {
-          a.status = `Arrêté par le serveur : ${autoStoppedText(data.stopped)}.`;
+          // Le serveur signale une limite : on continue de veiller, sans rien ouvrir.
+          const why = autoStoppedText(data.stopped);
+          autoLog(`serveur : ${why} — attente`);
+          a.status = `En attente : ${why} · ${a.opened} ouvert(s)`;
           render();
-          break;
+          await autoSleep(AUTO_IDLE_WAIT);
+          if (!alive()) break;
+          await refreshAutoAccount();
+          continue;
         }
 
         a.status = `Ouverture… ${a.opened} · ${packName(pack)}`;
         render();
       } catch (err) {
-        const code = err?.code ?? (err?.message === 'pass_required' ? 'pass_required' : null);
-        if (code === 'pass_required') {
-          a.passNeeded = true;
-          a.status = 'Laissez-passer expiré : ouvre un booster une fois sur le site, puis relance.';
-          break;
-        }
-        if (code === 'insufficient_chakra' || code === 'no_funds') {
-          // Pas d'arrêt : le chakra revient avec le temps, on patiente.
-          a.status = `En attente de chakra… ${a.opened} ouvert(s)`;
+        // Filet de sécurité : aucune exception ne doit tuer la boucle.
+        const msg = friendlyError(err);
+        autoLog(`erreur interne : ${msg}`);
+        a.status = `Reprise après erreur : ${msg}`;
+        try {
           render();
-          await autoSleep(AUTO_IDLE_WAIT);
-          if (a.stop) break;
-          await loadPackState(true);
-          continue;
+        } catch {
+          /* rendu déjà protégé */
         }
-        if (code === 'rate_limited' && rateHits < 4) {
-          rateHits += 1;
-          const wait = 4000 * rateHits;
-          a.status = `Trop de requêtes : pause ${Math.round(wait / 1000)} s…`;
-          render();
-          await autoSleep(wait);
-          continue;
-        }
-        if (code === 'rate_limited') {
-          // Même bloqué par la limite : on continue de veiller au lieu de s'arrêter.
-          rateHits = 0;
-          a.status = 'Limite de requêtes atteinte : pause de 5 min…';
-          render();
-          await autoSleep(5 * 60 * 1000);
-          continue;
-        }
-        a.error = friendlyError(err);
-        a.status = `Arrêté : ${a.error}`;
-        break;
+        await autoSleep(15000);
+        continue;
       }
 
-      if (!a.stop) {
-        // 10 s minimum, 10 min × 9 au maximum.
-        const delay = autoDelay();
+      if (!a.stop && a.gen === gen) {
+        // 10 s minimum, « minutes par booster » × boosters restants (plafond 9).
+        const remaining = autoPoolTotal(autoSelectedPacks(), allowChakra);
+        const delay = autoDelay(remaining);
         a.nextGapMs = delay;
-        const range = autoDelayRange();
+        const range = autoDelayRange(remaining);
         a.status = `Ouverture… ${a.opened} · prochain dans ${fmtWait(delay)} (max ${fmtWait(range.max)})`;
         // Le compte à rebours doit exister avant le rendu, sinon le bloc n'apparaît pas.
         a.nextAt = Date.now() + delay;
@@ -3363,6 +3566,9 @@
       }
     }
 
+    // Une boucle plus récente (watchdog) a pris le relais : on ne touche à rien.
+    if (a.gen !== gen) return;
+
     a.running = false;
     // Le drapeau de reprise ne survit qu'à un rechargement de page, pas à un arrêt.
     await storageSet(AUTO_ACTIVE_KEY, { at: 0 });
@@ -3371,9 +3577,43 @@
     } else if (!a.error) {
       a.status = `Terminé : ${a.opened} booster(s), ${a.cardCount} carte(s) pour ◆ ${fmt(a.spent)}.`;
     }
+    autoLog(a.status);
     render();
     notify(a.status);
     refreshLight();
+  }
+
+  /** Relit le compte et les boosters sans jamais casser la boucle. */
+  async function refreshAutoAccount() {
+    try {
+      const me = await api('/api/me', { timeout: 15000 });
+      if (me && typeof me === 'object') mergeUser(me);
+    } catch {
+      /* on réessaiera */
+    }
+    await loadPackState(true).catch(() => {});
+    await loadPacks(true).catch(() => {});
+  }
+
+  /**
+   * Watchdog : si la boucle est déclarée active mais qu'elle ne s'est pas réveillée
+   * à l'heure prévue (timer gelé, onglet suspendu, exception avalée), on la relance.
+   */
+  function ensureAutoAlive() {
+    const a = state.autoOpen;
+    if (!a.running || a.stop) return;
+    const now = Date.now();
+    const overdue = a.wakeAt ? now - a.wakeAt : now - (a.beatAt || a.startedAt || now);
+    if (overdue < AUTO_STALL_GRACE) return;
+
+    a.restarts = (a.restarts ?? 0) + 1;
+    autoLog(`boucle silencieuse depuis ${fmtWait(overdue)} : relance automatique`);
+    a.status = 'Relance automatique de la boucle…';
+    a.gen += 1; // invalide l'ancienne boucle
+    a.wakeAt = 0;
+    if (autoSleepCancel) autoSleepCancel();
+    render();
+    autoOpenLoop();
   }
 
   function stopAutoOpen() {
@@ -3381,6 +3621,8 @@
     if (!a.running) return;
     a.stop = true;
     a.status = 'Arrêt demandé…';
+    autoLog('arrêt demandé');
+    if (autoSleepCancel) autoSleepCancel();
     render();
   }
 
@@ -3403,7 +3645,8 @@
     const total = autoPoolTotal(selected, allowChakra);
     const estimate = autoEstimateCost(selected, total, allowChakra);
     const perBoosterMin = Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10));
-    const maxLabel = fmtWait(perBoosterMin * 60000 * AUTO_REMAINING_CAP);
+    const delayRange = autoDelayRange(total || AUTO_REMAINING_CAP);
+    const maxLabel = fmtWait(delayRange.max);
     const refreshMin = Math.min(120, Math.max(1, Math.round(Number(state.settings.autoRefreshMin) || 10)));
     const passPack = selected[0] ?? packs[0] ?? null;
 
@@ -3462,8 +3705,8 @@
         </div>
         <div class="kp-hint">
           Un booster à la fois, puis un délai aléatoire entre <b>10 s</b> et <b>${maxLabel}</b>
-          (${perBoosterMin} min × ${AUTO_REMAINING_CAP}), jusqu'à ce que tu cliques sur <b>Arrêter</b>.
-          Compte rafraîchi toutes les ${refreshMin} min.
+          (${perBoosterMin} min × ${delayRange.cap} booster(s) restant(s), plafond ${AUTO_REMAINING_CAP}),
+          jusqu'à ce que tu cliques sur <b>Arrêter</b>. Compte rafraîchi toutes les ${refreshMin} min.
         </div>
 
         <div class="kp-auto-checks">
@@ -3597,6 +3840,30 @@
                </div>`
             : ''
         }
+
+        <div class="kp-explain-sub" style="margin-top:14px">
+          Journal
+          <span class="kp-explain-count">${a.restarts ? `${a.restarts} relance(s) auto` : 'cette session'}</span>
+        </div>
+        <div class="kp-hint">
+          Chaque ouverture, attente, erreur et relance est horodatée ici. C'est ce journal qui dit
+          pourquoi la boucle s'est tue pendant la nuit.
+        </div>
+        <div class="kp-auto-log">
+          ${
+            (a.log ?? []).length
+              ? a.log
+                  .slice(-40)
+                  .reverse()
+                  .map((entry) => `<div><i>${fmtClock(entry.t)}</i><span>${esc(entry.m)}</span></div>`)
+                  .join('')
+              : '<div><i>—</i><span>Aucun évènement enregistré.</span></div>'
+          }
+        </div>
+        <div class="kp-toolbar" style="margin-top:6px">
+          <button class="kp-btn is-ghost" type="button" data-act="auto-log-copy">Copier le journal</button>
+          <button class="kp-btn is-ghost" type="button" data-act="auto-log-clear">Vider</button>
+        </div>
       </div>
     `;
   }
@@ -4706,6 +4973,19 @@
         playOpenSound(2);
         notify('Son de test joué.');
         break;
+      case 'auto-log-copy': {
+        const lines = (state.autoOpen.log ?? []).map((e) => `${fmtClock(e.t)}  ${e.m}`);
+        const text = lines.length ? lines.join('\n') : 'Aucun évènement.';
+        copyText(text).then((ok) => notify(ok ? 'Journal copié.' : 'Copie refusée.'));
+        break;
+      }
+      case 'auto-log-clear':
+        state.autoOpen.log = [];
+        state.autoOpen.restarts = 0;
+        storageSet(AUTO_LOG_KEY, []);
+        notify('Journal vidé.');
+        render();
+        break;
       case 'update-check':
         checkRemoteVersion(true);
         break;
@@ -5036,7 +5316,12 @@
       autoDelay,
       autoDelayRange,
       startAutoOpen,
-      stopAutoOpen
+      stopAutoOpen,
+      ensureAutoAlive,
+      autoLog,
+      loadAutoLog,
+      refreshAutoAccount,
+      mergeUser
     };
   }
 
