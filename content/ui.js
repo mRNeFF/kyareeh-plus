@@ -214,6 +214,8 @@
     packStateLoading: false,
     lastAutoRefresh: 0,
     lastAutoSync: 0,
+    // Suivi de l'anti-AFK : dernier clic, délai tiré, nombre de réponses.
+    antiAfk: { lastAt: 0, lastDelay: 0, clicks: 0, pendingAt: 0, pendingDelay: 0 },
     autoOpen: {
       running: false,
       stop: false,
@@ -4215,76 +4217,190 @@
 
   const AFK_MIN_DELAY = 2000;
   const AFK_MAX_DELAY = 60000;
+  // Si la boîte est toujours là malgré le clic, on retente au bout de 2 min.
+  const AFK_RETRY_MS = 2 * 60 * 1000;
+
+  // Texte de la boîte de présence du site : « Tu es toujours là ? ».
+  const AFK_TITLE_RE =
+    /(tu\s+es\s+toujours\s+l[àa]|es[-\s]?tu\s+(toujours\s+)?l[àa]|toujours\s+l[àa]\s*\?|still\s+(there|here)\??|are\s+you\s+(still\s+)?(there|here))/i;
+  const AFK_CONTEXT_RE =
+    /(toujours\s+l[àa]|still\s+(there|here)|are\s+you\s+(still\s+)?(there|here)|anti[-\s]?afk|inactivit[ée]|absence)/i;
+  // Libellés de confirmation acceptés (« Je suis là » sur le site).
+  const AFK_LABEL_RE =
+    /^(oui|yes|okay|ok|je\s+suis\s+(toujours\s+)?l[àa]|toujours\s+l[àa]|pr[ée]sent(e)?|me\s+voil[àa]|i\s*'?\s*m\s+here)(?![a-zà-ÿ])/i;
+
   let afkTimer = null;
   let afkScanTimer = null;
   let afkObserver = null;
   let afkLastScan = 0;
-  const afkSeen = new WeakSet();
+  let afkHandledEl = null;
+  let afkHandledAt = 0;
 
-  /** Vrai si le libellé ressemble à une confirmation de présence. */
-  function isAfkConfirmLabel(label) {
-    const t = String(label ?? '').trim().toLowerCase();
-    if (!t) return false;
-    return /^(oui|yes|ok|je suis (toujours )?l[àa]|toujours l[àa])/.test(t);
+  function isShown(el) {
+    if (!el || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return false;
+    const style = window.getComputedStyle(el);
+    return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0.05;
+  }
+
+  function afkLabelOf(btn) {
+    return String(btn?.innerText || btn?.value || btn?.getAttribute?.('aria-label') || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /** Conteneur de la boîte de présence, repéré par son texte. */
+  function findAfkContainer() {
+    const nodes = document.querySelectorAll(
+      '[role="dialog"], [aria-modal="true"], [class*="modal" i], [class*="dialog" i], [class*="overlay" i], [class*="popup" i], [class*="gate" i]'
+    );
+    for (const node of nodes) {
+      if (host && (host === node || host.contains(node))) continue;
+      if (!isShown(node)) continue;
+      const text = String(node.innerText || '').slice(0, 600);
+      if (!text) continue;
+      // Soit le titre exact, soit un texte de présence avec une question.
+      if (AFK_TITLE_RE.test(text) || (AFK_CONTEXT_RE.test(text) && text.includes('?'))) return node;
+    }
+    return null;
+  }
+
+  /** Bouton de confirmation dans une boîte donnée (repli : premier bouton visible). */
+  function afkConfirmIn(root) {
+    const buttons = root.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]');
+    let fallback = null;
+    for (const btn of buttons) {
+      if (host && host.contains(btn)) continue;
+      if (!isShown(btn) || btn.disabled) continue;
+      if (AFK_LABEL_RE.test(afkLabelOf(btn))) return btn;
+      if (!fallback) fallback = btn;
+    }
+    return fallback;
   }
 
   /**
-   * Cherche le bouton « Oui » du contrôle anti-AFK.
-   * Le site peut changer ses classes : on ne se fie donc pas à un sélecteur précis,
-   * on remonte les ancêtres du bouton et on regarde le texte affiché.
+   * Cherche le bouton de confirmation anti-AFK.
+   * 1) boîte de présence détectée par son texte → son bouton ;
+   * 2) sinon, bouton dont le libellé correspond ET dont un ancêtre parle de présence.
    */
   function findAfkButton() {
+    const container = findAfkContainer();
+    if (container) {
+      const btn = afkConfirmIn(container);
+      if (btn) return btn;
+    }
+
     const buttons = document.querySelectorAll(
       'button, [role="button"], input[type="button"], input[type="submit"], a[class*="btn"], a[class*="button"]'
     );
     for (const btn of buttons) {
       if (host && (host === btn || host.contains(btn))) continue;
-      const label = btn.innerText || btn.value || btn.getAttribute('aria-label') || '';
-      if (!isAfkConfirmLabel(label)) continue;
+      if (!isShown(btn) || btn.disabled) continue;
+      if (!AFK_LABEL_RE.test(afkLabelOf(btn))) continue;
 
-      // Remonte jusqu'à 6 ancêtres pour lire le texte de la boîte de dialogue.
+      // Remonte jusqu'à 8 ancêtres pour lire le texte de la boîte.
       let node = btn;
-      let context = '';
-      for (let i = 0; i < 6 && node; i += 1) {
+      for (let i = 0; i < 8 && node; i += 1) {
         node = node.parentElement;
         if (!node) break;
-        const text = node.innerText || '';
-        if (text.length > 1200) break;
-        context = text;
-        if (/toujours|still there|are you (still )?there|inactif|absent|anti[- ]?afk/i.test(text)) return btn;
+        const text = String(node.innerText || '');
+        if (text.length > 2000) break;
+        if (AFK_CONTEXT_RE.test(text)) return btn;
       }
-      void context;
     }
     return null;
+  }
+
+  function afkClick(target) {
+    if (!target || !target.isConnected) return false;
+    try {
+      target.scrollIntoView({ block: 'center', inline: 'center' });
+    } catch {
+      /* ignore */
+    }
+    try {
+      target.click();
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  /** Clic « complet » pour les composants qui écoutent les évènements souris. */
+  function afkMouseClick(target) {
+    if (!target || !target.isConnected) return false;
+    const options = { bubbles: true, cancelable: true, view: window, button: 0 };
+    try {
+      target.dispatchEvent(new MouseEvent('pointerdown', options));
+      target.dispatchEvent(new MouseEvent('mousedown', options));
+      target.dispatchEvent(new MouseEvent('pointerup', options));
+      target.dispatchEvent(new MouseEvent('mouseup', options));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function scheduleAfkConfirm() {
     if (state.settings.antiAfk === false) return;
     if (afkTimer) return;
 
-    const btn = findAfkButton();
-    if (!btn || afkSeen.has(btn)) return;
-    afkSeen.add(btn);
+    const target = findAfkButton();
+    if (!target) {
+      // La boîte a disparu : on autorise la prochaine détection.
+      afkHandledEl = null;
+      return;
+    }
+
+    // Même boîte déjà traitée : on ne répond pas une deuxième fois trop vite.
+    if (target === afkHandledEl && Date.now() - afkHandledAt < AFK_RETRY_MS) return;
 
     const delay = Math.round(AFK_MIN_DELAY + Math.random() * (AFK_MAX_DELAY - AFK_MIN_DELAY));
+    afkHandledEl = target;
+    afkHandledAt = Date.now();
+    state.antiAfk = { ...(state.antiAfk ?? {}), pendingAt: Date.now(), pendingDelay: delay };
+    autoLog(`anti-AFK détecté : réponse dans ${Math.round(delay / 1000)} s`);
     notify(`Anti-AFK détecté : réponse dans ${Math.round(delay / 1000)} s.`);
 
     afkTimer = setTimeout(() => {
       afkTimer = null;
-      try {
-        // La boîte a pu être reconstruite entre-temps : on relit l'élément.
-        const target = btn.isConnected ? btn : findAfkButton();
-        if (target && target.isConnected) {
-          target.click();
-          notify(`Anti-AFK : « ${(target.innerText || 'Oui').trim().slice(0, 20)} » cliqué.`);
-        } else {
-          notify('Anti-AFK : la boîte a disparu avant la réponse.');
-        }
-      } catch {
-        /* ignore */
+      // La boîte a pu être reconstruite entre-temps : on relit l'élément.
+      const live = findAfkButton();
+      const node = live ?? (target.isConnected ? target : null);
+      const label = afkLabelOf(node) || 'Je suis là';
+      const clicked = node ? afkClick(node) : false;
+
+      if (clicked) {
+        state.antiAfk = {
+          ...(state.antiAfk ?? {}),
+          lastAt: Date.now(),
+          lastDelay: delay,
+          clicks: (state.antiAfk?.clicks ?? 0) + 1,
+          pendingAt: 0
+        };
+        autoLog(`anti-AFK : « ${label.slice(0, 24)} » cliqué (délai ${Math.round(delay / 1000)} s)`);
+        notify(`Anti-AFK : « ${label.slice(0, 24)} » cliqué.`);
+      } else {
+        autoLog('anti-AFK : la boîte a disparu avant la réponse');
+        notify('Anti-AFK : la boîte a disparu avant la réponse.');
       }
+
+      // Le site peut ignorer un clic synthétique : on vérifie et on retente une fois.
+      setTimeout(() => {
+        if (!findAfkContainer()) return;
+        const again = findAfkButton();
+        if (!again) return;
+        afkMouseClick(again);
+        autoLog('anti-AFK : toujours affiché, seconde tentative en évènements souris');
+      }, 1500);
+
+      render();
       // Un nouveau contrôle peut arriver plus tard.
-      setTimeout(() => scheduleAfkConfirm(), 4000);
+      setTimeout(() => {
+        afkHandledEl = null;
+        scanAfk();
+      }, 4000);
     }, delay);
 
     render();
@@ -5256,13 +5372,33 @@
 
         <div class="kp-section-title" style="margin-top:14px">Présence</div>
         <label class="kp-field">
-          <span>Répondre à l'anti-AFK<small>Clique « Oui » tout seul, délai aléatoire de 2 s à 1 min</small></span>
+          <span>Répondre à l'anti-AFK<small>Clique « Je suis là » tout seul, délai aléatoire de 2 s à 1 min</small></span>
           <input type="checkbox" data-setting="antiAfk" ${state.settings.antiAfk !== false ? 'checked' : ''}>
         </label>
         <div class="kp-hint">
-          Surveille l'apparition de la boîte « toujours là ? » sur le site et clique sur le bouton de
-          confirmation après un délai tiré au hasard entre <b>2 s</b> et <b>1 min</b>, pour ne pas
-          répondre instantanément comme un robot.
+          Surveille l'apparition de la boîte « Tu es toujours là ? » sur le site et clique sur
+          <b>Je suis là</b> après un délai tiré au hasard entre <b>2 s</b> et <b>1 min</b>, pour ne pas
+          répondre instantanément comme un robot. Si la boîte reste affichée, une seconde tentative est
+          faite en évènements souris.
+        </div>
+        <div class="kp-chips" style="margin:6px 0">
+          <span class="kp-chip"><em>État</em> ${state.settings.antiAfk !== false ? 'actif' : 'désactivé'}</span>
+          <span class="kp-chip"><em>Réponses</em> ${fmt(state.antiAfk?.clicks ?? 0)}</span>
+          ${
+            state.antiAfk?.lastAt
+              ? `<span class="kp-chip"><em>Dernier clic</em> ${nowTime(state.antiAfk.lastAt)} · délai ${Math.round(
+                  (state.antiAfk.lastDelay ?? 0) / 1000
+                )} s</span>`
+              : ''
+          }
+          ${
+            state.antiAfk?.pendingAt
+              ? `<span class="kp-chip"><em>En attente</em> ${Math.max(
+                  0,
+                  Math.round((state.antiAfk.pendingDelay - (Date.now() - state.antiAfk.pendingAt)) / 1000)
+                )} s</span>`
+              : ''
+          }
         </div>
         <div class="kp-toolbar">
           <button class="kp-btn" type="button" data-act="anti-afk-test">Tester la détection</button>
@@ -6558,10 +6694,21 @@
       case 'update-now':
         updateAndReload();
         break;
-      case 'anti-afk-test':
-        notify(state.settings.antiAfk === false ? 'Anti-AFK désactivé.' : 'Anti-AFK actif : détection toutes les 3 s.');
-        scanAfk();
+      case 'anti-afk-test': {
+        if (state.settings.antiAfk === false) {
+          notify('Anti-AFK désactivé : coche « Répondre à l’anti-AFK ».');
+          break;
+        }
+        const target = findAfkButton();
+        if (target) {
+          notify(`Anti-AFK : bouton détecté (« ${afkLabelOf(target).slice(0, 24) || 'sans texte'} »).`);
+          scanAfk();
+        } else {
+          notify('Anti-AFK actif : aucune boîte « toujours là ? » détectée pour le moment.');
+        }
+        render();
         break;
+      }
       case 'update-download':
         window.open(UPDATE_ZIP, '_blank', 'noopener');
         notify('Archive téléchargée : remplace les fichiers du dossier, puis recharge l’extension.');
@@ -6965,6 +7112,9 @@
       resumeAutoOpenIfNeeded,
       scanAfk,
       findAfkButton,
+      findAfkContainer,
+      afkConfirmIn,
+      afkLabelOf,
       autoDelay,
       autoDelayRange,
       autoRegenInfo,

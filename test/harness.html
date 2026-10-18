@@ -403,5 +403,31 @@
         log('Alt+K envoyé');
       }, 900);
     </script>
+
+    <!-- Reproduit la boîte de présence du site : « Tu es toujours là ? » / « Je suis là ».
+         Ouvrir la page avec ?afk=1 pour la faire apparaître après 3 s. -->
+    <script>
+      if (new URLSearchParams(location.search).has('afk')) {
+        setTimeout(() => {
+          const wrap = document.createElement('div');
+          wrap.id = 'afk-check';
+          wrap.style.cssText =
+            'position:fixed;inset:0;display:grid;place-items:center;z-index:99998;background:rgba(0,0,0,.28)';
+          wrap.innerHTML = `
+            <div role="dialog" aria-modal="true" style="background:#12141c;border:1px solid #2b2f3a;border-radius:14px;padding:22px 26px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+              <div style="width:46px;height:46px;margin:0 auto 12px;border-radius:50%;background:rgba(255,90,60,.16);color:#ff6b4a;display:grid;place-items:center;font-size:20px">⏱</div>
+              <p style="margin:0 0 16px;font:600 14px system-ui,sans-serif;color:#f3f4f7">Tu es toujours là ?</p>
+              <button id="afk-yes" type="button" style="padding:8px 20px;border:0;border-radius:8px;background:#ff5a3c;color:#fff;font:700 12.5px system-ui,sans-serif;cursor:pointer">Je suis là</button>
+            </div>`;
+          document.body.appendChild(wrap);
+          document.getElementById('afk-yes').addEventListener('click', () => {
+            window.__afkClicks = (window.__afkClicks || 0) + 1;
+            wrap.remove();
+            log('AFK : « Je suis là » cliqué');
+          });
+          log('AFK : boîte affichée');
+        }, 3000);
+      }
+    </script>
   </body>
 </html>
