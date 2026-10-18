@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kyareeh+",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "Tableau de bord de compte, valorisation en chakra, vente et mise en enchère des doublons pour kyara.games.",
   "browser_specific_settings": {
     "gecko": {

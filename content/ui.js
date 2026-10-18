@@ -2984,21 +2984,37 @@
   }
 
   /**
-   * Cadence des ouvertures : un booster à la fois, puis un délai tiré au hasard entre
-   * 10 s (minimum) et « minutes par booster × boosters restants » (plafonné à 9).
+   * Cadence des ouvertures.
+   *
+   * Formule (celle d'Axel) : minimum 10 s, maximum
+   *   « minutes par booster » × (places restantes avant le plafond de 9 boosters).
+   *
+   * Le maximum dépend donc du STOCK, pas du nombre déjà ouvert :
+   *   8 boosters en stock → 1 place avant 9 → max 10 min
+   *   6 boosters en stock → 3 places        → max 30 min
+   *   0 booster en stock  → 9 places        → max 90 min
+   *
+   * Plus le stock est plein, plus on ouvre vite : ça évite de laisser la jauge
+   * se remplir et de « gaspiller » des boosters.
    */
-  function autoDelayRange(remaining = AUTO_REMAINING_CAP) {
+  function autoDelayRange(stock = 0) {
     const perBoosterMs =
       Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10)) * 60000;
-    const cap = Math.min(AUTO_REMAINING_CAP, Math.max(1, Math.round(Number(remaining) || AUTO_REMAINING_CAP)));
-    const max = Math.max(AUTO_MIN_GAP, perBoosterMs * cap);
-    return { min: AUTO_MIN_GAP, max, perBoosterMs, cap };
+    const inStock = Math.max(0, Math.min(AUTO_REMAINING_CAP, Math.round(Number(stock) || 0)));
+    const slots = Math.max(1, AUTO_REMAINING_CAP - inStock);
+    const max = Math.max(AUTO_MIN_GAP, perBoosterMs * slots);
+    return { min: AUTO_MIN_GAP, max, perBoosterMs, stock: inStock, slots };
   }
 
-  /** Délai aléatoire avant le prochain booster. */
-  function autoDelay(remaining = AUTO_REMAINING_CAP) {
-    const { min, max } = autoDelayRange(remaining);
+  /** Délai aléatoire avant le prochain booster, à partir du stock ouvrable actuel. */
+  function autoDelay(stock = 0) {
+    const { min, max } = autoDelayRange(stock);
     return Math.round(min + Math.random() * (max - min));
+  }
+
+  /** Stock ouvrable maintenant, tous boosters sélectionnés confondus. */
+  function autoStock() {
+    return autoPoolTotal(autoSelectedPacks(), state.settings.autoAllowChakra !== false);
   }
 
   /* --- Anti-AFK ------------------------------------------------------ */
@@ -3551,12 +3567,15 @@
       }
 
       if (!a.stop && a.gen === gen) {
-        // 10 s minimum, « minutes par booster » × boosters restants (plafond 9).
-        const remaining = autoPoolTotal(autoSelectedPacks(), allowChakra);
-        const delay = autoDelay(remaining);
+        // Minimum 10 s ; maximum = « minutes par booster » × places avant le plafond de 9.
+        const stock = autoStock();
+        const delay = autoDelay(stock);
         a.nextGapMs = delay;
-        const range = autoDelayRange(remaining);
-        a.status = `Ouverture… ${a.opened} · prochain dans ${fmtWait(delay)} (max ${fmtWait(range.max)})`;
+        const range = autoDelayRange(stock);
+        const perMin = Math.round((range.perBoosterMs / 60000) * 10) / 10;
+        a.status = `Ouverture… ${a.opened} · prochain dans ${fmtWait(delay)} (max ${fmtWait(range.max)} = ${
+          range.slots
+        } × ${perMin} min)`;
         // Le compte à rebours doit exister avant le rendu, sinon le bloc n'apparaît pas.
         a.nextAt = Date.now() + delay;
         render();
@@ -3645,7 +3664,7 @@
     const total = autoPoolTotal(selected, allowChakra);
     const estimate = autoEstimateCost(selected, total, allowChakra);
     const perBoosterMin = Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10));
-    const delayRange = autoDelayRange(total || AUTO_REMAINING_CAP);
+    const delayRange = autoDelayRange(total);
     const maxLabel = fmtWait(delayRange.max);
     const refreshMin = Math.min(120, Math.max(1, Math.round(Number(state.settings.autoRefreshMin) || 10)));
     const passPack = selected[0] ?? packs[0] ?? null;
@@ -3704,9 +3723,11 @@
           </label>
         </div>
         <div class="kp-hint">
-          Un booster à la fois, puis un délai aléatoire entre <b>10 s</b> et <b>${maxLabel}</b>
-          (${perBoosterMin} min × ${delayRange.cap} booster(s) restant(s), plafond ${AUTO_REMAINING_CAP}),
-          jusqu'à ce que tu cliques sur <b>Arrêter</b>. Compte rafraîchi toutes les ${refreshMin} min.
+          Un booster à la fois, puis un délai aléatoire entre <b>10 s</b> et <b>${maxLabel}</b> :
+          ${perBoosterMin} min × ${delayRange.slots} place(s) restante(s) avant le plafond de
+          ${AUTO_REMAINING_CAP} (stock actuel ${delayRange.stock}/${AUTO_REMAINING_CAP}).
+          Plus le stock est haut, plus l'écart maximum se raccourcit.
+          Jusqu'à ce que tu cliques sur <b>Arrêter</b>. Compte rafraîchi toutes les ${refreshMin} min.
         </div>
 
         <div class="kp-auto-checks">
@@ -5315,6 +5336,7 @@
       findAfkButton,
       autoDelay,
       autoDelayRange,
+      autoStock,
       startAutoOpen,
       stopAutoOpen,
       ensureAutoAlive,
