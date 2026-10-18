@@ -186,6 +186,7 @@
     packState: null,
     packStateLoading: false,
     lastAutoRefresh: 0,
+    lastAutoSync: 0,
     autoOpen: {
       running: false,
       stop: false,
@@ -687,9 +688,15 @@
     state.settings.dealsSort = DEAL_SORTS.some(([value]) => value === state.settings.dealsSort) ? state.settings.dealsSort : 'price_asc';
     state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(state.settings.dealsPages)));
     state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(state.settings.dealsMinPct)));
+    // Migration vers la formule T_max = (9 − B) × I + R : l'ancien réglage
+    // « minutes par booster » n'a plus le même sens, on repart sur 10 min.
+    if (!state.settings.autoPacingV2) {
+      state.settings.autoPacingV2 = true;
+      state.settings.autoMaxPerBoosterMin = DEFAULT_SETTINGS.autoMaxPerBoosterMin;
+    }
     state.settings.autoMaxPerBoosterMin = Math.min(
       60,
-      Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin ?? DEFAULT_SETTINGS.autoMaxPerBoosterMin))
+      Math.max(1, Math.round(Number(state.settings.autoMaxPerBoosterMin ?? DEFAULT_SETTINGS.autoMaxPerBoosterMin)))
     );
     // Anciens réglages (quantité, boucle, pause fixe, variance, séries) : plus utilisés.
     for (const stale of [
@@ -2834,8 +2841,6 @@
   /* Auto-Open                                                           */
   /* ------------------------------------------------------------------ */
 
-  const AUTO_MIN_GAP = 10000;
-  const AUTO_REMAINING_CAP = 9;
   const AUTO_IDLE_WAIT = 30000;
   const AUTO_IDLE_MAX = 5 * 60 * 1000;
   const AUTO_STALL_GRACE = 2 * 60 * 1000;
@@ -2984,37 +2989,89 @@
   }
 
   /**
-   * Cadence des ouvertures.
+   * Cadence des ouvertures — formule d'Axel :
    *
-   * Formule (celle d'Axel) : minimum 10 s, maximum
-   *   « minutes par booster » × (places restantes avant le plafond de 9 boosters).
+   *   T_max = (9 − B) × I + R
    *
-   * Le maximum dépend donc du STOCK, pas du nombre déjà ouvert :
-   *   8 boosters en stock → 1 place avant 9 → max 10 min
-   *   6 boosters en stock → 3 places        → max 30 min
-   *   0 booster en stock  → 9 places        → max 90 min
+   *   B = boosters actuellement dans la jauge (freePacks)
+   *   I = intervalle de régénération du jeu (10 min)
+   *   R = temps réel restant avant le prochain booster (nextFreeAt de /api/me)
    *
-   * Plus le stock est plein, plus on ouvre vite : ça évite de laisser la jauge
-   * se remplir et de « gaspiller » des boosters.
+   * Le délai tiré est un nombre ENTIER de minutes entre 1 et T_max.
+   * Ouvrir un booster ne remet pas le chrono à zéro : R vient toujours du serveur.
+   *
+   *   B=2, R=10 → T_max = 80 min
+   *   B=9, R=10 → T_max = 10 min
+   *   B=10      → ouverture immédiate
    */
-  function autoDelayRange(stock = 0) {
-    const perBoosterMs =
-      Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10)) * 60000;
-    const inStock = Math.max(0, Math.min(AUTO_REMAINING_CAP, Math.round(Number(stock) || 0)));
-    const slots = Math.max(1, AUTO_REMAINING_CAP - inStock);
-    const max = Math.max(AUTO_MIN_GAP, perBoosterMs * slots);
-    return { min: AUTO_MIN_GAP, max, perBoosterMs, stock: inStock, slots };
+  const AUTO_SOFT_CAP = 9;
+  const AUTO_STACK_FALLBACK = 10;
+  const AUTO_REGEN_FALLBACK_MIN = 10;
+
+  function autoStackMax() {
+    const fromUser = toNum(state.user?.freePacksMax);
+    const fromCfg = toNum(state.config?.freePacks?.max);
+    return Math.max(1, Math.round(fromUser ?? fromCfg ?? AUTO_STACK_FALLBACK));
   }
 
-  /** Délai aléatoire avant le prochain booster, à partir du stock ouvrable actuel. */
-  function autoDelay(stock = 0) {
-    const { min, max } = autoDelayRange(stock);
-    return Math.round(min + Math.random() * (max - min));
+  /** État réel de la jauge : B, son maximum et R (minutes avant le prochain gain). */
+  function autoRegenInfo() {
+    const max = autoStackMax();
+    const boosters = Math.min(max, Math.max(0, toNum(state.user?.freePacks) ?? 0));
+    const raw =
+      state.user?.nextFreeAt ??
+      state.user?.nextFreePackAt ??
+      state.user?.freePackAt ??
+      state.user?.nextFree ??
+      null;
+    const stamp = raw ? Date.parse(raw) : NaN;
+    const hasStamp = Number.isFinite(stamp);
+
+    // R = temps réel restant. Le serveur peut renvoyer une date déjà passée
+    // (gain imminent, latence) : on considère alors R = 0.
+    const remainingMin = hasStamp ? Math.max(0, (stamp - Date.now()) / 60000) : AUTO_REGEN_FALLBACK_MIN;
+
+    return {
+      boosters,
+      max,
+      remainingMin,
+      nextAt: hasStamp ? stamp : 0,
+      source: hasStamp ? 'api' : 'estimé'
+    };
   }
 
-  /** Stock ouvrable maintenant, tous boosters sélectionnés confondus. */
-  function autoStock() {
-    return autoPoolTotal(autoSelectedPacks(), state.settings.autoAllowChakra !== false);
+  /** Bornes du délai : entier de minutes entre 1 et T_max, ou 0 pour ouvrir tout de suite. */
+  function autoDelayRange(regen = autoRegenInfo()) {
+    const intervalMin = Math.min(60, Math.max(1, Number(state.settings.autoMaxPerBoosterMin) || AUTO_REGEN_FALLBACK_MIN));
+    const boosters = regen.boosters;
+    const remainingMin = Math.max(0, regen.remainingMin);
+    const slots = Math.max(0, AUTO_SOFT_CAP - boosters);
+    const rawMax = slots * intervalMin + remainingMin;
+    const maxMin = Math.floor(rawMax);
+
+    // Jauge pleine, ou T_max sous la minute : on ouvre sans attendre.
+    const immediate = boosters >= regen.max || maxMin < 1;
+
+    return {
+      min: 60000,
+      max: immediate ? 0 : maxMin * 60000,
+      maxMin,
+      boosters,
+      maxBoosters: regen.max,
+      remainingMin,
+      slots,
+      intervalMin,
+      immediate,
+      source: regen.source,
+      formula: `(9 − ${boosters}) × ${intervalMin} + ${Math.round(remainingMin * 10) / 10}`
+    };
+  }
+
+  /** Délai tiré au hasard : un entier de minutes entre 1 et T_max. */
+  function autoDelay(regen = autoRegenInfo()) {
+    const range = autoDelayRange(regen);
+    if (range.immediate) return 0;
+    return (1 + Math.floor(Math.random() * range.maxMin)) * 60000;
   }
 
   /* --- Anti-AFK ------------------------------------------------------ */
@@ -3423,6 +3480,9 @@
     while (alive()) {
       a.beatAt = Date.now();
       try {
+        // Étape 4 : après une attente, on relit l'état réel (B et R) avant de décider.
+        await autoSyncIfStale();
+        if (!alive()) break;
         const packs = autoSelectedPacks();
         if (!packs.length) {
           // Aucune sélection : on ne s'arrête pas, on réessaie (le compte peut changer).
@@ -3567,19 +3627,29 @@
       }
 
       if (!a.stop && a.gen === gen) {
-        // Minimum 10 s ; maximum = « minutes par booster » × places avant le plafond de 9.
-        const stock = autoStock();
-        const delay = autoDelay(stock);
+        // Étape 4 : l'état réel a pu changer pendant l'attente/ouverture.
+        // On relit le compte (throttlé) pour avoir le vrai B et le vrai R.
+        await autoSyncIfStale().catch(() => {});
+        if (!alive()) break;
+
+        const regen = autoRegenInfo();
+        const range = autoDelayRange(regen);
+        const delay = autoDelay(regen);
         a.nextGapMs = delay;
-        const range = autoDelayRange(stock);
-        const perMin = Math.round((range.perBoosterMs / 60000) * 10) / 10;
-        a.status = `Ouverture… ${a.opened} · prochain dans ${fmtWait(delay)} (max ${fmtWait(range.max)} = ${
-          range.slots
-        } × ${perMin} min)`;
+        a.status = range.immediate
+          ? `Ouverture… ${a.opened} · jauge ${range.boosters}/${range.maxBoosters} : ouverture immédiate`
+          : `Ouverture… ${a.opened} · prochain dans ${fmtWait(delay)} (max ${fmtWait(range.max)} = T_max = ${range.formula})`;
+        autoLog(
+          range.immediate
+            ? `jauge ${range.boosters}/${range.maxBoosters} : ouverture immédiate`
+            : `délai ${Math.round(delay / 60000)} min (T_max ${range.maxMin} min = ${range.formula}, R ${
+                Math.round(range.remainingMin * 10) / 10
+              } min, source ${range.source})`
+        );
         // Le compte à rebours doit exister avant le rendu, sinon le bloc n'apparaît pas.
-        a.nextAt = Date.now() + delay;
+        a.nextAt = delay ? Date.now() + delay : 0;
         render();
-        await autoSleep(delay);
+        if (delay) await autoSleep(delay);
         a.nextAt = 0;
         a.nextGapMs = 0;
       }
@@ -3610,8 +3680,15 @@
     } catch {
       /* on réessaiera */
     }
+    state.lastAutoSync = Date.now();
     await loadPackState(true).catch(() => {});
     await loadPacks(true).catch(() => {});
+  }
+
+  /** Évite de marteler l'API : une synchro au plus toutes les 45 s. */
+  async function autoSyncIfStale(maxAgeMs = 45000) {
+    if (Date.now() - (state.lastAutoSync || 0) < maxAgeMs) return;
+    await refreshAutoAccount();
   }
 
   /**
@@ -3663,9 +3740,10 @@
 
     const total = autoPoolTotal(selected, allowChakra);
     const estimate = autoEstimateCost(selected, total, allowChakra);
-    const perBoosterMin = Math.min(60, Math.max(0.2, Number(state.settings.autoMaxPerBoosterMin) || 10));
-    const delayRange = autoDelayRange(total);
-    const maxLabel = fmtWait(delayRange.max);
+    const perBoosterMin = Math.min(60, Math.max(1, Number(state.settings.autoMaxPerBoosterMin) || 10));
+    const regen = autoRegenInfo();
+    const delayRange = autoDelayRange(regen);
+    const maxLabel = delayRange.immediate ? 'immédiat' : fmtWait(delayRange.max);
     const refreshMin = Math.min(120, Math.max(1, Math.round(Number(state.settings.autoRefreshMin) || 10)));
     const passPack = selected[0] ?? packs[0] ?? null;
 
@@ -3714,8 +3792,8 @@
         <div class="kp-explain-sub">Rythme</div>
         <div class="kp-filters">
           <label class="kp-filter">
-            <span>Minutes par booster</span>
-            <input class="kp-input" type="number" min="0.2" max="60" step="0.5" data-setting="autoMaxPerBoosterMin" value="${perBoosterMin}">
+            <span>Intervalle de régénération (min)</span>
+            <input class="kp-input" type="number" min="1" max="60" step="1" data-setting="autoMaxPerBoosterMin" value="${perBoosterMin}">
           </label>
           <label class="kp-filter">
             <span>Rafraîchir (min)</span>
@@ -3723,10 +3801,11 @@
           </label>
         </div>
         <div class="kp-hint">
-          Un booster à la fois, puis un délai aléatoire entre <b>10 s</b> et <b>${maxLabel}</b> :
-          ${perBoosterMin} min × ${delayRange.slots} place(s) restante(s) avant le plafond de
-          ${AUTO_REMAINING_CAP} (stock actuel ${delayRange.stock}/${AUTO_REMAINING_CAP}).
-          Plus le stock est haut, plus l'écart maximum se raccourcit.
+          Formule : <b>T_max = (9 − B) × ${perBoosterMin} + R</b>, où
+          <b>B</b> = boosters dans la jauge (${delayRange.boosters}/${delayRange.maxBoosters}) et
+          <b>R</b> = temps réel avant le prochain gain (${Math.round(delayRange.remainingMin)} min, ${delayRange.source}).
+          Il ouvre dans <b>${maxLabel}</b> au plus tard, avec un délai entier tiré au hasard entre 1 min et T_max.
+          Jauge pleine (${delayRange.maxBoosters}/${delayRange.maxBoosters}) → ouverture immédiate.
           Jusqu'à ce que tu cliques sur <b>Arrêter</b>. Compte rafraîchi toutes les ${refreshMin} min.
         </div>
 
@@ -5161,7 +5240,7 @@
       if (key === 'dealsPages') state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(Number(value) || 6)));
       if (key === 'dealsMinPct') state.settings.dealsMinPct = Math.min(90, Math.max(0, Math.round(Number(value) || 0)));
       if (key === 'autoMaxPerBoosterMin') {
-        state.settings.autoMaxPerBoosterMin = Math.min(60, Math.max(0.2, Number(value) || 10));
+        state.settings.autoMaxPerBoosterMin = Math.min(60, Math.max(1, Math.round(Number(value) || 10)));
       }
       if (key === 'autoRefreshMin') state.settings.autoRefreshMin = Math.min(120, Math.max(1, Math.round(Number(value) || 10)));
       persistSettings();
@@ -5336,7 +5415,7 @@
       findAfkButton,
       autoDelay,
       autoDelayRange,
-      autoStock,
+      autoRegenInfo,
       startAutoOpen,
       stopAutoOpen,
       ensureAutoAlive,

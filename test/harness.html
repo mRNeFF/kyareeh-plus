@@ -26,6 +26,8 @@
       const store = JSON.parse(localStorage.getItem('kp-harness-store') || '{}');
       const saveStore = () => localStorage.setItem('kp-harness-store', JSON.stringify(store));
       window.__harnessStore = store;
+      // Régénération simulée : minutes restantes avant le prochain booster.
+      window.__nextFreeMin = window.__nextFreeMin ?? 10;
       window.browser = {
         storage: {
           local: {
@@ -108,6 +110,7 @@
             freePacks: 7,
             bonusPacks: 2,
             freePacksMax: 10,
+            nextFreeAt: new Date(Date.now() + (window.__nextFreeMin ?? 10) * 60000).toISOString(),
             pity: 120
           });
         }
@@ -127,6 +130,7 @@
               chakra: 12345,
               freePacks: 7,
               freePacksMax: 10,
+              nextFreeAt: new Date(Date.now() + (window.__nextFreeMin ?? 10) * 60000).toISOString(),
               bonusPacks: 2,
               pity: 120
             },
