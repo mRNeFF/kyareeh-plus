@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.14.0)
+## Fonctionnalités (v0.15.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -22,8 +22,8 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Cartes (nouvel onglet)** : en tête, la *chasse à la carte* — probabilité exacte par booster, pour **tous** les boosters disponibles (pool réel, vedettes et pack doré inclus), nombre de boosters attendus, coût moyen et chance d'au moins une sur 100 boosters. Une fois la carte choisie, seule cette carte reste affichée. En dessous, l'espérance de chakra par booster (retour en %) et les prix moyens par rareté.
 - **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
 - **Auto-Open (nouvel onglet)** : coche **un ou plusieurs** boosters — l'ouverture en tire un **au hasard** à chaque fois, **un booster à la fois**, puis attend un délai aléatoire **entier de 1 min à T_max**, avec **T_max = (9 − B) × I + R** : **B** = boosters dans la jauge, **I** = intervalle de régénération (10 min par défaut), **R** = temps **réel** restant avant le prochain gain (lu dans `nextFreeAt` de l'API, donc jamais remis à zéro par une ouverture). Exemples : 8 boosters et prochain gain dans 7 min → 17 min ; 2 boosters et prochain gain dans 10 min → 80 min ; jauge pleine (10/10) ou T_max < 1 min → **ouverture immédiate**. Avant chaque décision l'état réel est relu (boosters et chrono), et le calcul est refait après chaque attente. Ça continue **jusqu'à ce que tu cliques sur Arrêter**, en attendant les boosters suivants quand il n'y en a plus. Il peut être lancé **même avec 0 booster** : la boucle reste en attente, se relance dès qu'un booster ouvrable apparaît, et ne s'arrête que sur **Arrêter** (elle reprend aussi après un rechargement de page). Il consomme d'abord les boosters offerts (dons, gratuits, bonus), puis le chakra **seulement si tu l'autorises**. Compte à rebours en direct avant le prochain booster. Autres options : **bruit à chaque booster** (carillon, plus aigu sur une Légendaire/Mythique, désactivable), arrêt automatique sur Légendaire/Mythique, et **rafraîchissement automatique du compte** (10 min par défaut) pour voir arriver de nouveaux boosters. Suivi en direct : boosters ouverts, cartes, chakra dépensé, répartition par rareté, meilleures trouvailles et dernier tirage. Les **meilleures trouvailles** gardent les cartes **Épique et au-dessus** dans un pool à part (et non plus les 60 dernières cartes) : une Légendaire ou une Mythique tirée en début de session reste affichée, avec un compteur `×N` si tu l'as eue plusieurs fois, et un halo renforcé sur L/M. Un **watchdog** relance la boucle si elle se tait plus de 2 min (onglet gelé, timer avalé, erreur réseau) et un **journal horodaté** (bouton *Copier le journal*) garde la trace de chaque ouverture, attente, erreur et relance. Si le laissez-passer du site a expiré, un bouton ouvre la page du booster pour le renouveler.
-- **Onglet Stat (global, v0.14.0)** : une seule statistique pour l'instant — la **valeur cumulée des collections en chakra**. Chaque carte possédée est valorisée au **prix officiel du jeu** (`/api/fair-play/prices`), puis additionnée sur les comptes les plus fournis des classements publics (25, 50 ou 100 comptes, réglable). Le périmètre est toujours affiché sous le chiffre : le site ne publie pas la valeur totale de ses comptes, donc le résultat est un **cumul sur N comptes**, jamais présenté comme la totalité du site. Les collections illisibles sont exclues (jamais estimées) et les cartes sans prix sont comptées à part. Analyse mise en cache 12 h, relançable à la demande.
-- **Propriétaires par carte** : dans Vente (Mes cartes, Marché global et fiche carte), une pastille indique combien de **joueurs analysés** possèdent la carte (`6 poss.`, info-bulle « 6 des 50 joueurs analysés possèdent cette carte »). Un joueur qui possède plusieurs exemplaires ne compte qu'une fois, et le chiffre n'est jamais présenté comme un total du site.
+- **Onglet Stat (classement de comptes suivis, v0.15.0)** : jusqu'à **20 comptes** classés sur 10 métriques — boosters ouverts, **valeur officielle** des cartes, **rang global**, cartes différentes, exemplaires, séries terminées, légendaires et mythiques différentes, annonces actives, complétion du catalogue. Le **compte connecté** est toujours suivi (badge « moi », non supprimable), les autres s'ajoutent **à la main** par pseudo (`/api/me/friends/search`) ou **automatiquement depuis la liste d'amis** (`GET /api/me/friends`, bouton **Importer mes amis**, badge « ami », amis supprimables). L'import automatique se fait une fois au chargement si la liste n'a jamais été lue ou date de plus de **12 h**, sans bloquer l'affichage. Tri par colonne, rangs ex æquo, détail par compte, comptes rendus d'import (« X ami(s) importé(s) · Y ignoré(s) »). Une valeur absente s'affiche « — », jamais estimée. Synchro des profils mise en cache 12 h, relançable à la demande.
+- **Propriétaires par carte** : dans Vente (Mes cartes, Marché global et fiche carte), une pastille indique combien de **comptes suivis** possèdent la carte (`6 poss.`, info-bulle « 6 des 20 comptes suivis possèdent cette carte »). Un compte qui possède plusieurs exemplaires ne compte qu'une fois, et le chiffre n'est jamais présenté comme un total du site.
 - **Valeur d'un autre compte** : recherche instantanée au fil de la saisie via l'endpoint du site (`/api/me/friends/search`), qui trouve **n'importe quel joueur** y compris avec une petite collection (le classement, utilisé en repli, ne renvoie que les 10 plus grosses collections). Correspondance exacte affichée en premier, avec la relation (`ami`, `demande envoyée`, `demande reçue`). Puis page dédiée avec valeur exacte (prix du jeu), répartition par rareté, plus belles cartes, et bouton **← Mon compte**.
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
 - **Mise à jour** : bouton **Mettre à jour et recharger** dans les Réglages — vérifie GitHub, recharge l'extension et rafraîchit la page en un clic (après un `git pull` en local). La popup garde un bouton **Recharger l'extension**.
@@ -222,17 +222,17 @@ La valorisation est **exacte**, pas estimée :
 
 Si la liste n'est pas accessible (profil restreint, endpoint modifié), l'extension retombe sur une **estimation** par rareté (médiane des médianes du cache), clairement libellée « estimée », avec le nombre de cartes sans référence.
 
-### Statistiques globales (onglet Stat)
+### Statistiques (onglet Stat)
 
-L'onglet ne contient qu'une mesure : la **valeur cumulée des collections en chakra**.
+L'onglet classe les **comptes suivis** (20 au maximum) sur les champs publics du site.
 
-1. Le pool vient des classements publics (`GET /api/leaderboard/ladder?by=collection|mythics|series|achievements`, les seuls tris réellement pris en compte par le serveur). Profondeur réglable : **25, 50 ou 100 comptes**.
-2. Pour chaque compte, `GET /api/trades/owned/:id` donne les cartes possédées (ids uniques).
-3. Les prix sont demandés **une seule fois** pour l'union des cartes (`GET /api/fair-play/prices?ids=…`, lots de 200). Cette union ne peut pas dépasser la taille du catalogue (6 736), donc le coût reste borné même avec 100 comptes.
-4. La valeur d'un compte est la somme des prix de ses cartes ; le total est la somme des comptes. Une collection illisible est **exclue** (jamais estimée) et les cartes sans prix sont comptées à part.
-5. **Le site ne publie aucune valeur globale** : le résultat est donc toujours présenté comme un « cumul sur N comptes », avec le périmètre affiché sous le chiffre. Seuls l'index compact des propriétaires et les totaux sont persistés (pas les collections), pour rester sous le quota de stockage.
+1. **Comptes** : le compte connecté est ajouté d'office (`source: self`, badge « moi », non supprimable). La recherche par pseudo passe par `GET /api/me/friends/search?q=…` (`source: manual`). Le bouton **Importer mes amis** lit `GET /api/me/friends`, qui renvoie `{ friends: [...], incoming: [...], max }` ; chaque ami absent du classement est ajouté (`source: friend`, badge « ami », supprimable). Le compte connecté et les ajouts manuels ne sont jamais retirés : les amis ne remplissent que les places libres. L'import automatique n'a lieu qu'une fois par **12 h** (et au plus une tentative toutes les 10 min en cas d'échec), en arrière-plan.
+2. **Métriques par compte** : `GET /api/users/:id` fournit les cartes différentes, les doubles, les boosters et la répartition par rareté ; `GET /api/trades/owned/:id` donne les cartes possédées ; le rang vient de `GET /api/leaderboard/ladder?by=collection&q=…`.
+3. **Valeur** : les prix officiels sont demandés **une seule fois** pour l'union des cartes de tous les comptes (`GET /api/fair-play/prices?ids=…`, lots de 200). La valeur d'un compte est la somme des prix connus ; les cartes sans prix sont comptées à part. Une collection illisible laisse la valeur et les séries à « — » : rien n'est estimé.
+4. **Rangs et tri** : le tri se fait sur la colonne choisie, les valeurs absentes passent toujours en dernier, et les ex æquo partagent le même rang (1, 1, 3). Le rang affiché en première colonne dépend du tri courant.
+5. **Persistance** : `kyareeh.statboard.v1` garde les comptes, l'index compact des propriétaires, `friendsAt` (dernière lecture de la liste d'amis) et `friendIds`. Les collections complètes ne sont pas conservées, pour rester sous le quota de stockage. Les profils sont relus au bout de 12 h.
 
-Le calcul de valeur est une fonction pure (`statValueAccounts`) testée par `npm run verify:statglobal`.
+Les calculs sont des fonctions pures (`statSeriesProgress`, `statCollectionValue`, `statOwnerCounts`, `statAccountMetrics`, `statSortAccounts`, `statRankRows`) testées par `npm run verify:statglobal`.
 
 ### Espérance des boosters
 
@@ -271,7 +271,7 @@ Validation : `npm run verify:odds` compare la formule aux `perBooster.perCardPct
 npm install          # optionnel, pour web-ext
 npm run start        # lance Firefox avec l'extension
 npm run lint
-npm run verify:statglobal # calculs de l'onglet Stat global
+npm run verify:statglobal # calculs de l'onglet Stat
 npm run verify:analysis
 npm run build
 ```

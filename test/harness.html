@@ -204,6 +204,24 @@
         }
         if (url.includes('/api/users/')) {
           const id = decodeURIComponent(url.split('/api/users/')[1].split(/[?#]/)[0]);
+          // Compte connecté : profil complet pour alimenter toutes les colonnes.
+          if (id === 'u-axel') {
+            return json({
+              id: 'u-axel',
+              pseudo: 'Axel',
+              avatar: null,
+              owned: 8,
+              doublesCount: 8,
+              mythics: 1,
+              heritage: 0,
+              boostersOpened: 32,
+              points: 1200,
+              catalogSize: 9,
+              byRarity: { C: 3, R: 2, E: 1, L: 1, M: 1 },
+              listings: [{ id: 'l1' }, { id: 'l2' }],
+              best: []
+            });
+          }
           const stat = STAT_PLAYERS.find((player) => player.id === id);
           if (stat) {
             return json({
@@ -289,6 +307,17 @@
             })
           ]);
         }
+        if (url.includes('/api/me/friends') && !url.includes('/search')) {
+          // Liste d'amis du compte connecté : même enveloppe que le vrai serveur.
+          return json({
+            friends: [
+              { id: 'amo-uuid', pseudo: 'Amo', avatar: null, since: '2026-01-02T00:00:00Z', online: true },
+              { id: 'amoulle-uuid', pseudo: 'Amoulle', avatar: null, since: '2026-02-03T00:00:00Z', online: false }
+            ],
+            incoming: [],
+            max: 50
+          });
+        }
         if (url.includes('/api/me/friends/search')) {
           const q = new URL(url, location.href).searchParams.get('q') || '';
           if (!q.trim()) return json([]);
@@ -335,10 +364,18 @@
             series: player.series,
             achievements: player.achievements
           }));
+          // Deux comptes hors du top 100 : sert à vérifier la colonne Rang.
+          rows.push(
+            { pos: 11704, id: 'amo-uuid', pseudo: 'Amo', avatar: null, owned: 12, mythics: 0 },
+            { pos: 250, id: 'amoulle-uuid', pseudo: 'Amoulle', avatar: null, owned: 5499, mythics: 12 }
+          );
+          // `q` : le vrai serveur renvoie `found` filtré par pseudo.
+          const q = (new URL(url, location.href).searchParams.get('q') || '').toLowerCase();
+          const found = q ? rows.filter((row) => String(row.pseudo).toLowerCase().includes(q)) : rows;
           return json({
             by,
             rows,
-            found: rows,
+            found,
             me: null,
             total: by === 'mythics' ? 52022 : 105742,
             catalogSize: 6736
