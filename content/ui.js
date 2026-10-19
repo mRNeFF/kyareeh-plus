@@ -158,8 +158,12 @@
     access: null,
     mine: null,
     lowest: {},
+    fixedLow: {},
+    fixedHigh: {},
+    auctionBuyout: {},
     buyOrders: {},
     marketLoaded: new Set(),
+    marketScanned: new Set(),
     marketLoading: false,
     marketLimit: 24,
     // Onglet Vente : état séparé de l'ancien onglet Doublons.
@@ -1505,6 +1509,9 @@
     if (prices) {
       mergePriceEntry(key, parsePriceEntry(prices));
     }
+    // Alimente les caches communs : le plan de vente réutilisera exactement
+    // le même prix fixe haut et le même achat immédiat que la fiche.
+    if (listings || book) applyMarketSnapshot(key, listings, book);
 
     view.detail = analyzeCard({
       prices,
@@ -2094,65 +2101,145 @@
   /* Market info (lowest listing + best buy order)                       */
   /* ------------------------------------------------------------------ */
 
-  async function loadMarketInfo(ids, limit = state.marketLimit) {
-    if (state.marketLoading) return;
-    const room = Math.max(0, limit - state.marketLoaded.size);
-    const todo = ids.map(String).filter((id) => !state.marketLoaded.has(id)).slice(0, room);
-    if (!todo.length) return;
+  const marketPending = new Map();
 
-    state.marketLoading = true;
-    render();
+  /**
+   * Applique une réponse marché aux caches partagés par la liste, la fiche et
+   * le plan de vente. C'est ce qui garantit le même « prix maximal » partout.
+   */
+  function applyMarketSnapshot(key, listings, book) {
+    const items = Array.isArray(listings?.items) ? listings.items : Array.isArray(listings) ? listings : [];
+    const rivals = items.filter((item) => !item.isMine);
+
+    if (listings != null) {
+      const fixed = rivals
+        .filter((item) => String(item.type ?? 'fixed') === 'fixed')
+        .map((item) => toNum(item.price))
+        .filter((value) => value != null && value > 0)
+        .sort((a, b) => a - b);
+      const buyouts = rivals
+        .filter((item) => String(item.type) === 'auction')
+        .map((item) => toNum(item.buyoutPrice))
+        .filter((value) => value != null && value > 0)
+        .sort((a, b) => a - b);
+      const entries = rivals
+        .map((item) =>
+          String(item.type ?? 'fixed') === 'fixed' ? toNum(item.price) : toNum(item.buyoutPrice)
+        )
+        .filter((value) => value != null && value > 0)
+        .sort((a, b) => a - b);
+
+      if (fixed.length) {
+        state.fixedLow[key] = fixed[0];
+        state.fixedHigh[key] = fixed[fixed.length - 1];
+      } else {
+        delete state.fixedLow[key];
+        delete state.fixedHigh[key];
+      }
+      if (buyouts.length) state.auctionBuyout[key] = buyouts[0];
+      else delete state.auctionBuyout[key];
+      if (entries.length) state.lowest[key] = entries[0];
+      else delete state.lowest[key];
+
+      const embedded = items.find((item) => item && item.prices)?.prices;
+      if (embedded && !priceFresh(state.prices[key])) {
+        mergePriceEntry(key, {
+          m7: toNum(embedded.median7d),
+          m30: toNum(embedded.median30d),
+          sales7d: toNum(embedded.sales7d),
+          sales30d: toNum(embedded.sales30d),
+          at: Date.now()
+        });
+      }
+      state.marketScanned.add(key);
+      state.marketLoaded.add(key);
+    }
+
+    // Un échec partiel du carnet ne doit pas effacer un ordre déjà connu.
+    if (book != null) {
+      const orders = Array.isArray(book) ? book : Array.isArray(book?.items) ? book.items : Array.isArray(book?.orders) ? book.orders : [];
+      const best = orders
+        .filter((order) => !order.isMine)
+        .filter((order) => !order.status || ['open', 'active', 'pending'].includes(String(order.status)))
+        .map((order) => ({
+          price: toNum(order.price ?? order.maxPrice ?? order.maxAmount),
+          qty: toNum(order.qty ?? order.remaining ?? order.remainingQty)
+        }))
+        .filter((order) => order.price != null && order.price > 0)
+        .sort((a, b) => b.price - a.price)[0];
+      if (best) state.buyOrders[key] = best;
+      else delete state.buyOrders[key];
+    }
+  }
+
+  async function fetchMarketSnapshot(key) {
+    const [listings, book] = await Promise.all([
+      api(`/api/market/listings?characterId=${encodeURIComponent(key)}&sort=price_asc&pageSize=20`, {
+        timeout: 15000
+      }).catch(() => null),
+      api(`/api/market/buy-orders?characterId=${encodeURIComponent(key)}`, { timeout: 12000 }).catch(() => null)
+    ]);
+    return { listings, book };
+  }
+
+  /**
+   * Charge les instantanés manquants, deux cartes à la fois. Les appels
+   * concurrents pour une même carte partagent la même promesse.
+   */
+  async function ensureMarketData(ids) {
+    const unique = [...new Set(ids.map(String).filter(Boolean))];
+    if (!unique.length) return;
+
+    const existing = unique.map((id) => marketPending.get(id)).filter(Boolean);
+    const todo = unique.filter((id) => !state.marketScanned.has(id) && !marketPending.has(id));
+    if (!todo.length) {
+      if (existing.length) await Promise.all(existing);
+      return;
+    }
 
     let cursor = 0;
     const worker = async () => {
       while (cursor < todo.length) {
-        const id = todo[cursor++];
-        const key = String(id);
-        try {
-          const [listings, book] = await Promise.all([
-            api(`/api/market/listings?characterId=${encodeURIComponent(key)}&sort=price_asc&pageSize=20`, {
-              timeout: 15000
-            }).catch(() => null),
-            api(`/api/market/buy-orders?characterId=${encodeURIComponent(key)}`, { timeout: 12000 }).catch(() => null)
-          ]);
-
-          const items = Array.isArray(listings?.items) ? listings.items : Array.isArray(listings) ? listings : [];
-          const prices = items
-            .filter((it) => !it.isMine)
-            .map((it) => (String(it.type) === 'fixed' ? toNum(it.price) : toNum(it.buyoutPrice)))
-            .filter((v) => v != null && v > 0);
-          if (prices.length) state.lowest[key] = Math.min(...prices);
-
-          const embedded = items.find((it) => it && it.prices)?.prices;
-          if (embedded && !priceFresh(state.prices[key])) {
-            mergePriceEntry(key, {
-              m7: toNum(embedded.median7d),
-              m30: toNum(embedded.median30d),
-              sales7d: toNum(embedded.sales7d),
-              sales30d: toNum(embedded.sales30d),
-              at: Date.now()
-            });
+        const key = todo[cursor++];
+        const task = (async () => {
+          try {
+            const { listings, book } = await fetchMarketSnapshot(key);
+            if (!listings && !book) throw new Error('marché indisponible');
+            applyMarketSnapshot(key, listings, book);
+          } catch {
+            /* on retentera à la prochaine demande */
+          } finally {
+            state.marketLoaded.add(key);
+            marketPending.delete(key);
           }
-
-          const orders = Array.isArray(book) ? book : Array.isArray(book?.items) ? book.items : Array.isArray(book?.orders) ? book.orders : [];
-          const best = orders
-            .filter((o) => !o.isMine)
-            .filter((o) => !o.status || ['open', 'active', 'pending'].includes(String(o.status)))
-            .map((o) => ({ price: toNum(o.price ?? o.maxPrice ?? o.maxAmount), qty: toNum(o.qty ?? o.remaining ?? o.remainingQty) }))
-            .filter((o) => o.price != null && o.price > 0)
-            .sort((a, b) => b.price - a.price)[0];
-          if (best) state.buyOrders[key] = best;
-        } catch {
-          /* ignore */
-        }
-        state.marketLoaded.add(key);
-        await sleep(100);
+          await sleep(100);
+        })();
+        marketPending.set(key, task);
+        await task;
       }
     };
 
-    await Promise.all([worker(), worker()]);
-    state.marketLoading = false;
+    const jobs = [worker(), worker()];
+    await Promise.all([...existing, ...jobs]);
+  }
+
+  async function loadMarketInfo(ids, limit = state.marketLimit) {
+    if (state.marketLoading) return;
+    const room = Math.max(0, limit - state.marketLoaded.size);
+    const todo = ids
+      .map(String)
+      .filter((id) => !state.marketScanned.has(id))
+      .slice(0, room);
+    if (!todo.length) return;
+
+    state.marketLoading = true;
     render();
+    try {
+      await ensureMarketData(todo);
+    } finally {
+      state.marketLoading = false;
+      render();
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -2254,7 +2341,7 @@
    * Prépare une vente. `rows` peut venir de la sélection de l'onglet Vente ou d'une
    * fiche carte (`openCardDetail` → bouton vendre), avec un prix imposé optionnel.
    */
-  function prepareSell(rows, options = {}) {
+  async function prepareSell(rows, options = {}) {
     const source =
       Array.isArray(rows) && rows.length
         ? rows.filter((r) => r.sellable > 0)
@@ -2288,7 +2375,7 @@
       };
     });
 
-    state.sell = {
+    const sell = {
       plan,
       type,
       // Stratégie appliquée (vente rapide / équilibrée / maximale), null = prix auto.
@@ -2297,11 +2384,26 @@
       buyoutPct: state.settings.buyoutPct,
       running: false,
       done: false,
+      // Les prix maximaux ne sont affichés qu'une fois le marché lu, pour
+      // éviter un premier chiffre différent de celui de la fiche.
+      marketPending: true,
       // Vendre toutes les copies d'une carte (dont la dernière) demande une confirmation.
       confirmLastCopy: false,
       log: []
     };
+    state.sell = sell;
     render();
+
+    try {
+      await ensureMarketData(plan.map((row) => String(row.id)));
+    } catch {
+      /* le plan reste utilisable avec les prix déjà en cache */
+    } finally {
+      if (state.sell === sell) {
+        sell.marketPending = false;
+        render();
+      }
+    }
   }
 
   function resetPlanPrices() {
@@ -7653,6 +7755,24 @@
     let analysis = null;
     if (detail?.recommend && String(detail.card?.id) === key) analysis = detail;
     if (!analysis && cached) {
+      // On rejoue le marché à partir des mêmes caches que la fiche : sans le
+      // prix fixe haut, le « Prix maximal » du plan retombait sur le prix bas.
+      const marketItems = [];
+      const fixedLow = state.fixedLow[key];
+      const fixedHigh = state.fixedHigh[key];
+      const auctionBuyout = state.auctionBuyout[key];
+      if (fixedLow != null) marketItems.push({ type: 'fixed', price: fixedLow });
+      if (fixedHigh != null && fixedHigh !== fixedLow) {
+        marketItems.push({ type: 'fixed', price: fixedHigh });
+      }
+      if (auctionBuyout != null) {
+        marketItems.push({ type: 'auction', price: auctionBuyout, buyoutPrice: auctionBuyout });
+      }
+      // Compatibilité avec un cache plus ancien (avant fixedHigh).
+      if (!marketItems.length && state.lowest[key] != null) {
+        marketItems.push({ type: 'fixed', price: state.lowest[key] });
+      }
+
       analysis = analyzeCard({
         prices: {
           median7d: cached.m7,
@@ -7666,7 +7786,7 @@
         },
         card: { id: key, name: row.name, rarity: row.rarity, floor: row.floor },
         mine: sellRowOf(key),
-        listings: state.lowest[key] != null ? { items: [{ price: state.lowest[key], type: 'fixed' }] } : null,
+        listings: marketItems.length ? { items: marketItems } : null,
         book: state.buyOrders[key] ? { bids: [{ price: state.buyOrders[key].price }] } : null
       });
     }
@@ -7859,22 +7979,24 @@
         )}${isAuction ? ' · le prix final dépend des enchérisseurs' : ''}</div>
 
         ${
-          planRec
-            ? `<div class="kp-explain-sub">Prix recommandé <span class="kp-explain-count">${
-                plan.length > 1 ? `${fmt(plan.length)} cartes · ` : ''
-              }${planRec.priced < planRec.total ? `${fmt(planRec.priced)}/${fmt(planRec.total)} valorisée(s)` : 'données marché'}</span></div>
-               <div class="kp-strategy-row">
-                 ${SELL_STRATEGIES.map((key) => {
-                   const option = planRec.rows.get(String(plan[0]?.id))?.[key];
-                   const active = state.sell.method === key;
-                   return `<button class="kp-strategy ${active ? 'is-active' : ''}" type="button" data-act="sell-strategy" data-strategy="${key}" ${running ? 'disabled' : ''}>
-                       <b>${esc(option?.label ?? key)}</b>
-                       <span>◆ ${fmt(planRec.totals[key])} <small>net ◆ ${fmt(planRec.nets[key])}</small></span>
-                     </button>`;
-                 }).join('')}
-               </div>
-               <div class="kp-hint">${esc(sellStrategyHint(planRec, plan))}</div>`
-            : ''
+          state.sell.marketPending
+            ? `<div class="kp-hint"><span class="kp-spinner"></span> Lecture des prix fixes hauts et des achats immédiats…</div>`
+            : planRec
+              ? `<div class="kp-explain-sub">Prix recommandé <span class="kp-explain-count">${
+                  plan.length > 1 ? `${fmt(plan.length)} cartes · ` : ''
+                }${planRec.priced < planRec.total ? `${fmt(planRec.priced)}/${fmt(planRec.total)} valorisée(s)` : 'données marché'}</span></div>
+                 <div class="kp-strategy-row">
+                   ${SELL_STRATEGIES.map((key) => {
+                     const option = planRec.rows.get(String(plan[0]?.id))?.[key];
+                     const active = state.sell.method === key;
+                     return `<button class="kp-strategy ${active ? 'is-active' : ''}" type="button" data-act="sell-strategy" data-strategy="${key}" ${running ? 'disabled' : ''}>
+                         <b>${esc(option?.label ?? key)}</b>
+                         <span>◆ ${fmt(planRec.totals[key])} <small>net ◆ ${fmt(planRec.nets[key])}</small></span>
+                       </button>`;
+                   }).join('')}
+                 </div>
+                 <div class="kp-hint">${esc(sellStrategyHint(planRec, plan))}</div>`
+              : ''
         }
 
         ${
@@ -8329,8 +8451,13 @@
       case 'clear-cache':
         state.prices = {};
         state.lowest = {};
+        state.fixedLow = {};
+        state.fixedHigh = {};
+        state.auctionBuyout = {};
         state.buyOrders = {};
         state.marketLoaded.clear();
+        state.marketScanned.clear();
+        marketPending.clear();
         storageSet(PRICE_KEY, { savedAt: 0, prices: {} });
         notify('Cache des prix vidé.');
         break;

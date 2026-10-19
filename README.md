@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v1.0.0)
+## Fonctionnalités (v1.0.1)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -162,7 +162,7 @@ Notes pour le relecteur (champ « Notes to reviewer ») — utile pour éviter u
 
 ```bash
 # 1) monter la version, construire, linter, committer, pousser
-npm run release -- 1.0.0
+npm run release -- 1.0.1
 
 # 2) envoyer sur AMO (deux options)
 
@@ -170,11 +170,11 @@ npm run release -- 1.0.0
 #    https://addons.mozilla.org/developers/addon/api/key/
 $env:WEB_EXT_API_KEY="user:xxxxx:yyy"
 $env:WEB_EXT_API_SECRET="…"
-npm run release -- 1.0.0
+npm run release -- 1.0.1
 
 # b. manuel
 #    https://addons.mozilla.org/developers/addon/kyara-plus/versions
-#    « Upload a New Version » → web-ext-artifacts/kyareeh-plus-1.0.0.zip
+#    « Upload a New Version » → web-ext-artifacts/kyareeh-plus-1.0.1.zip
 ```
 
 Après publication, tous les utilisateurs sont mis à jour par Firefox (vérification
