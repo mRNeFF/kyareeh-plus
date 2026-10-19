@@ -3708,6 +3708,14 @@
       </div>`;
   }
 
+  /** Petite moyenne : une décimale quand elle vaut moins de 10 chakras. */
+  function statAvg(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    if (n > 0 && n < 10) return n.toFixed(1).replace('.', ',');
+    return fmt(Math.round(n));
+  }
+
   /** Détail d'un compte : métriques non affichées dans le tableau. */
   function statDetail(row) {
     const pairs = [
@@ -3719,7 +3727,7 @@
       ['Valeur des doublons', row.dupesValue == null ? 'non publié' : `◆ ${fmt(row.dupesValue)}`, row.dupesValue == null],
       [
         'Valeur moyenne par carte',
-        row.value != null && row.owned ? `◆ ${fmt(Math.round(row.value / row.owned))}` : '—',
+        row.value != null && row.owned ? `◆ ${statAvg(row.value / row.owned)}` : '—',
         row.value == null
       ],
       ['Séries presque finies (≤ 3)', row.seriesAlmost == null ? '—' : fmt(row.seriesAlmost), row.seriesAlmost == null],
