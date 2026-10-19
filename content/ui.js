@@ -170,6 +170,7 @@
       detailLoading: false,
       detailError: null,
       marketItems: null,
+      marketExpanded: new Set(),
       marketTotal: 0,
       marketMeta: null,
       marketLoading: false,
@@ -1402,7 +1403,10 @@
 
     view.marketLoading = true;
     view.marketError = null;
-    if (!append) view.marketPage = 1;
+    if (!append) {
+      view.marketPage = 1;
+      view.marketExpanded.clear();
+    }
     render();
 
     try {
@@ -2225,6 +2229,8 @@
     state.sell = {
       plan,
       type,
+      // Stratégie appliquée (vente rapide / équilibrée / maximale), null = prix auto.
+      method: null,
       auctionPct: state.settings.auctionPct,
       buyoutPct: state.settings.buyoutPct,
       running: false,
@@ -2239,6 +2245,7 @@
   function resetPlanPrices() {
     const sell = state.sell;
     if (!sell) return;
+    sell.method = null;
     for (const row of sell.plan) {
       row.price =
         sell.type === 'auction'
@@ -3106,38 +3113,180 @@
       </div>`;
   }
 
-  function sellMarketRow(item, ownedMap) {
-    const id = String(item?.characterId ?? item?.character?.id ?? '');
-    const card = item?.character ?? state.characters.get(id) ?? null;
+  /**
+   * Prix d'entrée d'une annonce : le prix fixe pour une vente directe, la mise
+   * courante (ou la prochaine mise) pour une enchère. L'achat immédiat d'une
+   * enchère est un prix distinct, affiché à part.
+   */
+  function marketItemPrice(item) {
+    return marketItemIsAuction(item)
+      ? toNum(item?.minNextBid) ?? toNum(item?.price) ?? toNum(item?.buyoutPrice)
+      : toNum(item?.price) ?? toNum(item?.buyoutPrice);
+  }
+
+  function marketItemIsAuction(item) {
+    return String(item?.type) === 'auction';
+  }
+
+  /**
+   * Regroupe les annonces par carte : une carte = une ligne. Le serveur renvoie
+   * plusieurs ventes pour la même carte ; on garde la moins chère en prix fixe et
+   * la moins chère en enchère, le reste allant dans le dépliant.
+   */
+  function groupMarketItems(items, sort = 'price_desc') {
+    const groups = new Map();
+    for (const item of items) {
+      const id = String(item?.characterId ?? item?.character?.id ?? '');
+      if (!id) continue;
+      let group = groups.get(id);
+      if (!group) {
+        group = {
+          id,
+          card: item?.character ?? state.characters.get(id) ?? null,
+          items: [],
+          order: groups.size,
+          bestFixed: null,
+          bestAuction: null,
+          best: null
+        };
+        groups.set(id, group);
+      }
+      group.items.push(item);
+
+      const price = marketItemPrice(item);
+      if (price == null || price <= 0) continue;
+      const entry = { price, item };
+      if (marketItemIsAuction(item)) {
+        if (!group.bestAuction || price < group.bestAuction.price) group.bestAuction = entry;
+      } else if (!group.bestFixed || price < group.bestFixed.price) {
+        group.bestFixed = entry;
+      }
+    }
+
+    for (const group of groups.values()) {
+      const candidates = [group.bestFixed, group.bestAuction].filter(Boolean);
+      group.best = candidates.sort((a, b) => a.price - b.price)[0] ?? null;
+      group.items.sort((a, b) => (marketItemPrice(a) ?? Infinity) - (marketItemPrice(b) ?? Infinity));
+    }
+
+    const list = [...groups.values()];
+    const asc = sort === 'price_asc' || sort === 'change_asc';
+    // Le tri du serveur est conservé à l'intérieur de chaque groupe ; entre cartes,
+    // on ordonne sur la meilleure offre de façon cohérente avec le tri demandé.
+    list.sort((a, b) => {
+      const pa = a.best?.price ?? marketPriceOf(a.items[0]) ?? -1;
+      const pb = b.best?.price ?? marketPriceOf(b.items[0]) ?? -1;
+      return asc ? pa - pb || a.order - b.order : pb - pa || a.order - b.order;
+    });
+    return list;
+  }
+
+  /** Délai lisible avant la fin d'une annonce (enchères surtout). */
+  function listingTimeLeft(item) {
+    const raw = item?.endsAt ?? item?.expiresAt ?? null;
+    if (!raw) return '';
+    const end = Date.parse(raw);
+    if (!Number.isFinite(end)) return '';
+    const ms = end - Date.now();
+    if (ms <= 0) return 'terminée';
+    const totalMin = Math.round(ms / 60000);
+    const hours = Math.floor(totalMin / 60);
+    const minutes = totalMin % 60;
+    if (hours >= 24) return `${Math.floor(hours / 24)} j ${hours % 24} h`;
+    return hours > 0 ? `${hours} h ${String(minutes).padStart(2, '0')} min` : `${minutes} min`;
+  }
+
+  /** Une annonce isolée, affichée dans le dépliant d'une carte. */
+  function sellMarketListing(item) {
+    const isAuction = marketItemIsAuction(item);
+    const price = marketItemPrice(item);
+    const buyout = toNum(item?.buyoutPrice);
+    const bid = toNum(item?.currentBid ?? item?.bid);
+    const seller = item?.seller?.pseudo ?? item?.seller?.name ?? '';
+    const left = listingTimeLeft(item);
+    return `
+      <div class="kp-mkt-listing ${isAuction ? 'is-auction' : 'is-fixed'}">
+        <span class="kp-mkt-type">${isAuction ? 'Enchère' : 'Prix fixe'}</span>
+        <b>◆ ${fmt(price)}</b>
+        <span class="kp-mkt-seller">${seller ? esc(seller) : '—'}</span>
+        <span class="kp-mkt-ends">${
+          isAuction && bid != null ? `mise ◆ ${fmt(bid)}${left ? ' · ' : ''}` : ''
+        }${left ? esc(left) : ''}</span>
+        <button class="kp-mkt-open" type="button" data-act="open-listing" data-listing="${esc(
+          item?.id ?? ''
+        )}" data-type="${isAuction ? 'auction' : 'fixed'}" title="Ouvrir cette annonce sur kyara.games ↗">↗</button>
+      </div>`;
+  }
+
+  /** Ligne « carte » du marché global : meilleure offre + dépliant des autres ventes. */
+  function sellMarketRow(group, ownedMap) {
+    const id = group.id;
+    const card = group.card ?? state.characters.get(id) ?? null;
     const info = rarityInfo(card?.rarity);
     const owned = ownedMap?.get(id) ?? null;
-    const median = marketPriceOf(item);
-    const embedded = item?.prices ?? null;
+    const median = marketPriceOf(group.items[0]);
+    const embedded = group.items[0]?.prices ?? null;
     const change =
       embedded?.median7d != null && embedded?.median30d != null && embedded.median30d > 0
         ? ((embedded.median7d - embedded.median30d) / embedded.median30d) * 100
         : changePctOf(id);
-    const price = toNum(item?.buyoutPrice) ?? toNum(item?.minNextBid ?? item?.price);
-    const isAuction = String(item?.type) === 'auction';
+
+    const count = group.items.length;
+    const expanded = state.sellView.marketExpanded.has(id);
+    const cheapest = group.best;
+    const price = cheapest?.price ?? null;
+    const bestType = cheapest ? (marketItemIsAuction(cheapest.item) ? 'enchère' : 'fixe') : '';
+
+    // Meilleure enchère : on affiche aussi son achat immédiat quand il existe.
+    const auctionBuyout = toNum(group.bestAuction?.item?.buyoutPrice);
 
     return `
-      <div class="kp-sell-row kp-is-clickable" data-act="sell-detail" data-id="${esc(id)}" title="Voir la fiche de ${esc(card?.name ?? 'cette carte')}">
-        <span class="kp-sell-owned">${owned ? `×${fmt(owned.qty)}` : '+'}</span>
-        <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
-        <div class="kp-sell-main">
-          <div class="kp-row-name">${esc(card?.name ?? `Carte #${id}`)}</div>
-          <div class="kp-row-meta">
-            <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
-            ${isAuction ? 'enchère' : 'prix fixe'}
-            ${item?.seller?.pseudo ? ` · ${esc(item.seller.pseudo)}` : ''}
-            ${owned ? '' : ' · pas dans ta collection'}
+      <div class="kp-mkt-group ${expanded ? 'is-open' : ''}">
+        <div class="kp-sell-row kp-is-clickable" data-act="sell-detail" data-id="${esc(id)}" title="Voir la fiche de ${esc(
+          card?.name ?? 'cette carte'
+        )}">
+          <span class="kp-sell-owned">${owned ? `×${fmt(owned.qty)}` : '+'}</span>
+          <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
+          <div class="kp-sell-main">
+            <div class="kp-row-name">
+              ${esc(card?.name ?? `Carte #${id}`)}
+              ${count > 1 ? `<span class="kp-mkt-count">${fmt(count)} ventes</span>` : ''}
+            </div>
+            <div class="kp-row-meta">
+              <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
+              ${
+                group.bestFixed && group.bestAuction
+                  ? `fixe ◆ ${fmt(group.bestFixed.price)} · enchère dès ◆ ${fmt(group.bestAuction.price)}${
+                      auctionBuyout != null ? ` (achat immédiat ◆ ${fmt(auctionBuyout)})` : ''
+                    }`
+                  : group.bestAuction
+                    ? `enchère dès ◆ ${fmt(group.bestAuction.price)}${
+                        auctionBuyout != null ? ` · achat immédiat ◆ ${fmt(auctionBuyout)}` : ''
+                      }`
+                    : group.bestFixed
+                      ? `prix fixe ◆ ${fmt(group.bestFixed.price)}`
+                      : 'aucun prix'
+              }
+              ${owned ? '' : ' · pas dans ta collection'}
+            </div>
+          </div>
+          <div class="kp-sell-trend">${deltaChip(change)}</div>
+          <div class="kp-sell-price">
+            <b>◆ ${fmt(price)}</b>
+            <small>${bestType ? `le moins cher · ${bestType}` : '—'}${median != null ? ` · méd. ◆ ${fmt(median)}` : ''}</small>
           </div>
         </div>
-        <div class="kp-sell-trend">${deltaChip(change)}</div>
-        <div class="kp-sell-price">
-          <b>◆ ${fmt(price)}</b>
-          <small>méd. ◆ ${fmt(median)}</small>
-        </div>
+        ${
+          count > 1
+            ? `<button class="kp-mkt-toggle" type="button" data-act="market-expand" data-id="${esc(id)}" ${
+                expanded ? 'aria-expanded="true"' : 'aria-expanded="false"'
+              }>
+                 <span class="kp-mkt-caret">${expanded ? '▾' : '▸'}</span>
+                 ${expanded ? 'Masquer' : 'Voir'} les ${fmt(count)} ventes
+               </button>
+               ${expanded ? `<div class="kp-mkt-sublist">${group.items.map(sellMarketListing).join('')}</div>` : ''}`
+            : ''
+        }
       </div>`;
   }
 
@@ -3165,6 +3314,7 @@
       const items = view.marketItems ?? [];
       // Index construit une seule fois : évite un scan complet de la collection par ligne.
       const ownedMap = new Map(sellRows().map((row) => [String(row.id), row]));
+      const groups = groupMarketItems(items, view.sort);
       const hasQuery = Boolean(view.query.trim()) || view.rarity !== 'all' || view.type !== 'all';
       return `
         ${sellModeSwitch()}
@@ -3180,12 +3330,12 @@
                 ? `<div class="kp-empty"><b>Aucun résultat</b>${
                     hasQuery ? 'Aucune annonce ne correspond à ces filtres.' : 'Lance une recherche pour interroger le marché.'
                   }</div>`
-                : `<div class="kp-hint">${fmt(items.length)} affichée(s) sur ${fmt(view.marketTotal)} annonce(s)${
+                : `<div class="kp-hint">${fmt(items.length)} annonce(s) sur ${fmt(view.marketTotal)} · ${fmt(
+                    groups.length
+                  )} carte(s) distincte(s) · prix le plus bas par carte${
                     view.marketMeta?.at ? ` · actualisé ${nowTime(view.marketMeta.at)}` : ''
                   }</div>
-                   <div class="kp-sell-list">${items
-                     .map((item) => sellMarketRow(item, ownedMap))
-                     .join('')}</div>
+                   <div class="kp-sell-list">${groups.map((group) => sellMarketRow(group, ownedMap)).join('')}</div>
                    ${
                      items.length < view.marketTotal
                        ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="sell-more" ${view.marketLoading ? 'disabled' : ''}>Afficher plus</button></div>`
@@ -6297,30 +6447,107 @@
       </div>`;
   }
 
-  /** Analyse exploitable pour la modale de vente (une seule carte). */
-  function sellModalAnalysis() {
-    const sell = state.sell;
-    if (!sell || sell.plan.length !== 1) return null;
-    const row = sell.plan[0];
-    const detail = state.sellView.detail;
-    if (detail && String(detail.card?.id) === String(row.id)) return detail;
+  const SELL_STRATEGIES = ['quick', 'balanced', 'max'];
 
-    const cached = state.prices[String(row.id)];
-    if (!cached) return null;
-    return analyzeCard({
-      prices: {
-        median7d: cached.m7,
-        median30d: cached.m30,
-        lastPrice: cached.last,
-        sales7d: cached.sales7d,
-        sales30d: cached.sales30d,
-        days: cached.days,
-        lastSales: cached.lastSales,
-        lastAt: cached.lastAt
-      },
-      card: { id: String(row.id), name: row.name, rarity: row.rarity, floor: row.floor },
-      mine: sellRowOf(row.id)
+  /**
+   * Recommandation d'une carte du plan : fiche ouverte en priorité, sinon cache
+   * des prix, sinon repli sur le prix estimé (aucune donnée de marché).
+   */
+  function rowRecommendation(row) {
+    const key = String(row.id);
+    const cached = state.prices[key];
+    const detail = state.sellView.detail;
+    let analysis = null;
+    if (detail?.recommend && String(detail.card?.id) === key) analysis = detail;
+    if (!analysis && cached) {
+      analysis = analyzeCard({
+        prices: {
+          median7d: cached.m7,
+          median30d: cached.m30,
+          lastPrice: cached.last,
+          sales7d: cached.sales7d,
+          sales30d: cached.sales30d,
+          days: cached.days,
+          lastSales: cached.lastSales,
+          lastAt: cached.lastAt
+        },
+        card: { id: key, name: row.name, rarity: row.rarity, floor: row.floor },
+        mine: sellRowOf(key),
+        listings: state.lowest[key] != null ? { items: [{ price: state.lowest[key], type: 'fixed' }] } : null,
+        book: state.buyOrders[key] ? { bids: [{ price: state.buyOrders[key].price }] } : null
+      });
+    }
+    if (analysis?.recommend) return { ...analysis.recommend, estimated: false };
+
+    // Pas de données de marché : les trois stratégies gardent le prix estimé.
+    const floor = Math.max(1, Math.round(row.floor ?? 1));
+    const price = Math.max(floor, Math.round(row.price ?? row.median ?? floor));
+    const stub = (id, label) => ({
+      id,
+      label,
+      price,
+      net: netOf(price),
+      estimated: true,
+      reason: 'aucune donnée de marché — prix estimé conservé'
     });
+    return {
+      quick: stub('quick', 'Vente rapide'),
+      balanced: stub('balanced', 'Équilibrée'),
+      max: stub('max', 'Prix maximal'),
+      estimated: true
+    };
+  }
+
+  /**
+   * Prix recommandés pour tout le plan : chaque carte garde ses propres prix,
+   * on additionne les trois stratégies sur l'ensemble de la sélection.
+   * Avant, ces boutons n'apparaissaient qu'avec une seule carte sélectionnée.
+   */
+  function planRecommendations(plan = state.sell?.plan ?? []) {
+    if (!plan.length) return null;
+    const rows = new Map();
+    const totals = { quick: 0, balanced: 0, max: 0 };
+    const nets = { quick: 0, balanced: 0, max: 0 };
+    let priced = 0;
+    for (const row of plan) {
+      const rec = rowRecommendation(row);
+      if (!rec) continue;
+      rows.set(String(row.id), rec);
+      if (!rec.estimated) priced += 1;
+      const qty = Math.max(1, Number(row.qty) || 1);
+      for (const key of SELL_STRATEGIES) {
+        totals[key] += rec[key].price * qty;
+        nets[key] += rec[key].net * qty;
+      }
+    }
+    if (!rows.size) return null;
+    return { rows, totals, nets, priced, total: plan.length };
+  }
+
+  /** Ligne d'explication sous les trois stratégies (carte seule ou lot). */
+  function sellStrategyHint(rec, plan) {
+    const isAuction = state.sell?.type === 'auction';
+    const entries = plan
+      .map((row) => ({ row, rec: rec.rows.get(String(row.id)) }))
+      .filter((entry) => entry.rec);
+    const priced = entries.filter((entry) => !entry.rec.estimated);
+    // Carte la plus chère servie en exemple (elle pèse le plus dans le total).
+    const pick = [...(priced.length ? priced : entries)].sort(
+      (a, b) => b.rec.balanced.price - a.rec.balanced.price
+    )[0];
+    const chunks = [];
+    if (plan.length > 1) chunks.push(`appliqué aux ${fmt(plan.length)} cartes`);
+    if (pick && !pick.rec.estimated) {
+      chunks.push(plan.length === 1 ? pick.rec.balanced.reason : `${pick.row.name} : ${pick.rec.balanced.reason}`);
+    }
+    if (!priced.length) chunks.push('aucune donnée de marché : les prix estimés sont conservés');
+    else if (rec.priced < rec.total) {
+      chunks.push(
+        `${fmt(rec.total - rec.priced)} carte(s) sans données gardent leur prix estimé`
+      );
+    }
+    if (plan.length > 1 && isAuction) chunks.push('la stratégie fixe la mise à prix de chaque enchère');
+    return chunks.join(' · ');
   }
 
   function renderModal() {
@@ -6350,12 +6577,15 @@
     const chakra = toNum(state.user?.chakra) ?? 0;
     const running = state.sell.running;
     const done = state.sell.done;
-    const buyoutPreview = isAuction
-      ? buyoutPriceFor(plan[0]?.price ?? 0, state.sell.buyoutPct)
+    const buyouts = isAuction
+      ? plan.map((row) => buyoutPriceFor(row.price, state.sell.buyoutPct)).filter((value) => value != null)
+      : [];
+    const buyoutPreview = buyouts.length
+      ? { min: Math.min(...buyouts), max: Math.max(...buyouts) }
       : null;
     const durations = getCfg().durations;
     const lastCopies = lastCopyRows(plan);
-    const modalAnalysis = sellModalAnalysis();
+    const planRec = planRecommendations(plan);
 
     ui.modal.hidden = false;
     ui.modalCard.innerHTML = `
@@ -6387,7 +6617,13 @@
                  <input type="number" min="0" max="80" step="1" value="${state.sell.auctionPct}" data-sell-auction-pct ${running ? 'disabled' : ''}>
                </div>
                <div class="kp-opt-row">
-                 <div>Achat immédiat<small>0 = aucun · ${buyoutPreview != null ? `soit ◆ ${fmt(buyoutPreview)}` : 'désactivé'}</small></div>
+                 <div>Achat immédiat<small>0 = aucun · ${
+                   buyoutPreview != null
+                     ? buyoutPreview.min === buyoutPreview.max
+                       ? `soit ◆ ${fmt(buyoutPreview.max)}`
+                       : `soit ◆ ${fmt(buyoutPreview.min)} – ◆ ${fmt(buyoutPreview.max)}`
+                     : 'désactivé'
+                 }</small></div>
                  <input type="number" min="0" max="300" step="5" value="${state.sell.buyoutPct}" data-sell-buyout-pct ${running ? 'disabled' : ''}>
                </div>`
             : ''
@@ -6407,21 +6643,21 @@
         )}${isAuction ? ' · le prix final dépend des enchérisseurs' : ''}</div>
 
         ${
-          modalAnalysis?.recommend
-            ? `<div class="kp-explain-sub">Prix recommandé</div>
+          planRec
+            ? `<div class="kp-explain-sub">Prix recommandé <span class="kp-explain-count">${
+                plan.length > 1 ? `${fmt(plan.length)} cartes · ` : ''
+              }${planRec.priced < planRec.total ? `${fmt(planRec.priced)}/${fmt(planRec.total)} valorisée(s)` : 'données marché'}</span></div>
                <div class="kp-strategy-row">
-                 ${['quick', 'balanced', 'max']
-                   .map((key) => {
-                     const option = modalAnalysis.recommend[key];
-                     const active = Number(plan[0]?.price) === option.price;
-                     return `<button class="kp-strategy ${active ? 'is-active' : ''}" type="button" data-act="sell-strategy" data-price="${option.price}" ${running ? 'disabled' : ''}>
-                       <b>${esc(option.label)}</b>
-                       <span>◆ ${fmt(option.price)} <small>net ◆ ${fmt(option.net)}</small></span>
+                 ${SELL_STRATEGIES.map((key) => {
+                   const option = planRec.rows.get(String(plan[0]?.id))?.[key];
+                   const active = state.sell.method === key;
+                   return `<button class="kp-strategy ${active ? 'is-active' : ''}" type="button" data-act="sell-strategy" data-strategy="${key}" ${running ? 'disabled' : ''}>
+                       <b>${esc(option?.label ?? key)}</b>
+                       <span>◆ ${fmt(planRec.totals[key])} <small>net ◆ ${fmt(planRec.nets[key])}</small></span>
                      </button>`;
-                   })
-                   .join('')}
+                 }).join('')}
                </div>
-               <div class="kp-hint">${esc(modalAnalysis.recommend.balanced.reason)}</div>`
+               <div class="kp-hint">${esc(sellStrategyHint(planRec, plan))}</div>`
             : ''
         }
 
@@ -6604,6 +6840,15 @@
         if (id) openCardDetail(id);
         break;
       }
+      case 'market-expand': {
+        const id = el.getAttribute('data-id');
+        if (!id) break;
+        const set = state.sellView.marketExpanded;
+        if (set.has(id)) set.delete(id);
+        else set.add(id);
+        render();
+        break;
+      }
       case 'sell-detail-close':
         closeCardDetail();
         break;
@@ -6631,12 +6876,18 @@
       }
       case 'sell-strategy': {
         if (!state.sell || state.sell.running) break;
-        const price = Number(el.getAttribute('data-price'));
-        const row = state.sell.plan[0];
-        if (row && Number.isFinite(price) && price > 0) {
-          row.price = Math.max(Math.round(row.floor ?? 1), Math.round(price));
-          render();
+        const key = el.getAttribute('data-strategy');
+        if (!SELL_STRATEGIES.includes(key)) break;
+        const rec = planRecommendations(state.sell.plan);
+        if (!rec) break;
+        // Chaque carte prend son propre prix : la stratégie s'applique à tout le lot.
+        for (const row of state.sell.plan) {
+          const option = rec.rows.get(String(row.id))?.[key];
+          if (!option) continue;
+          row.price = Math.max(Math.round(row.floor ?? 1), Math.round(option.price));
         }
+        state.sell.method = key;
+        render();
         break;
       }
       case 'select-all': {
@@ -7021,6 +7272,8 @@
       const row = state.sell.plan.find((r) => String(r.characterId) === String(id));
       if (row) {
         row.price = Math.max(1, Math.round(Number(priceInput.value) || 1));
+        // Prix saisi à la main : plus aucune stratégie n'est « active ».
+        if (state.sell.method) state.sell.method = null;
         renderModal();
       }
       return;
