@@ -3026,3 +3026,30 @@ img.kp-avatar {
   color: #fff;
   background: rgba(255, 77, 46, 0.16);
 }
+
+/* Onglet Stat : sélecteur de profondeur sous la mesure unique. */
+.kp-stat-depth {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 10px 0 6px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  background: var(--kp-bg-2);
+  color: var(--kp-muted);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.kp-stat-depth .kp-select {
+  width: 84px;
+}
+
+/* Onglet Stat : le chiffre unique est mis en avant. */
+.kp-stat-total {
+  font-size: 44px;
+  line-height: 1.1;
+}

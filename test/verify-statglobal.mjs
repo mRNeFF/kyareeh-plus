@@ -31,7 +31,9 @@ const api = new Function(`${prelude}
     statCatalogTotals,
     statOwnerIndex,
     statOwnerCount,
-    statRarityCodes
+    statRarityCodes,
+    statValueAccounts,
+    statCollectIds
   };
 `)();
 
@@ -61,7 +63,7 @@ check('rareté normalisée', api.statRarityOf(' m ') === 'M');
 
 const empty = api.statEmptyData();
 check('structure vide', empty.totals.players === null && Object.keys(empty.profiles).length === 0);
-check('profondeur par défaut', empty.depth === 50);
+check('profondeur par défaut', empty.depth === 100);
 
 const normalized = api.statNormalizeData({
   at: 123,
@@ -173,6 +175,39 @@ const profiles = [
 const both = api.statSumByRarity(profiles);
 check('cumul >= union quand tous les joueurs partagent les mêmes types', both.total === 6);
 check('union <= cumul', api.statUnionCollections([['1', '2', '3'], ['1', '2', '3']], rarityOf).total <= both.total);
+
+// --- 9. Valeur des collections ---------------------------------------
+const priceMap = new Map([
+  ['1', 10],
+  ['2', 25],
+  ['3', 5],
+  ['4', 100]
+]);
+const value = api.statValueAccounts(
+  {
+    a: { ids: ['1', '2', '4'] },
+    b: { ids: ['1', '3'] },
+    c: null
+  },
+  priceMap
+);
+check('valeur: total', value.total === 150, `obtenu ${value.total}`);
+check('valeur: par compte', value.byAccount.a === 135 && value.byAccount.b === 15);
+check('valeur: comptes valorisés', value.players === 2);
+check('valeur: cartes valorisées', value.priced === 5);
+check('valeur: collection inaccessible ignorée', value.byAccount.c === undefined);
+check('valeur: carte sans prix comptée', api.statValueAccounts({ a: { ids: ['1', '999'] } }, priceMap).unpriced === 1);
+check('valeur: objet simple accepté', api.statValueAccounts({ a: { ids: ['4'] } }, { 4: 100 }).total === 100);
+check('valeur: prix nul ignoré', api.statValueAccounts({ a: { ids: ['1'] } }, { 1: 0 }).unpriced === 1);
+check('valeur: vide', api.statValueAccounts({}, priceMap).total === 0);
+check('valeur: prix absents', api.statValueAccounts({ a: { ids: ['1'] } }, new Map()).total === 0);
+
+const unionIds = api.statCollectIds({
+  a: { ids: ['1', '2'] },
+  b: { ids: ['2', '3'] },
+  c: null
+});
+check('union des ids', unionIds.length === 3 && unionIds.includes('3'));
 
 console.log(`\nContrôles : ${checks} · échecs : ${failures}`);
 process.exit(failures ? 1 : 0);

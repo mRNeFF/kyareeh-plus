@@ -23,7 +23,7 @@
   const CHARS_KEY = 'kyaraplus.characters.v1';
   const PACK_AVG_KEY = 'kyareeh.packavg.v1';
   const PACK_POOLS_KEY = 'kyareeh.packpools.v1';
-  const STATS_KEY = 'kyareeh.statglobal.v1';
+  const STATS_KEY = 'kyareeh.statglobal.v2';
   // Une analyse globale est relue au bout de 12 h (ou à la demande).
   const STAT_CACHE_MS = 12 * 3600 * 1000;
   const STAT_DEFAULT_DEPTH = 50;
@@ -271,8 +271,7 @@
       progress: '',
       done: 0,
       total: 0,
-      runId: 0,
-      rarity: 'all'
+      runId: 0
     }
   };
 
@@ -2864,12 +2863,14 @@
     return {
       version: 1,
       at: 0,
-      depth: 50,
+      depth: 100,
       totals: { players: null, mythicOwners: null, catalogSize: null, listings: null, listingsAt: 0 },
       profiles: {},
       pools: {},
       catalog: { total: 0, byRarity: {} },
       collections: {},
+      owners: {},
+      values: { total: 0, byAccount: {}, priced: 0, unpriced: 0, players: 0, at: 0, priceCount: 0 },
       failures: []
     };
   }
@@ -2884,7 +2885,7 @@
     const out = statEmptyData();
     out.at = Number(source.at) > 0 ? Number(source.at) : 0;
     const depth = num(source.depth);
-    out.depth = depth && depth >= 1 ? Math.min(100, depth) : 50;
+    out.depth = depth && depth >= 1 ? Math.min(100, depth) : 100;
 
     const totals = source.totals && typeof source.totals === 'object' ? source.totals : {};
     out.totals = {
@@ -2942,6 +2943,30 @@
       out.collections[String(id)] = {
         at: Number(entry.at) > 0 ? Number(entry.at) : 0,
         ids: Object.keys(cards)
+      };
+    }
+
+    const storedOwners = source.owners && typeof source.owners === 'object' ? source.owners : {};
+    for (const [cardId, count] of Object.entries(storedOwners)) {
+      const n = num(count);
+      if (n) out.owners[String(cardId)] = n;
+    }
+
+    const storedValues = source.values && typeof source.values === 'object' ? source.values : null;
+    if (storedValues) {
+      const byAccount = {};
+      for (const [accountId, value] of Object.entries(storedValues.byAccount ?? {})) {
+        const n = num(value);
+        if (n != null) byAccount[String(accountId)] = n;
+      }
+      out.values = {
+        total: num(storedValues.total) ?? 0,
+        byAccount,
+        priced: num(storedValues.priced) ?? 0,
+        unpriced: num(storedValues.unpriced) ?? 0,
+        players: num(storedValues.players) ?? 0,
+        at: Number(storedValues.at) > 0 ? Number(storedValues.at) : 0,
+        priceCount: num(storedValues.priceCount) ?? 0
       };
     }
 
@@ -3093,8 +3118,65 @@
     return index;
   }
 
+  /** Nombre de propriétaires par carte (version compacte, persistable). */
+  function statOwnerCounts(collections) {
+    const index = statOwnerIndex(collections);
+    const counts = {};
+    for (const [cardId, owners] of Object.entries(index)) counts[cardId] = owners.length;
+    return counts;
+  }
+
   function statOwnerCount(index, cardId) {
     return index?.[String(cardId)]?.length ?? 0;
+  }
+
+  /**
+   * Valeur des collections en chakra : somme des prix officiels des cartes
+   * possédées. `prices` peut être une Map ou un objet simple.
+   * Une collection inaccessible est ignorée (jamais estimée).
+   */
+  function statValueAccounts(collections, prices) {
+    const priceOf = (id) => {
+      if (prices instanceof Map) return Number(prices.get(String(id)));
+      return Number(prices?.[String(id)]);
+    };
+    const byAccount = {};
+    let total = 0;
+    let priced = 0;
+    let unpriced = 0;
+    let players = 0;
+
+    for (const [accountId, entry] of Object.entries(collections ?? {})) {
+      const ids = Array.isArray(entry?.ids) ? entry.ids : null;
+      if (!ids) continue;
+      players += 1;
+      let value = 0;
+      for (const cardId of ids) {
+        const price = priceOf(cardId);
+        if (Number.isFinite(price) && price > 0) {
+          value += price;
+          priced += 1;
+        } else {
+          unpriced += 1;
+        }
+      }
+      byAccount[accountId] = value;
+      total += value;
+    }
+
+    return { total, byAccount, priced, unpriced, players };
+  }
+
+  /** Union des cartes de toutes les collections analysées (≤ taille du catalogue). */
+  function statCollectIds(collections) {
+    const ids = new Set();
+    for (const entry of Object.values(collections ?? {})) {
+      for (const id of entry?.ids ?? []) {
+        const key = String(id ?? '');
+        if (key) ids.add(key);
+      }
+    }
+    return [...ids];
   }
 
   /** Liste des raretés à afficher : ordre officiel + toute rareté détectée. */
@@ -3118,7 +3200,7 @@
   /* ------------------------------------------------------------------ */
 
   let statPersistTimer = null;
-  let statDerivedCache = { sig: '', profiles: [], owners: {}, union: null, sum: null, poolSize: 0 };
+  let statDerivedCache = { sig: '', profiles: [], owners: {}, poolSize: 0 };
 
   function statGlobalData() {
     if (!state.stats.data || typeof state.stats.data !== 'object') state.stats.data = statEmptyData();
@@ -3147,7 +3229,15 @@
   async function analyzeGlobalStats(force = false) {
     if (state.stats.syncing) return;
     const data = statGlobalData();
-    if (!force && data.at && Date.now() - data.at < STAT_CACHE_MS) {
+    // Une analyse fraîche ne sert que si elle contient la mesure de valeur :
+    // les anciennes sauvegardes (autres statistiques) doivent être recalculées.
+    if (
+      !force &&
+      data.at &&
+      data.values?.at &&
+      Object.keys(data.owners ?? {}).length &&
+      Date.now() - data.at < STAT_CACHE_MS
+    ) {
       if (state.tab === 'stat') render();
       return;
     }
@@ -3192,25 +3282,13 @@
 
       if (!alive()) return;
 
-      // 2) Taille réelle du marché (annonces actives).
-      try {
-        const market = await api('/api/market/listings?pageSize=1&sort=price_desc', { timeout: 20000 });
-        const total = toNum(market?.total);
-        if (total != null) {
-          data.totals.listings = total;
-          data.totals.listingsAt = Date.now();
-        }
-      } catch {
-        /* marché indisponible : la tuile restera vide */
-      }
-
-      // 3) Pool analysé (dédoublonné).
+      // 2) Pool analysé (dédoublonné).
       const ids = statBuildPool(ladders, data.depth || STAT_DEFAULT_DEPTH);
       data.pools = Object.fromEntries(
         categories.map((name) => [name, (ladders[name] ?? []).slice(0, data.depth || STAT_DEFAULT_DEPTH).map((row) => String(row.id))])
       );
 
-      // 4) Profils publics : owned, mythics, heritage, boostersOpened, byRarity…
+      // 3) Profils publics : owned, mythics, heritage, boostersOpened, byRarity…
       state.stats.total = ids.length;
       state.stats.done = 0;
       const profiles = {};
@@ -3257,8 +3335,8 @@
 
       if (!alive()) return;
 
-      // 5) Collections (ids uniques) : uniquement pour le compteur « possédés
-      //    par au moins un joueur analysé ». Échec = résultat partiel signalé.
+      // 4) Collections (ids uniques) : base du calcul de valeur et des
+      //    propriétaires par carte. Échec = compte exclu, jamais estimé.
       const collections = {};
       state.stats.total = ids.length;
       state.stats.done = 0;
@@ -3273,15 +3351,44 @@
           const owned = await fetchOwnedIds(id);
           collections[id] = { at: Date.now(), ids: Array.isArray(owned) ? owned : [] };
         } catch {
-          collections[id] = { at: Date.now(), ids: [], incomplete: true };
+          // Collection inaccessible : on ne l'invente pas, elle sort du calcul.
+          collections[id] = null;
         }
         await sleep(STAT_REQUEST_GAP);
       }
 
       if (!alive()) return;
 
+      // 5) Valeur en chakra : prix officiels du jeu, demandés une seule fois
+      //    pour l'union des cartes (au plus la taille du catalogue).
+      const unionIds = statCollectIds(collections);
+      let prices = new Map();
+      if (unionIds.length) {
+        state.stats.total = unionIds.length;
+        state.stats.done = 0;
+        statProgress(`Prix officiels… 0/${unionIds.length}`);
+        if (state.tab === 'stat') renderStatsProgress();
+        prices = await fetchFairPrices(unionIds, (done, total) => {
+          state.stats.done = done;
+          state.stats.total = total;
+          statProgress(`Prix officiels… ${done}/${total}`);
+          if (state.tab === 'stat') renderStatsProgress();
+        });
+      }
+
+      if (!alive()) return;
+
+      data.values = {
+        ...statValueAccounts(collections, prices),
+        at: Date.now(),
+        priceCount: prices.size
+      };
+
       data.profiles = profiles;
-      data.collections = collections;
+      // Les collections complètes servent au calcul mais ne sont pas conservées :
+      // seuls les compteurs par carte sont persistés (quota de stockage).
+      data.owners = statOwnerCounts(collections);
+      data.collections = {};
       data.failures = failures;
       data.at = Date.now();
       state.stats.ready = true;
@@ -3320,28 +3427,23 @@
       state.stats.loading = false;
       if (state.tab === 'stat') render();
     }
-    if (!state.stats.data.at) analyzeGlobalStats(false);
+    if (!state.stats.data.values?.at || !Object.keys(state.stats.data.owners ?? {}).length) analyzeGlobalStats(false);
   }
 
   /**
-   * Données dérivées (index propriétaires, union, cumul), recalculées
-   * uniquement quand les profils ou collections changent.
+   * Données dérivées (profils, propriétaires), recalculées uniquement quand
+   * l'analyse change.
    */
   function statsDerived() {
     const data = statGlobalData();
     const profiles = Object.values(data.profiles ?? {});
-    const sig = `${Object.keys(data.profiles ?? {}).length}:${Object.keys(data.collections ?? {}).length}:${state.characters.size}`;
+    const sig = `${Object.keys(data.profiles ?? {}).length}:${Object.keys(data.owners ?? {}).length}`;
     if (statDerivedCache.sig === sig) return statDerivedCache;
 
-    const rarityOf = (id) => state.characters.get(String(id))?.rarity ?? '';
-    const collections = Object.entries(data.collections ?? {}).map(([, entry]) => (entry?.ids?.length ? entry.ids : null));
-    const union = statUnionCollections(collections, rarityOf);
     statDerivedCache = {
       sig,
       profiles,
-      owners: statOwnerIndex(data.collections),
-      union,
-      sum: statSumByRarity(profiles),
+      owners: data.owners ?? {},
       poolSize: profiles.length
     };
     return statDerivedCache;
@@ -3352,7 +3454,7 @@
     if (!state.stats.ready) return null;
     const derived = statsDerived();
     if (!derived.poolSize) return null;
-    return { count: statOwnerCount(derived.owners, cardId), total: derived.poolSize };
+    return { count: Number(derived.owners?.[String(cardId)]) || 0, total: derived.poolSize };
   }
 
   /**
@@ -3372,7 +3474,6 @@
 
   /* ------------------------------------------------------------------ */
   /* Statistiques globales : rendu                                       */
-  /* ------------------------------------------------------------------ */
 
   function statDate(ts) {
     if (!(Number(ts) > 0)) return 'jamais';
@@ -3383,210 +3484,71 @@
     }
   }
 
-  function statShareBar(label, value, max, color) {
-    return `
-      <div class="kp-bar-row">
-        <span title="${esc(label)}">${esc(label)}</span>
-        <div class="kp-bar"><i style="width:${Math.max(2, Math.round((value / Math.max(1, max)) * 100))}%;--kp-bar-color:${color}"></i></div>
-        <b>${fmt(value)}</b>
+  const STAT_DEPTHS = [25, 50, 100];
+
+  /**
+   * L'onglet ne contient qu'une chose : la valeur cumulée des collections,
+   * en chakra, sur les comptes analysés. Le site ne publie aucun total global :
+   * le périmètre est donc toujours affiché juste en dessous du chiffre.
+   */
+  function statBodyHTML() {
+    const data = statGlobalData();
+    const values = data.values ?? null;
+    const players = values?.players ?? 0;
+    const total = values?.total ?? 0;
+    const priced = values?.priced ?? 0;
+    const unpriced = values?.unpriced ?? 0;
+    const ready = Boolean(values && values.at);
+
+    if (!ready && state.stats.syncing) {
+      return `<div class="kp-empty"><span class="kp-spinner"></span> Analyse des collections…</div>`;
+    }
+    if (!ready) {
+      return `<div class="kp-empty"><b>Pas encore de mesure</b>
+        Lance l'analyse pour additionner la valeur des collections des comptes les plus fournis.
       </div>`;
-  }
+    }
 
-  function statRankList(rows, info, emptyText) {
-    if (!rows.length) return `<div class="kp-empty"><b>Aucune donnée</b>${emptyText}</div>`;
-    const max = Math.max(1, ...rows.map((row) => row.value));
+    const pct = state.stats.total ? Math.round((state.stats.done / state.stats.total) * 100) : 0;
+
     return `
-      <div class="kp-stat-ranks">${rows
-        .map(
-          (row) => `
-        <div class="kp-stat-rank">
-          <b class="kp-rank">#${row.rank}</b>
-          <span class="kp-stat-rank-name">
-            ${row.avatar ? `<img src="${esc(row.avatar)}" alt="" loading="lazy">` : ''}${esc(row.pseudo)}
-          </span>
-          <div class="kp-bar"><i style="width:${Math.max(2, Math.round((row.value / max) * 100))}%;--kp-bar-color:${info.color}"></i></div>
-          <b>${fmt(row.value)}</b>
-        </div>`
-        )
-        .join('')}</div>`;
-  }
-
-  /** Classements publics disponibles (projection pour l'affichage). */
-  function statTopFromPool(profiles, key, limit = 20) {
-    const rows = (profiles ?? []).map((profile) => ({
-      id: profile.id,
-      pseudo: profile.pseudo,
-      avatar: profile.avatar,
-      value: Number(profile?.[key])
-    }));
-    return statRank(rows).slice(0, limit);
-  }
-
-  function statOverviewSection(data) {
-    const totals = data.totals ?? {};
-    return `
-      <div class="kp-grid">
-        <div class="kp-card-stat"><span>Joueurs classés</span><b>${totals.players != null ? fmt(totals.players) : '—'}</b><small>classement collection (site)</small></div>
-        <div class="kp-card-stat"><span>Avec ≥ 1 mythique</span><b>${totals.mythicOwners != null ? fmt(totals.mythicOwners) : '—'}</b><small>classement mythiques (site)</small></div>
-        <div class="kp-card-stat"><span>Types au catalogue</span><b>${fmt(totals.catalogSize ?? data.catalog?.total ?? 0)}</b><small>référentiel du site</small></div>
-        <div class="kp-card-stat"><span>Annonces du marché</span><b>${totals.listings != null ? fmt(totals.listings) : '—'}</b><small>${
-          totals.listingsAt ? `relevé le ${statDate(totals.listingsAt)}` : 'indisponible'
-        }</small></div>
-      </div>`;
-  }
-
-  function statMythicSection(derived) {
-    const rows = statTopFromPool(derived.profiles, 'mythics', 20);
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Plus de cartes Mythiques <span>profils publics</span></div>
-        ${statRankList(rows, rarityInfo('M'), 'Aucun profil public avec une carte Mythique.')}
-        <div class="kp-hint">Compteur <em>mythics</em> publié par le site sur chaque profil public (exemplaires possédés), lu sur les ${fmt(
-          derived.poolSize
-        )} joueurs analysés.</div>
-      </div>`;
-  }
-
-  function statHeritageSection(derived) {
-    const rows = statTopFromPool(derived.profiles, 'heritage', 20);
-    const any = rows.some((row) => row.value > 0);
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Plus de cartes Héritage <span>${fmt(derived.poolSize)} joueurs analysés</span></div>
+      <div class="kp-hero" style="margin-top:10px">
+        <div class="kp-hero-label">Valeur cumulée des collections</div>
+        <div class="kp-hero-value kp-stat-total">◆ ${fmt(total)}</div>
+        <div class="kp-hero-sub">
+          ${fmt(players)} compte(s) analysé(s) · ${fmt(priced)} carte(s) valorisée(s)${
+            unpriced ? ` · ${fmt(unpriced)} sans prix` : ''
+          }
+        </div>
         ${
-          any
-            ? statRankList(rows, rarityInfo('H'), '')
-            : `<div class="kp-empty"><b>Aucune carte Héritage détectée</b>Le champ <code>heritage</code> est à 0 sur tous les profils analysés. Le site ne propose pas de classement par Héritage : ce résultat porte donc uniquement sur les ${fmt(
-                derived.poolSize
-              )} joueurs analysés.</div>`
+          state.stats.syncing
+            ? `<div class="kp-progress">
+                 <div class="kp-progress-bar"><i style="width:${pct}%"></i></div>
+                 <div class="kp-progress-row"><span>${esc(state.stats.progress || 'Analyse…')}</span><span>${fmt(
+                   state.stats.done
+                 )}/${fmt(state.stats.total)}</span></div>
+               </div>`
+            : `<div class="kp-progress"><div class="kp-progress-row"><span>Mesure du ${statDate(
+                values.at
+              )}</span><span class="kp-link" data-act="stat-refresh">Recalculer</span></div></div>`
         }
-        <div class="kp-hint">Le site ne trie pas par Héritage : ce classement est reconstruit à partir du champ public <code>heritage</code> des joueurs analysés, pas de la totalité des ${fmt(
-          statGlobalData().totals?.players ?? 0
-        )} joueurs classés.</div>
-      </div>`;
-  }
+      </div>
 
-  function statBoostersSection(derived) {
-    const rows = statTopFromPool(derived.profiles, 'boostersOpened', 20);
-    const known = derived.profiles.filter((profile) => profile.boostersOpened != null);
-    const sum = known.reduce((total, profile) => total + (Number(profile.boostersOpened) || 0), 0);
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Boosters ouverts <span>champ public par joueur</span></div>
-        <div class="kp-grid">
-          <div class="kp-card-stat"><span>Cumul analysé</span><b>${fmt(sum)}</b><small>${fmt(known.length)} joueur(s) avec la donnée</small></div>
-          <div class="kp-card-stat"><span>Moyenne</span><b>${known.length ? fmt(Math.round(sum / known.length)) : '—'}</b><small>boosters par joueur</small></div>
-        </div>
-        <div style="margin-top:8px">${statRankList(rows, rarityInfo('E'), 'Aucun profil public avec un compteur d’ouvertures.')}</div>
-        <div class="kp-hint">Le site publie un <b>total par joueur</b> (<code>boostersOpened</code>), jamais un total global ni une répartition par type de booster. « Booster le plus ouvert » n’est donc pas calculable : le cumul affiché porte uniquement sur les ${fmt(
-          known.length
-        )} joueurs analysés.</div>
-      </div>`;
-  }
+      <div class="kp-stat-depth">
+        <span>Comptes analysés</span>
+        <select class="kp-select" data-stat-depth ${state.stats.syncing ? 'disabled' : ''}>
+          ${STAT_DEPTHS.map(
+            (depth) => `<option value="${depth}" ${Number(data.depth) === depth ? 'selected' : ''}>${depth}</option>`
+          ).join('')}
+        </select>
+      </div>
 
-  function statPointsSection(derived) {
-    const rows = statTopFromPool(derived.profiles, 'points', 20);
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Plus de points <span>classement public</span></div>
-        ${statRankList(rows, { color: '#facc15' }, 'Aucun point public disponible.')}
-        <div class="kp-hint">Le <b>chakra</b> est une donnée privée : le site ne le publie ni dans les profils publics ni dans ses classements. Les points, eux, sont publics et servent de repère d’activité.</div>
-      </div>`;
-  }
-
-  function statCardsSection(derived) {
-    const data = statGlobalData();
-    const catalog = data.catalog ?? { total: 0, byRarity: {} };
-    const union = derived.union ?? { total: 0, byRarity: {}, missing: 0 };
-    const sum = derived.sum ?? { total: 0, byRarity: {}, players: 0 };
-    const codes = statRarityCodes(catalog.byRarity, union.byRarity, sum.byRarity);
-    const rarity = state.stats.rarity;
-    const pick = (source) => (rarity === 'all' ? Number(source?.total) || 0 : Number(source?.byRarity?.[rarity]) || 0);
-    const maxCatalog = Math.max(1, ...codes.map((code) => Number(catalog.byRarity?.[code]) || 0));
-
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Types de cartes <span>${fmt(derived.poolSize)} joueurs analysés</span></div>
-        <div class="kp-chips is-wrap">
-          <button class="kp-chip is-btn ${rarity === 'all' ? 'is-active' : ''}" type="button" data-act="stat-rarity" data-rarity="all">Toutes</button>
-          ${codes
-            .map(
-              (code) =>
-                `<button class="kp-chip is-btn ${rarity === code ? 'is-active' : ''}" type="button" data-act="stat-rarity" data-rarity="${esc(
-                  code
-                )}" style="--kp-chip-color:${rarityInfo(code).color}">${esc(rarityInfo(code).label)}</button>`
-            )
-            .join('')}
-        </div>
-
-        <div class="kp-grid" style="margin-top:8px">
-          <div class="kp-card-stat"><span>Au catalogue</span><b>${fmt(pick(catalog))}</b><small>sur ${fmt(catalog.total)} types chargés</small></div>
-          <div class="kp-card-stat"><span>Possédés par ≥ 1 joueur</span><b>${union.missing ? '≥ ' : ''}${fmt(pick(union))}</b><small>${fmt(
-            union.available
-          )} collection(s) lue(s)</small></div>
-          <div class="kp-card-stat"><span>Possédés cumulés</span><b>${fmt(pick(sum))}</b><small>${fmt(sum.players)} joueur(s)</small></div>
-        </div>
-
-        <div class="kp-hint">
-          <b>Au catalogue</b> : tous les types du référentiel, qu’ils soient possédés ou non.
-          <b>Possédés par ≥ 1 joueur</b> : union des collections analysées, chaque type compté une seule fois${
-            union.missing ? ` (${fmt(union.missing)} collection(s) inaccessible(s), donc minimum)` : ''
-          }.
-          <b>Possédés cumulés</b> : somme par joueur, un même type possédé par 5 joueurs compte 5 fois.
-        </div>
-
-        <div class="kp-bars" style="margin-top:8px">
-          ${codes
-            .map((code) => ({
-              code,
-              catalogue: Number(catalog.byRarity?.[code]) || 0,
-              union: Number(union.byRarity?.[code]) || 0,
-              cumul: Number(sum.byRarity?.[code]) || 0
-            }))
-            .filter((row) => row.catalogue || row.union || row.cumul)
-            .sort((a, b) => b.catalogue - a.catalogue)
-            .map((row) =>
-              statShareBar(
-                `${rarityInfo(row.code).label} · possédés ${fmt(row.union)} · cumul ${fmt(row.cumul)}`,
-                row.catalogue,
-                maxCatalog,
-                rarityInfo(row.code).color
-              )
-            )
-            .join('')}
-        </div>
-        <div class="kp-hint">Les barres représentent les types <b>au catalogue</b> par rareté ; le détail à droite donne l’union et le cumul des joueurs analysés.</div>
-      </div>`;
-  }
-
-  function statQualitySection(data, derived) {
-    const failures = data.failures ?? [];
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Qualité des données</div>
-        <div class="kp-stat-facts">
-          <span><em>Analyse</em> ${data.at ? `du ${statDate(data.at)} · ${fmt(derived.poolSize)} profils lus` : 'pas encore lancée'}</span>
-          <span><em>Source</em> classements et profils publics de kyara.games</span>
-          <span><em>Limite du site</em> 100 lignes maximum par classement, 4 tris réels (collection, mythiques, séries, succès)</span>
-          <span><em>Chakra</em> privé : absent des profils publics, donc absent de cet onglet</span>
-          ${failures.length ? `<span class="is-bad"><em>Échecs</em> ${fmt(failures.length)} profil(s) : ${esc(failures.slice(0, 4).map((row) => row.pseudo).join(', '))}${failures.length > 4 ? '…' : ''}</span>` : ''}
-        </div>
-        <div class="kp-hint">Périmètre : les ${fmt(derived.poolSize)} joueurs analysés, choisis en tête des classements publics. Les chiffres ne représentent jamais la totalité des ${fmt(
-          data.totals?.players ?? 0
-        )} joueurs du site, sauf mention explicite.</div>
-      </div>`;
-  }
-
-  function statBodyHTML(derived) {
-    const data = statGlobalData();
-    return `
-      ${statOverviewSection(data)}
-      ${statMythicSection(derived)}
-      ${statHeritageSection(derived)}
-      ${statBoostersSection(derived)}
-      ${statPointsSection(derived)}
-      ${statCardsSection(derived)}
-      ${statQualitySection(data, derived)}
+      <div class="kp-hint">
+        Valeur calculée avec les prix officiels du jeu, carte par carte, sur les <b>${fmt(
+          players
+        )}</b> comptes les plus fournis des classements publics.
+        Le site ne publie pas la valeur totale de tous ses comptes : ce chiffre est un cumul sur ce périmètre, pas la totalité du site.
+      </div>
     `;
   }
 
@@ -3597,15 +3559,12 @@
     if (!state.stats.ready) loadStats();
 
     const data = statGlobalData();
-    const derived = statsDerived();
 
     return `
       <div class="kp-stat-head">
         <div>
           <b>Statistiques globales</b>
-          <small>Classements publics de Kyara · ${data.at ? `analyse du ${statDate(data.at)}` : 'aucune analyse'} · ${fmt(
-            derived.poolSize
-          )} joueurs analysés</small>
+          <small>${data.at ? `analyse du ${statDate(data.at)}` : 'aucune analyse'}</small>
         </div>
         <button class="kp-btn" type="button" data-act="stat-refresh" ${state.stats.syncing ? 'disabled' : ''}>${
           state.stats.syncing ? 'Analyse…' : 'Actualiser'
@@ -3613,7 +3572,7 @@
       </div>
       <div class="kp-hint" data-stat-progress>${esc(state.stats.progress ?? '')}</div>
       ${state.stats.error ? `<div class="kp-alert is-bad">${esc(state.stats.error)}</div>` : ''}
-      <div data-stat-body>${statBodyHTML(derived)}</div>
+      <div data-stat-body>${statBodyHTML()}</div>
     `;
   }
 
@@ -7860,10 +7819,6 @@
       case 'stat-refresh':
         analyzeGlobalStats(true);
         break;
-      case 'stat-rarity':
-        state.stats.rarity = el.getAttribute('data-rarity') || 'all';
-        render();
-        break;
       case 'profile-open':
         state.profile.query = el.getAttribute('data-pseudo') || state.profile.query;
         loadProfile(el.getAttribute('data-id'));
@@ -8056,6 +8011,20 @@
       persistSettings();
       resetPlanPrices();
       render();
+      return;
+    }
+
+    const statDepth = target.closest('[data-stat-depth]');
+    if (statDepth) {
+      const depth = Number(statDepth.value);
+      if (Number.isFinite(depth) && depth > 0) {
+        const data = statGlobalData();
+        data.depth = Math.min(100, Math.round(depth));
+        // Profondeur différente : l'ancienne mesure ne correspond plus.
+        data.values = { total: 0, byAccount: {}, priced: 0, unpriced: 0, players: 0, at: 0, priceCount: 0 };
+        data.at = 0;
+        analyzeGlobalStats(true);
+      }
       return;
     }
 
