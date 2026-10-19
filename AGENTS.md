@@ -9,7 +9,7 @@ Extension **Firefox (Manifest V3)** nommée **Kyareeh+** (`kyara-plus@axel.dev`)
 panneau de contrôle à [kyara.games](https://kyara.games) : tableau de bord du compte, valorisation
 en chakra, vente assistée, marché, chasses de cartes, auto-open de boosters et statistiques.
 
-- Version actuelle : **0.15.0** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **1.0.0** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `150960f`
@@ -41,8 +41,8 @@ l'extension depuis la console ou un navigateur automatisé.
 
 | Fichier | Rôle |
 |---|---|
-| `content/ui.js` (~8 600 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
-| `content/ui.css` (~3 100 lignes) | Styles injectés dans un Shadow DOM (préfixe `kp-`). |
+| `content/ui.js` (~8 800 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
+| `content/ui.css` (~3 300 lignes) | Styles injectés dans un Shadow DOM (préfixe `kp-`). |
 | `background/background.js` | Service worker minimal (messages popup ↔ onglet). |
 | `popup/` | Popup de la barre d'outils (recharger l'extension). |
 | `test/harness.html` | Faux site + fausse API (comptes, marché, packs, amis, classements). |
@@ -126,11 +126,11 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | **Compte** | Valeur du compte, ressources, top cartes, valeur par rareté, séries complètes, recherche d'un autre joueur (valorisation exacte). |
 | **Vente** | Toutes les cartes, filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h avec compte à rebours, sélection plafonnée aux places d'annonce (10), prix fixe/enchère, 3 stratégies applicables à tout le lot, pastille « N poss. ». |
 | **Marché** | Scan des annonces sous la médiane (tri, pages, seuil de remise), annonces actives, marché global groupé par carte avec dépliant des ventes. |
-| **Cartes** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
+| **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
-| **Stat** | Classement de comptes suivis (recherche manuelle + import auto des amis) sur 10 métriques triables, rangs ex æquo, détail par compte. |
-| **Réglages** | Cache des prix, délais, décote, type de vente, sound, anti-AFK, mise à jour GitHub. |
-| **Debug** | Requêtes récentes, clés du bootstrap, diagnostic copiable. |
+| **Stat** | Classement de comptes suivis (recherche manuelle + import auto des amis) sur 10 métriques. Menu déroulant du critère, tableau réduit à ce critère, camembert à droite avec tous les comptes et 50 couleurs max, rangs ex æquo, rang site sous le pseudo, détail par compte. |
+| **Réglages** | Cache des prix, délais, décote, type de vente, sound, anti-AFK. Plus de boutons de mise à jour. |
+| **Debug** | Version du code, version chargée par Firefox, rechargement de l'extension, requêtes récentes, clés du bootstrap, diagnostic copiable. |
 
 ## 8. Limites connues / dette
 
@@ -142,7 +142,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
   la valeur et les séries resteront vides (« — »), par choix assumé.
 - Le harness simule l'API : une forme de réponse réelle inattendue (ex. `/api/me/friends`)
   ne se verrait qu'en production.
-- `verify-odds.mjs` a **1 écart préexistant** (`season-2026-fall R`), antérieur à la 0.15.0.
+- `verify-odds.mjs` a **1 écart préexistant** (`season-2026-fall R`), antérieur à la 1.0.0.
 
 ## 9. Pistes proposées, non développées
 

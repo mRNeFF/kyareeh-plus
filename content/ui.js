@@ -105,7 +105,8 @@
   const plural = (n, word, suffix = '') => `${fmt(n)} ${word}${Number(n) > 1 ? 's' : ''}${suffix}`;
   const esc = (s) =>
     String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));  const toNum = (v) => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const toNum = (v) => {
     // Attention : Number(null) vaut 0. On veut null pour « absent ».
     if (v == null || v === '') return null;
     const n = typeof v === 'string' ? Number.parseFloat(v.replace(',', '.')) : Number(v);
@@ -1873,14 +1874,24 @@
     // Concurrence : annonces fixes des autres vendeurs + meilleur ordre d'achat.
     const items = Array.isArray(listings?.items) ? listings.items : Array.isArray(listings) ? listings : [];
     const rivals = items.filter((item) => !item.isMine);
+
+    // Prix fixes : le plus bas sert de concurrence, le plus haut de plafond
+    // réaliste pour la stratégie « Prix maximal ».
     const rivalFixed = rivals
       .filter((item) => String(item.type ?? 'fixed') === 'fixed')
       .map((item) => toNum(item.price))
       .filter((value) => value != null && value > 0)
       .sort((a, b) => a - b);
-    const rivalAuctions = rivals
-      .filter((item) => String(item.type) === 'auction')
+
+    // Enchères : `buyoutPrice` est l'achat immédiat ; la mise courante sert de
+    // prix d'entrée quand aucun achat immédiat n'est proposé.
+    const auctionItems = rivals.filter((item) => String(item.type) === 'auction');
+    const rivalAuctions = auctionItems
       .map((item) => toNum(item.buyoutPrice) ?? toNum(item.minNextBid) ?? toNum(item.price))
+      .filter((value) => value != null && value > 0)
+      .sort((a, b) => a - b);
+    const auctionBuyouts = auctionItems
+      .map((item) => toNum(item.buyoutPrice))
       .filter((value) => value != null && value > 0)
       .sort((a, b) => a - b);
 
@@ -1891,7 +1902,10 @@
       .filter((value) => value != null && value > 0)
       .sort((a, b) => b - a);
 
-    const lowest = rivalFixed[0] ?? rivalAuctions[0] ?? null;
+    const fixedLow = rivalFixed[0] ?? null;
+    const fixedHigh = rivalFixed.length ? rivalFixed[rivalFixed.length - 1] : null;
+    const auctionBuyout = auctionBuyouts[0] ?? null;
+    const lowest = fixedLow ?? rivalAuctions[0] ?? null;
     const bestBid = bids[0] ?? null;
     const myListing = items.find((item) => item.isMine) ?? null;
 
@@ -1926,6 +1940,7 @@
       lowest,
       bestBid,
       observedHigh,
+      fixedHigh,
       changePct,
       volatility,
       volume7,
@@ -1952,6 +1967,9 @@
       volume30,
       avgPerDay,
       lowest,
+      fixedLow,
+      fixedHigh,
+      auctionBuyout,
       rivalFixed,
       rivalAuctions,
       bestBid,
@@ -1978,6 +1996,7 @@
     lowest,
     bestBid,
     observedHigh,
+    fixedHigh,
     changePct,
     volatility,
     volume7,
@@ -2004,11 +2023,17 @@
     if (bestBid != null && bestBid > min) quickRaw = Math.max(quickRaw, Math.min(bestBid, base));
     const quick = Math.min(balanced, safe(quickRaw));
 
-    // 3) Prix maximal : haut des ventes récentes, sinon +20 % de médiane.
+    // 3) Prix maximal : plafond des annonces fixes quand il existe, sinon haut
+    //    des ventes récentes. C'est le prix le plus haut réellement demandé,
+    //    pas une majoration arbitraire de la médiane.
     //    Toujours ≥ équilibrée, sinon la stratégie n'aurait pas de sens.
-    let maxRaw = Math.max(balanced, base * (1.2 + Math.max(0, adjust)));
-    if (observedHigh != null && observedHigh > balanced) maxRaw = Math.min(maxRaw, observedHigh);
-    maxRaw = Math.min(maxRaw, Math.max(balanced, base * 1.6));
+    const fixedCeiling = fixedHigh != null && fixedHigh > 0 ? fixedHigh : null;
+    let maxRaw = Math.max(balanced, fixedCeiling ?? base * (1.2 + Math.max(0, adjust)));
+    if (fixedCeiling == null && observedHigh != null && observedHigh > balanced) {
+      maxRaw = Math.min(maxRaw, observedHigh);
+    }
+    // Le plafond de sécurité ne doit jamais rabaisser le prix fixe observé.
+    maxRaw = Math.min(maxRaw, Math.max(balanced, base * 1.6, fixedCeiling ?? 0));
     const max = Math.max(balanced, safe(maxRaw));
 
     const liquidity =
@@ -2052,7 +2077,14 @@
         net: netOf(max),
         label: 'Prix maximal',
         delay: 'délai plus long',
-        reason: reason(max, observedHigh != null && observedHigh > base ? `plus haute vente ◆ ${fmt(observedHigh)}` : '+20 % vs médiane')
+        reason: reason(
+          max,
+          fixedHigh != null && fixedHigh >= balanced
+            ? `prix fixe le plus haut ◆ ${fmt(fixedHigh)}`
+            : observedHigh != null && observedHigh > base
+              ? `plus haute vente ◆ ${fmt(observedHigh)}`
+              : '+20 % vs médiane'
+        )
       }
     };
   }
@@ -2483,7 +2515,7 @@
   function renderUnsafe() {
     if (!state.mounted || !ui) return;
     ui.panel.hidden = !state.open;
-    // L'onglet Vente a besoin de place : panneau élargi, uniquement pour lui.
+    // Les onglets denses (Vente, Stat) gardent un peu plus de largeur.
     ui.panel.classList.toggle('is-wide', state.tab === 'sell' || state.tab === 'stat');
     ui.fab.classList.toggle('is-open', state.open);
     if (!state.open) {
@@ -2492,6 +2524,7 @@
     }
 
     const view = ui.view;
+    const tabAtRender = state.tab;
     const scrollTop = view.scrollTop;
     renderBanner();
     renderStats();
@@ -2500,12 +2533,23 @@
     renderFooter();
     renderModal();
     view.scrollTop = scrollTop;
+    // Le contenu vient d'être remplacé : images et lignes peuvent encore changer
+    // la hauteur après le rendu. On re-applique la position au frame suivant pour
+    // éviter le retour en haut pendant une vente.
+    if (scrollTop > 0) {
+      requestAnimationFrame(() => {
+        if (ui?.view === view && state.tab === tabAtRender && Math.abs(view.scrollTop - scrollTop) > 1) {
+          view.scrollTop = scrollTop;
+        }
+      });
+    }
   }
 
   function renderBanner() {
     if (!ui?.banner) return;
 
-    // 1) Une version plus récente existe sur GitHub.
+    // 1) Une version plus récente existe sur GitHub : information seule, sans
+    //    bouton de téléchargement (la mise à jour se fait hors extension).
     const remote = state.update.version;
     if (remote && isNewerVersion(remote, state.version)) {
       ui.banner.hidden = false;
@@ -2514,8 +2558,6 @@
         <span class="kp-banner-text">
           Version <b>v${esc(remote)}</b> disponible (tu as v${esc(state.version)}).
         </span>
-        <button class="kp-btn is-primary" type="button" data-act="update-download">Télécharger</button>
-        <button class="kp-btn is-ghost" type="button" data-act="tab" data-tab="settings">Comment ?</button>
       `;
       return;
     }
@@ -2529,7 +2571,7 @@
           Le dossier est en v${esc(state.version)} mais Firefox a chargé v${esc(state.manifestVersion ?? '?')}.
           Retire l'add-on dans <code>about:debugging</code>, puis recharge-le depuis le dossier.
         </span>
-        <button class="kp-btn is-primary" type="button" data-act="tab" data-tab="settings">Voir les Réglages</button>
+        <button class="kp-btn is-primary" type="button" data-act="tab" data-tab="debug">Voir Debug</button>
       `;
       return;
     }
@@ -2585,7 +2627,7 @@
       ['account', 'Compte'],
       ['sell', sellable ? `Vente (${sellable})` : 'Vente'],
       ['market', 'Marché'],
-      ['cards', 'Cartes'],
+      ['cards', '%Drop'],
       ['auto', 'Auto-Open'],
       ['stat', 'Stat'],
       ['settings', 'Réglages'],
@@ -2613,7 +2655,7 @@
           : 'Prêt';
     ui.foot.innerHTML = `
       <span><i class="kp-dot ${dot}"></i>${msg}</span>
-      <span>v${esc(state.version)}${state.manifestOutdated ? ' · maj dispo' : ''} · Alt+K</span>
+      <span>v${esc(state.version)}${state.manifestOutdated ? ' · version en retard' : ''} · Alt+K</span>
     `;
   }
 
@@ -3197,12 +3239,18 @@
       const payload = await api(`/api/leaderboard/ladder?by=collection&q=${encodeURIComponent(pseudo)}`, {
         timeout: 20000
       });
-      const list = Array.isArray(payload?.found) ? payload.found : Array.isArray(payload?.rows) ? payload.rows : [];
+      // `found[]` est la forme documentée, mais on tolère les enveloppes voisines
+      // pour ne pas perdre le rang si le site change de forme.
+      const list = [payload?.found, payload?.rows, payload?.results, payload?.users].find(Array.isArray) ?? [];
+      const idOf = (row) => row?.id ?? row?.userId ?? row?.user?.id ?? row?.player?.id ?? null;
+      const nameOf = (row) => row?.pseudo ?? row?.name ?? row?.user?.pseudo ?? row?.player?.pseudo ?? '';
       const hit =
-        list.find((row) => String(row?.id) === String(account.id)) ??
-        list.find((row) => String(row?.pseudo ?? '').toLowerCase() === pseudo.toLowerCase()) ??
+        list.find((row) => idOf(row) != null && String(idOf(row)) === String(account.id)) ??
+        list.find((row) => String(nameOf(row)).toLowerCase() === pseudo.toLowerCase()) ??
         null;
-      return toNum(hit?.pos ?? hit?.position);
+      return toNum(
+        hit?.pos ?? hit?.position ?? hit?.rankPos ?? hit?.user?.pos ?? hit?.player?.pos
+      );
     } catch {
       return null;
     }
@@ -3274,11 +3322,12 @@
         collections[id] = ids;
         account.__ids = ids;
 
-        const user = await statSyncAccount(account, null, catalog);
-        if (user) {
-          const rank = await statSiteRank(account);
-          data.accounts[id].rankPos = rank;
-        }
+        await statSyncAccount(account, null, catalog);
+        // Le rang est indépendant du profil : même si /api/users échoue, le
+        // classement public reste lisible et doit s'afficher.
+        const rank = await statSiteRank(account);
+        const entry = data.accounts[id];
+        if (entry && rank != null) entry.rankPos = rank;
         state.stats.done += 1;
         if (state.tab === 'stat') renderStatsProgress();
         await sleep(STAT_REQUEST_GAP);
@@ -3379,12 +3428,22 @@
     if (!user?.id) return;
     const data = statBoardData();
     const id = String(user.id);
-    const entry = data.accounts[id] ?? (data.accounts[id] = { id, addedAt: Date.now(), byRarity: {} });
+    const existing = data.accounts[id];
+    const entry = existing ?? (data.accounts[id] = { id, addedAt: Date.now(), byRarity: {} });
+    const pseudo = user.pseudo ?? entry.pseudo ?? 'Moi';
+    const avatar = user.avatar ?? entry.avatar ?? null;
+    // Évite une écriture de stockage à chaque render de l'onglet Stat.
+    const changed =
+      !existing ||
+      entry.self !== true ||
+      entry.source !== 'self' ||
+      entry.pseudo !== pseudo ||
+      entry.avatar !== avatar;
     entry.self = true;
     entry.source = 'self';
-    entry.pseudo = user.pseudo ?? entry.pseudo ?? 'Moi';
-    entry.avatar = user.avatar ?? entry.avatar ?? null;
-    persistStatsSoon();
+    entry.pseudo = pseudo;
+    entry.avatar = avatar;
+    if (changed) persistStatsSoon();
   }
 
   /**
@@ -3412,7 +3471,7 @@
       const id = hit.id == null ? '' : String(hit.id);
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      out.push({ id, pseudo: hit.pseudo, avatar: hit.avatar });
+      out.push({ id, pseudo: hit.pseudo, avatar: hit.avatar, pos: hit.pos });
     }
     return out;
   }
@@ -3462,6 +3521,7 @@
           source: 'friend',
           addedAt: Date.now(),
           at: 0,
+          rankPos: toNum(friend.pos) ?? null,
           byRarity: {}
         };
         total += 1;
@@ -3517,6 +3577,7 @@
       source: 'manual',
       addedAt: Date.now(),
       at: 0,
+      rankPos: toNum(hit.pos) ?? null,
       byRarity: {}
     };
     state.stats.query = '';
@@ -3654,32 +3715,176 @@
       }`;
   }
 
+  // 50 teintes maximum, réparties par angle d'or pour rester distinctes même
+  // quand la liste de comptes suivis est pleine (20 comptes aujourd'hui).
+  const STAT_PIE_COLORS = Array.from({ length: 50 }, (_, index) => {
+    const hue = Math.round((index * 137.508) % 360);
+    return `hsl(${hue}, 78%, ${index % 2 ? 62 : 56}%)`;
+  });
+
+  /** Valeur lisible d'une part de camembert. */
+  function statPieMetric(column, value) {
+    if (value == null) return '—';
+    if (column.key === 'value') return `◆ ${fmt(value)}`;
+    if (column.key === 'catalogPct') return `${Number(value).toLocaleString('fr-FR')} %`;
+    if (column.key === 'rankPos') return `#${fmt(value)}`;
+    return fmt(value);
+  }
+
+  /**
+   * Le rang et la complétion ne s'additionnent pas : on les montre par tranches.
+   * Les autres critères sont additifs et peuvent être lus comme une part du total.
+   */
+  function statPieBuckets(key, rows) {
+    const defs =
+      key === 'rankPos'
+        ? [
+            ['Top 100', (value) => value != null && value <= 100],
+            ['101 – 1 000', (value) => value != null && value > 100 && value <= 1000],
+            ['1 001 – 10 000', (value) => value != null && value > 1000 && value <= 10000],
+            ['> 10 000', (value) => value != null && value > 10000],
+            ['Non classé', (value) => value == null]
+          ]
+        : key === 'catalogPct'
+          ? [
+              ['≥ 80 %', (value) => value != null && value >= 80],
+              ['50 – 79 %', (value) => value != null && value >= 50 && value < 80],
+              ['20 – 49 %', (value) => value != null && value >= 20 && value < 50],
+              ['< 20 %', (value) => value != null && value < 20],
+              ['Non calculable', (value) => value == null]
+            ]
+          : null;
+    if (!defs) return null;
+
+    const total = rows.length;
+    const values = rows.map((row) => statColumnValue(row, key));
+    return defs
+      .map(([label, test], index) => {
+        const count = values.filter(test).length;
+        return {
+          label,
+          value: count,
+          display: `${fmt(count)} compte${count > 1 ? 's' : ''}`,
+          pct: total ? (count / total) * 100 : 0,
+          color: STAT_PIE_COLORS[index % STAT_PIE_COLORS.length]
+        };
+      })
+      .filter((slice) => slice.value > 0);
+  }
+
+  function statPieSlices(rows, key) {
+    const column = STAT_COLUMNS.find((item) => item.key === key) ?? STAT_COLUMNS[0];
+    const buckets = statPieBuckets(column.key, rows);
+    if (buckets) {
+      return {
+        column,
+        slices: buckets,
+        mode: 'buckets',
+        note: 'Chaque compte suivi est compté dans une seule tranche.',
+        empty: false
+      };
+    }
+
+    // Tous les comptes suivis sont affichés, même ceux à 0 ou sans donnée :
+    // ils restent dans la légende avec 0 %. Aucun regroupement « Autres ».
+    const entries = rows
+      .map((row) => ({ row, value: statColumnValue(row, column.key) }))
+      .sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
+    const total = entries.reduce((sum, entry) => sum + (entry.value > 0 ? entry.value : 0), 0);
+    const slices = entries.map((entry, index) => ({
+      label: entry.row.pseudo,
+      value: entry.value ?? 0,
+      display: entry.value == null ? '—' : statPieMetric(column, entry.value),
+      pct: total && entry.value > 0 ? (entry.value / total) * 100 : 0,
+      color: STAT_PIE_COLORS[index % STAT_PIE_COLORS.length]
+    }));
+
+    return {
+      column,
+      slices,
+      mode: 'accounts',
+      total,
+      note: total
+        ? 'Tous les comptes suivis sont listés ; les parts à 0 % restent visibles dans la légende.'
+        : 'Aucune valeur positive pour ce critère : les comptes restent listés ci-dessous.',
+      empty: !total
+    };
+  }
+
+  function statPieHTML(rows, key) {
+    const data = statPieSlices(rows, key);
+    if (!data.slices.length) {
+      return `<aside class="kp-stat-chart">
+        <div class="kp-stat-chart-head"><b>${esc(data.column.title)}</b><small>sur ${fmt(rows.length)} compte(s)</small></div>
+        <div class="kp-stat-chart-empty">Aucune valeur disponible pour ce critère.</div>
+      </aside>`;
+    }
+
+    const noValue = data.mode === 'accounts' && data.empty;
+    let cursor = 0;
+    const stops = noValue
+      ? ['#2d303a 0% 100%']
+      : data.slices.map((slice, index) => {
+          const start = cursor;
+          cursor += slice.pct;
+          // Une part à 0 % ne doit pas produire un cheveu de couleur.
+          const end = slice.pct <= 0 ? start : index === data.slices.length - 1 ? 100 : cursor;
+          return `${slice.color} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+        });
+
+    return `<aside class="kp-stat-chart">
+      <div class="kp-stat-chart-head">
+        <b>${esc(data.column.title)}</b>
+        <small>${data.mode === 'buckets' ? 'Répartition' : 'Tous les comptes'} · ${fmt(rows.length)} suivi(s)</small>
+      </div>
+      <div class="kp-stat-pie-wrap ${noValue ? 'is-empty' : ''}">
+        <div class="kp-stat-pie" style="background:conic-gradient(${stops.join(
+          ','
+        )})" role="img" aria-label="${esc(`Répartition de ${data.column.title}`)}"></div>
+      </div>
+      <div class="kp-stat-legend">
+        ${data.slices
+          .map(
+            (slice) => `<div class="kp-stat-legend-row" title="${esc(
+              `${slice.label} · ${slice.display} · ${slice.pct.toFixed(1).replace('.', ',')} %`
+            )}">
+              <i style="--c:${slice.color}"></i>
+              <span>${esc(slice.label)}</span>
+              <b>${esc(slice.display)}</b>
+              <small>${slice.pct.toFixed(1).replace('.', ',')} %</small>
+            </div>`
+          )
+          .join('')}
+      </div>
+      <div class="kp-stat-chart-note">${esc(data.note)}</div>
+    </aside>`;
+  }
+
   function statTable() {
     const data = statBoardData();
     const rows = statRows();
-    const sort = data.sort;
+    const column = STAT_COLUMNS.find((item) => item.key === data.sort) ?? STAT_COLUMNS[0];
     if (!rows.length) {
       return `<div class="kp-empty"><b>Aucun compte suivi</b>Ajoute un compte avec la recherche ci-dessus pour commencer le classement.</div>`;
     }
 
-    const ranks = new Map(statRankRows(rows, sort, data.desc).map((row) => [row.id, row.rank]));
-
-    const head = STAT_COLUMNS.map(
-      (column) => `
-        <th class="${sort === column.key ? 'is-active' : ''}">
-          <button type="button" data-act="stat-sort" data-key="${column.key}" title="${esc(column.title)}">
-            ${column.label}${sort === column.key ? `<i>${data.desc ? '▾' : '▴'}</i>` : ''}
-          </button>
-        </th>`
-    ).join('');
+    const ranks = new Map(statRankRows(rows, column.key, data.desc).map((row) => [row.id, row.rank]));
+    const descending = column.asc ? !data.desc : data.desc;
+    const head = `<th class="is-active">
+      <button type="button" data-act="stat-sort" data-key="${column.key}" title="${esc(column.title)}">
+        ${column.label}<i>${descending ? '▾' : '▴'}</i>
+      </button>
+    </th>`;
 
     const body = rows
       .map((row) => {
         const rank = ranks.get(String(row.id));
         const expanded = state.stats.expanded === String(row.id);
-        const cells = STAT_COLUMNS.map(
-          (column) => `<td class="${sort === column.key ? 'is-active' : ''}">${statCell(row, column)}</td>`
-        ).join('');
+        const siteRank = toNum(row.rankPos);
+        const siteBadge =
+          siteRank != null && column.key !== 'rankPos'
+            ? `<small class="kp-stat-site">site #${fmt(siteRank)}</small>`
+            : '';
         return `
           <tr class="kp-stat-tr ${expanded ? 'is-expanded' : ''}" data-act="stat-expand" data-id="${esc(row.id)}"${
             row.error ? ' title="' + esc(row.error) + '"' : ''
@@ -3687,13 +3892,13 @@
             <td class="kp-stat-idx">${rank == null ? '·' : `#${rank}`}</td>
             <td class="kp-stat-who">
               <img src="${esc(row.avatar || '/brand/favicon/icon-192.png')}" alt="" loading="lazy">
-              <span>${esc(row.pseudo)}${row.self ? '<em>moi</em>' : row.source === 'friend' ? '<em class="is-friend">ami</em>' : ''}</span>
+              <span>${esc(row.pseudo)}${row.self ? '<em>moi</em>' : row.source === 'friend' ? '<em class="is-friend">ami</em>' : ''}${siteBadge}</span>
             </td>
-            ${cells}
+            <td class="is-active">${statCell(row, column)}</td>
           </tr>
           ${
             expanded
-              ? `<tr class="kp-stat-detail"><td colspan="${STAT_COLUMNS.length + 2}">${statDetail(row)}</td></tr>`
+              ? `<tr class="kp-stat-detail"><td colspan="3">${statDetail(row)}</td></tr>`
               : ''
           }`;
       })
@@ -3702,7 +3907,7 @@
     return `
       <div class="kp-stat-scroll">
         <table class="kp-stat-table">
-          <thead><tr><th class="kp-stat-idx"></th><th class="kp-stat-who">Compte</th>${head}</tr></thead>
+          <thead><tr><th class="kp-stat-idx" title="Rang dans le critère choisi">#</th><th class="kp-stat-who">Compte</th>${head}</tr></thead>
           <tbody>${body}</tbody>
         </table>
       </div>`;
@@ -3724,6 +3929,7 @@
         row.self ? 'compte connecté' : row.source === 'friend' ? 'liste d’amis' : 'ajout manuel',
         false
       ],
+      ['Rang global (site)', row.rankPos == null ? '—' : `#${fmt(row.rankPos)}`, row.rankPos == null],
       ['Valeur des doublons', row.dupesValue == null ? 'non publié' : `◆ ${fmt(row.dupesValue)}`, row.dupesValue == null],
       [
         'Valeur moyenne par carte',
@@ -3767,6 +3973,7 @@
   function statBodyHTML() {
     const data = statBoardData();
     const rows = Object.values(data.accounts ?? {});
+    const column = STAT_COLUMNS.find((item) => item.key === data.sort) ?? STAT_COLUMNS[0];
     const failed = rows.filter((row) => row.error);
     const valued = rows.filter((row) => row.value != null);
     const totalValue = valued.reduce((sum, row) => sum + (row.value ?? 0), 0);
@@ -3793,7 +4000,28 @@
             }</div>`
       }
       ${state.stats.syncing ? '<div class="kp-progress"><div class="kp-progress-bar"><i style="width:' + (state.stats.total ? Math.round((state.stats.done / state.stats.total) * 100) : 0) + '%"></i></div></div>' : ''}
-      ${statTable()}
+      ${
+        rows.length
+          ? `<div class="kp-stat-controls">
+               <label class="kp-stat-pick">
+                 <span>Critère comparé</span>
+                 <select class="kp-select" data-stat-metric>
+                   ${STAT_COLUMNS.map(
+                     (item) =>
+                       `<option value="${item.key}" ${item.key === column.key ? 'selected' : ''}>${esc(item.title)}</option>`
+                   ).join('')}
+                 </select>
+               </label>
+               <button class="kp-btn" type="button" data-act="stat-sort-dir" title="Inverser le sens du classement">
+                 Sens : ${(column.asc ? !data.desc : data.desc) ? '↓' : '↑'}
+               </button>
+             </div>
+             <div class="kp-stat-layout">
+               <div class="kp-stat-table-col">${statTable()}</div>
+               ${statPieHTML(rows, column.key)}
+             </div>`
+          : statTable()
+      }
       ${
         failed.length
           ? `<div class="kp-hint is-bad">${fmt(failed.length)} compte(s) en erreur : ${esc(
@@ -3801,7 +4029,6 @@
             )}</div>`
           : ''
       }
-      <div class="kp-hint">Les valeurs viennent des champs publics du site. « Cartes vendues » n'existe pas dans l'API : la colonne Ann. montre les annonces actives. Les L/M sont comptées en cartes différentes (le site ne détaille pas les exemplaires rares).</div>
     `;
   }
 
@@ -3809,7 +4036,14 @@
     if (state.stats.loading) {
       return '<div class="kp-empty"><span class="kp-spinner"></span> Chargement…</div>';
     }
-    if (!state.stats.ready) loadStats();
+    if (!state.stats.ready) {
+      loadStats();
+      // On ne touche pas aux données tant que le stockage n'a pas répondu :
+      // sinon le compte « moi » est ajouté puis écrasé par la lecture.
+      if (state.stats.loading) {
+        return '<div class="kp-empty"><span class="kp-spinner"></span> Chargement…</div>';
+      }
+    }
     statEnsureSelf();
 
     // Un compte jamais lu (ou fraîchement ajouté) est mesuré dès l'ouverture.
@@ -6462,103 +6696,8 @@
 
   function viewSettings() {
     const cfg = getCfg();
-    const u = state.update;
-    const newer = u.version && isNewerVersion(u.version, state.version);
     return `
       <div class="kp-settings">
-        <div class="kp-section" style="margin-top:0">
-          <div class="kp-section-title">Mise à jour</div>
-          ${
-            state.manifestOutdated
-              ? `<div class="kp-alert is-bad" style="margin-bottom:8px">
-                   <b>Firefox a gardé l'ancienne version</b><br>
-                   Le dossier est en v${esc(state.version)}, mais l'add-on chargé est encore en
-                   v${esc(state.manifestVersion ?? '?')}. Un add-on temporaire doit être retiré puis rechargé
-                   pour prendre le nouveau numéro de version :
-                   <code>about:debugging</code> → <b>Ce Firefox</b> → « Retirer », puis
-                   « Charger un module temporaire » → <code>manifest.json</code> du dossier.
-                 </div>`
-              : ''
-          }
-          ${
-            newer
-              ? `<div class="kp-alert" style="margin-bottom:8px">
-                   <b>v${esc(u.version)} disponible</b> — tu es en v${esc(state.version)}.
-                   Télécharge l'archive puis remplace les fichiers de ton dossier (voir plus bas).
-                 </div>`
-              : ''
-          }
-          <div class="kp-card-stat">
-            <span>Version du code</span>
-            <b>v${esc(state.version)}</b>
-            <small>manifeste lu depuis le dossier local · aucun téléchargement</small>
-          </div>
-          <div class="kp-card-stat" style="margin-top:6px">
-            <span>Manifeste sur le disque</span>
-            <b>v${esc(state.diskVersion ?? '—')}</b>
-            <small>${state.diskVersion ? 'fichier manifest.json' : 'illisible'}</small>
-          </div>
-          <div class="kp-card-stat" style="margin-top:6px">
-            <span>Manifeste chargé par Firefox</span>
-            <b>v${esc(state.manifestVersion ?? '—')}</b>
-            <small>${state.manifestVersion ? (state.manifestOutdated ? 'en retard sur le dossier' : 'à jour') : '—'}</small>
-          </div>
-          <div class="kp-card-stat" style="margin-top:6px">
-            <span>Dépôt GitHub</span>
-            <b>${u.checking ? '…' : u.version ? `v${esc(u.version)}` : '—'}</b>
-            <small>${
-              u.checking
-                ? 'vérification…'
-                : u.error
-                  ? esc(u.error)
-                  : u.checkedAt
-                    ? newer
-                      ? 'plus récent que ta version (pas forcément publié sur AMO)'
-                      : 'tu es à jour'
-                    : 'jamais vérifié'
-            }</small>
-          </div>
-
-          <div class="kp-toolbar" style="margin-top:8px">
-            <button class="kp-btn is-primary" type="button" data-act="update-now" ${u.checking ? 'disabled' : ''}>
-              ${u.checking ? '<span class="kp-spinner"></span> Vérification…' : 'Mettre à jour et recharger'}
-            </button>
-            <button class="kp-btn" type="button" data-act="update-check" ${u.checking ? 'disabled' : ''}>Vérifier</button>
-            <button class="kp-btn" type="button" data-act="update-download">Télécharger</button>
-            <button class="kp-btn is-ghost" type="button" data-act="update-repo">Dépôt ↗</button>
-          </div>
-          <div class="kp-hint">
-            <b>Mettre à jour et recharger</b> vérifie GitHub, puis recharge l'extension et la page :
-            un seul clic après un <code>git pull</code>.
-          </div>
-
-          <div class="kp-explain" style="margin-top:10px">
-            <p><b>Installée depuis addons.mozilla.org ?</b></p>
-            <p>
-              Les mises à jour sont <b>automatiques</b> : Firefox télécharge la nouvelle version en arrière-plan
-              et l'active au redémarrage. Rien à faire ici.
-            </p>
-            <p><b>Chargée depuis un dossier (développement) ?</b></p>
-            <p>
-              L'extension ne peut pas réécrire ses propres fichiers. Clique sur <b>Télécharger la dernière version</b>,
-              décompresse l'archive <b>dans le même dossier</b> (celui que Firefox surveille), puis
-              <b>Recharge l'extension</b> ci-dessous.
-            </p>
-          </div>
-          <div class="kp-hint" style="margin-top:8px">
-            Après une modification du dossier, recharge l'extension pour appliquer le nouveau code.
-            La page sera rafraîchie automatiquement.
-          </div>
-          <div class="kp-toolbar">
-            ${
-              state.reloadArmed
-                ? `<button class="kp-btn is-primary" type="button" data-act="reload-ext">Confirmer le rechargement</button>
-                   <button class="kp-btn is-ghost" type="button" data-act="reload-cancel">Annuler</button>`
-                : `<button class="kp-btn is-primary" type="button" data-act="reload-ext">Recharger l'extension</button>`
-            }
-          </div>
-        </div>
-
         <label class="kp-field">
           <span>Cache des prix<small>Durée avant de redemander les médianes</small></span>
           <select class="kp-select" data-setting="ttlH">
@@ -6595,8 +6734,8 @@
         <label class="kp-field">
           <span>Durée par défaut<small>Prix fixe et enchère</small></span>
           <select class="kp-select" data-setting="durationHours">
-            ${getCfg()
-              .durations.map((h) => `<option value="${h}" ${Number(state.settings.durationHours) === Number(h) ? 'selected' : ''}>${h} h</option>`)
+            ${cfg.durations
+              .map((h) => `<option value="${h}" ${Number(state.settings.durationHours) === Number(h) ? 'selected' : ''}>${h} h</option>`)
               .join('')}
           </select>
         </label>
@@ -6639,10 +6778,6 @@
               : ''
           }
         </div>
-        <div class="kp-toolbar">
-          <button class="kp-btn" type="button" data-act="anti-afk-test">Tester la détection</button>
-        </div>
-
         <div class="kp-alert">
           Frais actuels : dépôt ${cfg.feePct} % (min ${cfg.feeMin} ◆) · taxe de vente ${cfg.taxPct} %.
           Limite : ${listingSlots().max} annonces actives (${listingSlots().active} en ligne, ${listingSlots().remaining} libre(s)).
@@ -6666,8 +6801,21 @@
         <div class="kp-card-stat"><span>Session</span><b>${esc(state.user?.pseudo ?? 'invité')}</b><small>id ${esc(state.user?.id ?? '—')} · ${counts} entrées collection</small></div>
         <div class="kp-card-stat"><span>Prix en cache</span><b>${pricedIds}</b><small>${Object.keys(state.prices).length} entrées · TTL ${state.settings.ttlH} h</small></div>
         <div class="kp-card-stat"><span>Bootstrap</span><b>${esc(state.bootKeys.join(', ') || '—')}</b><small>clés renvoyées par /api/me/bootstrap</small></div>
-        <div class="kp-card-stat"><span>Version</span><b>v${esc(state.version)}</b><small>manifeste chargé : v${esc(state.manifestVersion ?? '—')}</small></div>        <div class="kp-toolbar">
-          <button class="kp-btn" type="button" data-act="reload-ext">Recharger l'extension</button>
+        <div class="kp-card-stat"><span>Version du code</span><b>v${esc(state.version)}</b><small>manifeste du dossier</small></div>
+        <div class="kp-card-stat"><span>Version dans Firefox</span><b>v${esc(state.manifestVersion ?? '—')}</b><small>${
+          state.manifestVersion
+            ? state.manifestOutdated
+              ? 'en retard sur le dossier'
+              : 'extension actuellement chargée'
+            : 'version chargée indisponible'
+        }</small></div>
+        <div class="kp-toolbar">
+          ${
+            state.reloadArmed
+              ? `<button class="kp-btn is-primary" type="button" data-act="reload-ext">Confirmer le rechargement</button>
+                 <button class="kp-btn is-ghost" type="button" data-act="reload-cancel">Annuler</button>`
+              : `<button class="kp-btn" type="button" data-act="reload-ext">Recharger l'extension</button>`
+          }
         </div>
         <div class="kp-toolbar">
           <button class="kp-btn" type="button" data-act="copy-diag">Copier le diagnostic</button>
@@ -7391,6 +7539,12 @@
           ${statTile('Volatilité', analysis.volatility != null ? fmtPct(analysis.volatility) : '—', 'écart-type quotidien')}
           ${statTile('Ventes 7 j', analysis.volume7 != null ? fmt(analysis.volume7) : '—', analysis.avgPerDay != null ? `${Math.round(analysis.avgPerDay * 10) / 10}/jour` : '')}
           ${statTile('Concurrence', fmt(analysis.rivals), analysis.lowest != null ? `dès ◆ ${fmt(analysis.lowest)}` : 'aucune annonce')}
+          ${statTile('Achat immédiat (enchère)', analysis.auctionBuyout != null ? `◆ ${fmt(analysis.auctionBuyout)}` : '—', analysis.auctionBuyout != null ? 'enchère au plus bas' : 'aucune enchère disponible')}
+          ${statTile(
+            'Prix fixe le plus haut',
+            analysis.fixedHigh != null ? `◆ ${fmt(analysis.fixedHigh)}` : '—',
+            analysis.fixedHigh != null ? `${fmt(analysis.rivalFixed?.length ?? 0)} annonce(s) fixe(s)` : 'aucune annonce fixe'
+          )}
           ${statTile('Meilleur ordre', analysis.bestBid != null ? `◆ ${fmt(analysis.bestBid)}` : '—', analysis.orderCount ? `${analysis.orderCount} ordre(s)` : '')}
         </div>
 
@@ -7592,11 +7746,33 @@
   function renderModal() {
     if (!ui) return;
 
+    const kind = !state.sell && state.sellView.detailId ? 'detail' : state.sell ? 'sell' : 'closed';
+    const kindKey = kind === 'detail' ? `detail:${state.sellView.detailId ?? ''}` : kind;
+    // Même modale = on garde la position de lecture. Sinon (ouverture d'une
+    // fiche, changement de vente), on repart naturellement du haut.
+    let keepScroll = null;
+    if (ui.modalCard.dataset.kind === kindKey) {
+      const body = ui.modalCard.querySelector('.kp-modal-body');
+      if (body) {
+        keepScroll = {
+          top: body.scrollTop,
+          atBottom: body.scrollHeight - body.scrollTop - body.clientHeight < 32
+        };
+      }
+    }
+    const restoreScroll = () => {
+      const body = ui.modalCard.querySelector('.kp-modal-body');
+      if (!body || !keepScroll) return;
+      body.scrollTop = keepScroll.atBottom ? body.scrollHeight : keepScroll.top;
+    };
+
     // Fiche carte ouverte : elle prend la modale tant qu'aucune vente n'est préparée.
     if (!state.sell && state.sellView.detailId) {
       ui.modal.hidden = false;
       ui.modalCard.classList.add('is-wide');
       ui.modalCard.innerHTML = renderSellDetail();
+      ui.modalCard.dataset.kind = kindKey;
+      restoreScroll();
       return;
     }
 
@@ -7604,6 +7780,7 @@
       ui.modal.hidden = true;
       ui.modalCard.classList.remove('is-wide');
       ui.modalCard.innerHTML = '';
+      ui.modalCard.dataset.kind = 'closed';
       return;
     }
 
@@ -7747,6 +7924,8 @@
         }
       </div>
     `;
+    ui.modalCard.dataset.kind = kindKey;
+    restoreScroll();
   }
 
   /* ------------------------------------------------------------------ */
@@ -8118,6 +8297,13 @@
         render();
         break;
       }
+      case 'stat-sort-dir': {
+        const data = statBoardData();
+        data.desc = !data.desc;
+        persistStatsSoon();
+        render();
+        break;
+      }
       case 'stat-expand': {
         const id = el.getAttribute('data-id');
         state.stats.expanded = state.stats.expanded === id ? null : id;
@@ -8230,6 +8416,20 @@
 
       state.selected.add(id);
       render();
+      return;
+    }
+
+    // --- Onglet Stat : critère comparé ---
+    const statMetric = target.closest('[data-stat-metric]');
+    if (statMetric) {
+      const data = statBoardData();
+      const key = String(statMetric.value);
+      if (STAT_COLUMNS.some((column) => column.key === key)) {
+        data.sort = key;
+        data.desc = true;
+        persistStatsSoon();
+        render();
+      }
       return;
     }
 

@@ -143,7 +143,14 @@ const analysis = api.analyzeCard({
 check('médiane retenue', analysis.median === 133, `median=${analysis.median}`);
 check('plus haute vente observée', analysis.observedHigh === 140);
 check('plus basse vente observée', analysis.observedLow === 90);
-check('moins chère annonce fixe', analysis.lowest === 150, `lowest=${analysis.lowest}`);
+check(
+  'moins chère annonce fixe',
+  analysis.lowest === 150 &&
+    analysis.fixedLow === 150 &&
+    analysis.fixedHigh === 170 &&
+    analysis.auctionBuyout === 160,
+  `lowest=${analysis.lowest} fixedLow=${analysis.fixedLow} fixedHigh=${analysis.fixedHigh} buyout=${analysis.auctionBuyout}`
+);
 check('meilleur ordre d’achat', analysis.bestBid === 130, `bid=${analysis.bestBid}`);
 check('nombre de concurrents', analysis.rivals === 3, `rivals=${analysis.rivals}`);
 check('projection fournie', analysis.forecast != null);
@@ -153,7 +160,13 @@ check('projection bornée à +30 %', analysis.forecast.price <= Math.round(133 *
 
 const reco = analysis.recommend;
 check('trois stratégies', Boolean(reco?.quick && reco.balanced && reco.max));
-check('vente rapide ≤ équilibrée ≤ maximale', reco.quick.price <= reco.balanced.price && reco.balanced.price <= reco.max.price);
+check(
+  'vente rapide ≤ équilibrée ≤ maximale',
+  reco.quick.price <= reco.balanced.price &&
+    reco.balanced.price <= reco.max.price &&
+    reco.max.price === 170,
+  `quick=${reco.quick.price} balanced=${reco.balanced.price} max=${reco.max.price}`
+);
 check('prix ≥ plancher de recyclage', reco.quick.price >= 40 && reco.balanced.price >= 40 && reco.max.price >= 40);
 check('vente rapide sous la concurrence', reco.quick.price < 150, `quick=${reco.quick.price}`);
 check('justification chiffrée', /médiane/.test(reco.balanced.reason) && /vente/.test(reco.balanced.reason));
