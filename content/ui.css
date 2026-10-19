@@ -470,6 +470,12 @@ select {
   cursor: pointer;
 }
 
+.kp-check small {
+  color: var(--kp-muted);
+  font-size: 9px;
+  opacity: 0.8;
+}
+
 .kp-auto-checks .kp-check {
   margin-top: 0;
   padding: 3px 0;
