@@ -505,6 +505,7 @@ select {
 }
 
 .kp-best-card {
+  position: relative;
   display: grid;
   gap: 2px;
   cursor: pointer;
@@ -536,6 +537,34 @@ select {
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
+}
+
+/* Meilleures trouvailles : nom de la carte + compteur, et halo renforcé pour L/M. */
+.kp-best-card small {
+  overflow: hidden;
+  color: var(--kp-muted);
+  font-size: 7px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kp-best-card.is-top img {
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 16px -1px var(--rc, transparent);
+}
+
+.kp-best-qty {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(8, 9, 13, 0.86);
+  color: var(--rc, #fff);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 1.5;
 }
 
 .kp-progress.is-loop i {
@@ -1457,6 +1486,74 @@ img.kp-avatar {
 
 .kp-sell-row.is-disabled {
   opacity: 0.45;
+}
+
+/* Doublons : contour plus marqué et compteur sur la vignette, pour les repérer
+   immédiatement dans une longue liste. */
+.kp-sell-row.is-dupe {
+  border-color: rgba(96, 165, 250, 0.22);
+  background: linear-gradient(90deg, rgba(96, 165, 250, 0.07), transparent 45%), var(--kp-bg-2);
+}
+
+.kp-sell-row.is-dupe.is-selected {
+  border-color: rgba(255, 77, 46, 0.45);
+}
+
+.kp-sell-thumb {
+  position: relative;
+  display: block;
+  width: 38px;
+  height: 52px;
+}
+
+.kp-sell-thumb img {
+  display: block;
+  width: 38px;
+  height: 52px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--kp-bg-3);
+}
+
+.kp-dupe-count {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  min-width: 20px;
+  padding: 0 4px;
+  border: 1px solid rgba(96, 165, 250, 0.55);
+  border-radius: 999px;
+  background: #0c1018;
+  color: #93c5fd;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+.kp-sell-row.is-locked .kp-dupe-count {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: var(--kp-muted);
+}
+
+.kp-dupe-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.16);
+  color: #93c5fd;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
+
+.kp-sell-row.is-locked .kp-dupe-tag {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--kp-muted);
 }
 
 /* Carte possédée mais non vendable (revente différée, déjà engagée…) :

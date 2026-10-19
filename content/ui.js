@@ -162,6 +162,7 @@
       type: 'all',
       sort: 'potential_desc',
       onlySellable: false,
+      onlyDupes: false,
       limit: 40,
       method: 'balanced',
       detailId: null,
@@ -1277,7 +1278,6 @@
     ['price_desc', 'Prix ↓'],
     ['price_asc', 'Prix ↑'],
     ['rarity_desc', 'Rareté ↓'],
-    ['copies_desc', 'Exemplaires ↓'],
     ['name_asc', 'Nom A→Z']
   ];
 
@@ -1357,6 +1357,7 @@
     if (view.rarity !== 'all') rows = rows.filter((row) => String(row.rarity) === view.rarity);
     if (view.series !== 'all') rows = rows.filter((row) => String(row.series) === view.series);
     if (view.onlySellable) rows = rows.filter((row) => row.sellable > 0);
+    if (view.onlyDupes) rows = rows.filter((row) => row.qty > 1);
 
     const rarityRank = (code) => RARITY_ORDER.indexOf(String(code || 'C').toUpperCase());
     const valueOf = (row) => (row.price == null ? -1 : row.price);
@@ -1374,7 +1375,6 @@
         if (b.price == null) return -1;
         return a.price - b.price || b.sellable - a.sellable;
       },
-      copies_desc: (a, b) => b.qty - a.qty || valueOf(b) - valueOf(a),
       rarity_desc: (a, b) => rarityRank(b.rarity) - rarityRank(a.rarity) || valueOf(b) - valueOf(a),
       name_asc: (a, b) => a.name.localeCompare(b.name, 'fr'),
       change_desc: (a, b) => changeOf(b) - changeOf(a) || valueOf(b) - valueOf(a),
@@ -2992,6 +2992,10 @@
                  <input type="checkbox" data-sell-only-sellable ${view.onlySellable ? 'checked' : ''}>
                  <span>Seulement les cartes vendables</span>
                </label>
+               <label class="kp-check">
+                 <input type="checkbox" data-sell-only-dupes ${view.onlyDupes ? 'checked' : ''}>
+                 <span>Doublons <small>plus d'un exemplaire</small></span>
+               </label>
              </div>`
           : ''
       }`;
@@ -3059,21 +3063,30 @@
     const bid = state.buyOrders[row.id];
     const slotsLeft = listingSlots().remaining;
     const blocked = !locked && !checked && selectedCopies() + 1 > slotsLeft;
+    const isDupe = row.qty > 1;
 
     return `
-      <div class="kp-sell-row ${checked ? 'is-selected' : ''} ${blocked ? 'is-disabled' : ''} ${locked ? 'is-locked' : ''}"
+      <div class="kp-sell-row ${checked ? 'is-selected' : ''} ${blocked ? 'is-disabled' : ''} ${
+        locked ? 'is-locked' : ''
+      } ${isDupe && !locked ? 'is-dupe' : ''}"
            data-act="sell-detail" data-id="${esc(row.id)}" title="${
              locked ? esc(row.block.reason) : `Ouvrir la fiche de ${esc(row.name)}`
            }">
         <input type="checkbox" data-sel="${esc(row.id)}" ${checked ? 'checked' : ''} ${
           blocked || locked ? 'disabled' : ''
         } aria-label="Sélectionner ${esc(row.name)}" ${locked ? 'title="Carte non vendable"' : ''}>
-        <img src="${esc(row.image)}" alt="" loading="lazy">
+        <div class="kp-sell-thumb">
+          <img src="${esc(row.image)}" alt="" loading="lazy">
+          ${isDupe ? `<span class="kp-dupe-count" title="${fmt(row.qty)} exemplaires">×${fmt(row.qty)}</span>` : ''}
+        </div>
         <div class="kp-sell-main">
-          <div class="kp-row-name">${esc(row.name)}</div>
+          <div class="kp-row-name">
+            ${esc(row.name)}
+            ${isDupe ? '<span class="kp-dupe-tag">doublon</span>' : ''}
+          </div>
           <div class="kp-row-meta">
             <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
-            ×${fmt(row.qty)}${
+            ${fmt(row.qty)} exemplaire${row.qty > 1 ? 's' : ''}${
               row.sellable > 0
                 ? ` · ${fmt(row.sellable)} vendable${row.sellable > 1 ? 's' : ''}`
                 : ` · ${fmt(row.qty)} bloquée${row.qty > 1 ? 's' : ''}`
@@ -3206,7 +3219,13 @@
       ${sellFilters(sellSeriesOptions())}
       ${sellRarityChips(counts)}
       <div class="kp-hint">
-        ${fmt(all.length)} carte(s) · ${fmt(sellableCopies)} exemplaire(s) vendable(s) · ${fmt(priced.length)} valorisée(s)
+        ${
+          rows.length === all.length
+            ? `${fmt(all.length)} carte(s)`
+            : `${fmt(rows.length)} / ${fmt(all.length)} carte(s) affichée(s)`
+        }
+        · ${fmt(all.filter((row) => row.qty > 1).length)} doublon(s)
+        · ${fmt(sellableCopies)} exemplaire(s) vendable(s) · ${fmt(priced.length)} valorisée(s)
         · ${slots.remaining} place(s) d'annonce libre(s)
         ${state.marketLoading ? ' <span class="kp-spinner"></span>' : ''}
         ${view.lastRefresh ? ` · actualisé ${nowTime(view.lastRefresh)}` : ''}
@@ -4513,6 +4532,41 @@
     };
   }
 
+  // Cartes mémorisées dans « Meilleures trouvailles » (Épique et au-dessus).
+  const BEST_MIN_RARITY = 'E';
+  const BEST_KEEP = 80;
+
+  /**
+   * Mémorise les belles cartes dans un pool qui ne dépend plus des 60 dernières.
+   * Avant, `best` était recalculé à partir de `a.cards` (limité à 60) : après une
+   * longue session, une Mythique tirée plus tôt disparaissait de l'affichage.
+   */
+  function trackBestCards(pulled) {
+    const a = state.autoOpen;
+    if (!Array.isArray(a.bestAll)) a.bestAll = [];
+    const minRank = RARITY_ORDER.indexOf(BEST_MIN_RARITY);
+    for (const card of pulled) {
+      if (RARITY_ORDER.indexOf(card.rarity) < minRank) continue;
+      const key = `${card.id}:${card.rarity}`;
+      const known = a.bestAll.find((entry) => `${entry.id}:${entry.rarity}` === key);
+      if (known) known.qty = (known.qty ?? 1) + 1;
+      else a.bestAll.push({ ...card, qty: 1, at: Date.now() });
+    }
+    // On garde les plus rares si le pool devient trop gros.
+    if (a.bestAll.length > BEST_KEEP) {
+      a.bestAll = [...a.bestAll]
+        .sort((x, y) => RARITY_ORDER.indexOf(y.rarity) - RARITY_ORDER.indexOf(x.rarity))
+        .slice(0, BEST_KEEP);
+    }
+    a.best = [...a.bestAll]
+      .sort(
+        (x, y) =>
+          RARITY_ORDER.indexOf(y.rarity) - RARITY_ORDER.indexOf(x.rarity) ||
+          (y.at ?? 0) - (x.at ?? 0)
+      )
+      .slice(0, 8);
+  }
+
   function recordAutoResults(pack, results, cost, requested) {
     const a = state.autoOpen;
     a.opened += results.length || requested;
@@ -4532,9 +4586,7 @@
 
     if (pulled.length) {
       a.cards = [...pulled.slice().reverse(), ...a.cards].slice(0, 60);
-      a.best = [...a.cards]
-        .sort((x, y) => RARITY_ORDER.indexOf(y.rarity) - RARITY_ORDER.indexOf(x.rarity))
-        .slice(0, 8);
+      trackBestCards(pulled);
     }
 
     if (state.settings.autoStopRare && pulled.length) {
@@ -4696,6 +4748,7 @@
       cardCount: Number(saved?.cardCount) || 0,
       cards: [],
       best: [],
+      bestAll: [],
       counts: {},
       golden: 0,
       godPacks: 0,
@@ -5159,17 +5212,24 @@
 
         ${
           a.best.length
-            ? `<div class="kp-explain-sub">Meilleures trouvailles</div>
+            ? `<div class="kp-explain-sub">Meilleures trouvailles <span class="kp-explain-count">${
+                a.bestAll?.length ?? a.best.length
+              } carte(s) Épique et +</span></div>
                <div class="kp-best-cards">
                  ${a.best
                    .map((card) => {
                      const info = rarityInfo(card.rarity);
+                     const top = RARITY_ORDER.indexOf(card.rarity) >= RARITY_ORDER.indexOf('L');
                      return `
-                   <div class="kp-best-card" style="--rc:${info.color}" data-act="open-card" data-id="${esc(
+                   <div class="kp-best-card ${top ? 'is-top' : ''}" style="--rc:${info.color}" data-act="open-card" data-id="${esc(
                        card.id
-                     )}" title="${esc(card.name)} · ${esc(info.label)}">
+                     )}" title="${esc(card.name)} · ${esc(info.label)}${
+                       (card.qty ?? 1) > 1 ? ` ×${card.qty}` : ''
+                     }">
                      <img src="${esc(imgSrc(card))}" alt="${esc(card.name)}" loading="lazy">
+                     ${(card.qty ?? 1) > 1 ? `<span class="kp-best-qty">×${fmt(card.qty)}</span>` : ''}
                      <b>${esc(info.label)}</b>
+                     <small>${esc(card.name)}</small>
                    </div>`;
                    })
                    .join('')}
@@ -6868,6 +6928,15 @@
     const sellOnlySellable = target.closest('[data-sell-only-sellable]');
     if (sellOnlySellable) {
       state.sellView.onlySellable = Boolean(sellOnlySellable.checked);
+      state.sellView.limit = 40;
+      render();
+      return;
+    }
+
+    const sellOnlyDupes = target.closest('[data-sell-only-dupes]');
+    if (sellOnlyDupes) {
+      state.sellView.onlyDupes = Boolean(sellOnlyDupes.checked);
+      state.sellView.limit = 40;
       render();
       return;
     }
@@ -7123,6 +7192,8 @@
       ensureAutoAlive,
       autoLog,
       loadAutoLog,
+      trackBestCards,
+      recordAutoResults,
       refreshAutoAccount,
       mergeUser,
       sellRows,
