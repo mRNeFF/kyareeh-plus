@@ -57,6 +57,23 @@
         { id: 31337, name: 'Héritage Test', rarity: 'H', series: 'Test', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b45628-2Kp9xR1mQ7aB.png' }
       ];
 
+      // Joueurs simulés pour l'onglet Stat global (données publiques).
+      const STAT_PLAYERS = [
+        { id: 'p-1', pseudo: 'Ratek', owned: 6528, mythics: 101, heritage: 4, boostersOpened: 1841, points: 69811, series: 204, achievements: 25, byRarity: { C: 1630, U: 1683, R: 1683, E: 1010, L: 421, M: 101, H: 4 } },
+        { id: 'p-2', pseudo: 'Pharysse', owned: 6364, mythics: 23, heritage: 0, boostersOpened: 1434, points: 48873, series: 157, achievements: 1, byRarity: { C: 1650, U: 1684, R: 1684, E: 1009, L: 314, M: 23 } },
+        { id: 'p-3', pseudo: 'Waldox', owned: 2875, mythics: 97, heritage: 2, boostersOpened: 603, points: 29655, series: 5, achievements: 0, byRarity: { C: 1200, U: 800, R: 700, E: 76, L: 0, M: 97, H: 2 } },
+        { id: 'p-4', pseudo: 'fayura', owned: 6159, mythics: 5, heritage: 1, boostersOpened: 980, points: 34451, series: 118, achievements: 3, byRarity: { C: 1600, U: 1700, R: 1700, E: 1153, L: 1, M: 5, H: 1 } },
+        { id: 'p-5', pseudo: 'Menkoy', owned: 1765, mythics: 71, heritage: 0, boostersOpened: 210, points: 19430, series: 3, achievements: 0, byRarity: { C: 800, U: 600, R: 290, E: 4, L: 0, M: 71 } },
+        { id: 'p-6', pseudo: 'SHADOW-2', owned: 5794, mythics: 72, heritage: 3, boostersOpened: 1203, points: 44292, series: 81, achievements: 9, byRarity: { C: 1700, U: 1600, R: 1500, E: 900, L: 22, M: 72, H: 3 } }
+      ];
+      const STAT_KEYS = ['mythics', 'owned', 'heritage', 'boostersOpened', 'points', 'series', 'achievements'];
+      const statCollectionIds = (player) => {
+        const ids = [];
+        const pool = [127691, 999001, 10668, 282077, 21122, 999002, 45627, 45628, 31337];
+        for (let i = 0; i < Math.min(player.owned, 40); i += 1) ids.push(String(pool[i % pool.length]));
+        return ids;
+      };
+
       // Revente bloquée 48 h après un achat : même vocabulaire que le site.
       const RESALE_UNTIL = new Date(Date.now() + 30 * 3600e3).toISOString();
 
@@ -179,12 +196,32 @@
         }
         if (url.includes('/api/trades/owned/')) {
           const id = decodeURIComponent(url.split('/api/trades/owned/')[1].split(/[?#]/)[0]);
+          const stat = STAT_PLAYERS.find((player) => player.id === id);
+          if (stat) return json(statCollectionIds(stat));
           if (id === 'amo-uuid') return json([31337, 127691]);
           if (id === 'amoulle-uuid') return json([31337, 127691, 999001, 45627, 45628, 127691]);
           return json([127691, 999001, 10668, 282077, 21122, 999002, 127691]);
         }
         if (url.includes('/api/users/')) {
           const id = decodeURIComponent(url.split('/api/users/')[1].split(/[?#]/)[0]);
+          const stat = STAT_PLAYERS.find((player) => player.id === id);
+          if (stat) {
+            return json({
+              id: stat.id,
+              pseudo: stat.pseudo,
+              avatar: null,
+              owned: stat.owned,
+              mythics: stat.mythics,
+              heritage: stat.heritage,
+              boostersOpened: stat.boostersOpened,
+              points: stat.points,
+              series: stat.series,
+              achievements: stat.achievements,
+              byRarity: stat.byRarity,
+              catalogSize: 6736,
+              best: []
+            });
+          }
           const seen = {
             'amo-uuid': { id: 'amo-uuid', pseudo: 'Amo', avatar: null, rank: { id: 'rookie', label: 'Rookie' }, owned: 12, mythics: 0, points: 40, best: [] },
             'amoulle-uuid': { id: 'amoulle-uuid', pseudo: 'Amoulle', avatar: null, rank: { id: 'expert', label: 'Expert' }, owned: 5499, mythics: 12, points: 9819, best: [] }
@@ -284,23 +321,27 @@
           return json([]);
         }
         if (url.includes('/api/leaderboard/ladder')) {
+          const by = new URL(url, location.href).searchParams.get('by') || 'collection';
+          const key = STAT_KEYS.includes(by) ? by : 'owned';
+          const sorted = [...STAT_PLAYERS].sort((a, b) => (b[key] || 0) - (a[key] || 0));
+          const rows = sorted.map((player, index) => ({
+            pos: index + 1,
+            id: player.id,
+            pseudo: player.pseudo,
+            avatar: null,
+            owned: player.owned,
+            mythics: player.mythics,
+            points: player.points,
+            series: player.series,
+            achievements: player.achievements
+          }));
           return json({
-            by: 'collection',
-            rows: [],
+            by,
+            rows,
+            found: rows,
             me: null,
-            found: [
-              {
-                pos: 11704,
-                id: '62937049-55d0-4534-8b0f-7e4de3cdc278',
-                pseudo: 'neffeeh',
-                avatar: null,
-                rank: { id: 'expert', label: 'Expert' },
-                owned: 1901,
-                mythics: 6,
-                points: 9819
-              }
-            ],
-            total: 90129
+            total: by === 'mythics' ? 52022 : 105742,
+            catalogSize: 6736
           });
         }
         if (/\/api\/users\/[^/]+$/.test(url)) {
@@ -408,15 +449,6 @@
       };
     </script>
 
-    <script>
-      // ?nohook=1 simule un CSP qui bloque le script injecté : sert à tester le
-      // repli `wrappedJSObject` du content script (API Firefox simulée).
-      if (new URLSearchParams(location.search).has('nohook')) {
-        window.__kyareehDisablePageHook = true;
-        window.wrappedJSObject = window;
-        window.exportFunction = (fn) => fn;
-      }
-    </script>
     <script src="/content/ui.js"></script>
     <script>
       setTimeout(() => {

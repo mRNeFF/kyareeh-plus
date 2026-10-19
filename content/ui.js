@@ -23,12 +23,12 @@
   const CHARS_KEY = 'kyaraplus.characters.v1';
   const PACK_AVG_KEY = 'kyareeh.packavg.v1';
   const PACK_POOLS_KEY = 'kyareeh.packpools.v1';
-  const STATS_KEY = 'kyareeh.stats.v1';
-  // Comptes suivis : plafond volontaire pour éviter des dizaines de requêtes.
-  const STATS_MAX_ACCOUNTS = 25;
-  // Une collection d'un autre compte est relue au bout de 12 h (ou à la demande).
-  const STATS_CACHE_MS = 12 * 3600 * 1000;
-  const STATS_RECENT_KEEP = 200;
+  const STATS_KEY = 'kyareeh.statglobal.v1';
+  // Une analyse globale est relue au bout de 12 h (ou à la demande).
+  const STAT_CACHE_MS = 12 * 3600 * 1000;
+  const STAT_DEFAULT_DEPTH = 50;
+  // Pause entre deux lectures de profil : évite de déclencher l'anti-abus du site.
+  const STAT_REQUEST_GAP = 350;
 
   const DEFAULT_SETTINGS = {
     ttlH: 6,
@@ -261,23 +261,18 @@
       progress: null,
       view: 'self'
     },
-    // Onglet Stat : agrégats persistés + état d'interface.
+    // Onglet Stat : analyse globale persistée + état d'interface.
     stats: {
       data: statEmptyData(),
       ready: false,
       loading: false,
       error: null,
       syncing: false,
-      syncDone: 0,
-      syncTotal: 0,
-      query: '',
-      searching: false,
-      results: null,
-      searchError: null,
-      rarity: 'all',
-      ranking: 'M',
-      metric: 'unique',
-      openingsView: 'packs'
+      progress: '',
+      done: 0,
+      total: 0,
+      runId: 0,
+      rarity: 'all'
     }
   };
 
@@ -663,9 +658,6 @@
     const method = options.method || 'GET';
     const started = performance.now();
     const headers = { accept: 'application/json', ...readAuthHeaders() };
-    // Marqueur lu par le script de page : évite de compter deux fois une
-    // ouverture faite par l'auto-open de l'extension.
-    if (options.marker) headers['x-kyareeh'] = '1';
     if (method !== 'GET') Object.assign(headers, readPassHeader());
     if (options.body != null) headers['content-type'] = 'application/json';
 
@@ -789,11 +781,10 @@
       state.prices = cached.prices && typeof cached.prices === 'object' ? cached.prices : cached;
     }
     await mount();
-    installPageHook();
-    installOpeningBridge();
     await loadData();
     await loadAutoLog();
-    await loadStats();
+    // L'onglet Stat est global : rien à collecter ici, il charge son analyse
+    // à la première ouverture (ou après 12 h).
     startAutoRefreshLoop();
     installAntiAfk();
     startAutoWatchdog();
@@ -2738,16 +2729,6 @@
 
     const progressPct = state.priceRun.total ? Math.round((state.priceRun.done / state.priceRun.total) * 100) : 0;
 
-    // Statistiques : le compte connecté est la seule source exacte de quantités.
-    if (!state.stats.ready && !state.stats.loading) loadStats();
-    statsEnsureSelf();
-    const myOpenings = statsData().openings.byAccount[String(state.user.id)] ?? null;
-    const openingTotal = myOpenings?.total ?? 0;
-    const openingPacks = Object.entries(myOpenings?.byPack ?? {})
-      .map(([packId, entry]) => ({ id: packId, name: entry?.name ?? statsPackLabel(packId), count: entry?.count ?? 0 }))
-      .sort((a, b) => b.count - a.count);
-    const openingShown = openingPacks.slice(0, 4);
-
     const booster = toNum(state.user.freePacks) ?? 0;
     const boosterMax = toNum(state.user.freePacksMax) ?? toNum(state.config?.freePacks?.max) ?? null;
     const bonus = toNum(state.user.bonusPacks) ?? 0;
@@ -2800,35 +2781,6 @@
           <span class="kp-chip"><em>Recyclage doublons</em> ◆ ${fmt(stats.dupRecycle)}</span>
           <span class="kp-chip"><em>Pseudo</em> ${esc(state.user.pseudo ?? '—')}</span>
         </div>
-      </div>
-
-      <div class="kp-section">
-        <div class="kp-section-title">Ouvertures de boosters
-          <span class="kp-link" data-act="tab" data-tab="stat">Stat →</span>
-        </div>
-        ${
-          openingTotal
-            ? `<div class="kp-grid">
-                 <div class="kp-card-stat"><span>Total ouvert</span><b>${fmt(openingTotal)}</b><small>comptabilisé par l’extension</small></div>
-                 <div class="kp-card-stat"><span>Booster favori</span><b>${esc(openingShown[0]?.name ?? '—')}</b><small>${
-                   openingShown[0] ? `${fmt(openingShown[0].count)} ouverture(s)` : '—'
-                 }</small></div>
-               </div>
-               <div class="kp-chips" style="margin-top:8px">
-                 ${openingShown
-                   .map(
-                     (pack) =>
-                       `<span class="kp-chip"><em>${esc(pack.name)}</em> ${fmt(pack.count)}</span>`
-                   )
-                   .join('')}
-                 ${
-                   openingPacks.length > openingShown.length
-                     ? `<span class="kp-chip">+${fmt(openingPacks.length - openingShown.length)} autre(s)</span>`
-                     : ''
-                 }
-               </div>`
-            : `<div class="kp-hint">Aucune ouverture comptabilisée pour ce compte. Le suivi démarre avec cette version ; les boosters possédés ne sont pas comptés comme ouverts.</div>`
-        }
       </div>
 
       ${
@@ -2894,536 +2846,142 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* Onglet Stat                                                         */
+  /* Statistiques globales : calculs purs                                */
   /* ------------------------------------------------------------------ */
 
-  function statsDate(ts) {
-    if (!(Number(ts) > 0)) return 'jamais';
-    try {
-      return new Date(Number(ts)).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-    } catch {
-      return '—';
-    }
-  }
-
-  function statsRarityCodes(summary) {
-    const codes = new Set(RARITY_ORDER);
-    for (const code of Object.keys(summary?.byRarity ?? {})) codes.add(code);
-    for (const code of Object.keys(statsData().openings.byRarity ?? {})) codes.add(code);
-    return [...codes].sort((a, b) => {
-      const ra = RARITY_ORDER.indexOf(a);
-      const rb = RARITY_ORDER.indexOf(b);
-      if (ra !== rb) return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb);
-      return a.localeCompare(b, 'fr');
-    });
-  }
-
-  function statsShareBar(label, value, max, color) {
-    return `
-      <div class="kp-bar-row">
-        <span title="${esc(label)}">${esc(label)}</span>
-        <div class="kp-bar"><i style="width:${Math.max(2, Math.round((value / Math.max(1, max)) * 100))}%;--kp-bar-color:${color}"></i></div>
-        <b>${fmt(value)}</b>
-      </div>`;
-  }
-
-  function statsAccountsSection(derived) {
-    const data = statsData();
-    const results = state.stats.results;
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Comptes suivis <span>${fmt(derived.total)} / ${fmt(STATS_MAX_ACCOUNTS)}</span></div>
-        <div class="kp-stat-search">
-          <input class="kp-input" type="search" data-role="stat-account-search" placeholder="Ajouter un compte par pseudo…"
-            value="${esc(state.stats.query)}" autocomplete="off" spellcheck="false">
-          <button class="kp-btn is-primary" type="button" data-act="stat-search" ${
-            state.stats.searching ? 'disabled' : ''
-          }>${state.stats.searching ? '…' : 'Chercher'}</button>
-        </div>
-        ${state.stats.searchError ? `<div class="kp-hint is-bad">${esc(state.stats.searchError)}</div>` : ''}
-        ${
-          Array.isArray(results)
-            ? results.length
-              ? `<div class="kp-stat-results">${results
-                  .map(
-                    (hit) => `
-                  <div class="kp-stat-result">
-                    <img src="${esc(hit.avatar || '/brand/favicon/icon-192.png')}" alt="" loading="lazy">
-                    <div>
-                      <b>${esc(hit.pseudo)}</b>
-                      <small>${hit.owned != null ? `${fmt(hit.owned)} carte(s)` : 'collection inconnue'}${
-                        hit.mythics != null ? ` · ${fmt(hit.mythics)} mythique(s)` : ''
-                      }</small>
-                    </div>
-                    <button class="kp-btn" type="button" data-act="stat-add" data-id="${esc(hit.id)}" ${
-                      data.accounts[String(hit.id)] ? 'disabled' : ''
-                    }>${data.accounts[String(hit.id)] ? 'Suivi' : 'Ajouter'}</button>
-                  </div>`
-                  )
-                  .join('')}</div>`
-              : '<div class="kp-hint">Aucun joueur trouvé.</div>'
-            : ''
-        }
-
-        ${
-          derived.rows.length
-            ? `<div class="kp-stat-accounts">${derived.rows
-                .map((account) => {
-                  const status = account.self
-                    ? 'ce compte'
-                    : account.error
-                      ? account.error
-                      : account.lastSyncAt
-                        ? `synchro ${statsDate(account.lastSyncAt)}`
-                        : 'pas encore lu';
-                  const cards = account.collection ? `${fmt(account.collection.unique)} carte(s)` : 'collection inconnue';
-                  return `
-                <div class="kp-stat-account ${account.error ? 'is-error' : ''}">
-                  <img src="${esc(account.avatar || '/brand/favicon/icon-192.png')}" alt="" loading="lazy">
-                  <div class="kp-stat-account-main">
-                    <b>${esc(account.pseudo)}${account.self ? ' <span class="kp-self-tag">toi</span>' : ''}</b>
-                    <small>${esc(cards)} · ${esc(status)}</small>
-                  </div>
-                  ${
-                    account.self
-                      ? ''
-                      : `<button class="kp-icon-btn" type="button" data-act="stat-remove" data-id="${esc(
-                          account.id
-                        )}" title="Retirer ce compte">✕</button>`
-                  }
-                </div>`;
-                })
-                .join('')}</div>`
-            : '<div class="kp-hint">Aucun compte suivi pour l’instant.</div>'
-        }
-      </div>`;
-  }
-
-  function statsOpeningsSection() {
-    const data = statsData();
-    const rank = statOpeningsRank(data.openings.byPack);
-    const byAccount = statOpeningsByAccount(data.openings.byAccount);
-    const total = data.openings.total;
-    const top = rank.filter((row) => row.rank === 1);
-    const max = Math.max(1, ...rank.map((row) => row.value));
-
-    if (!total) {
-      return `
-        <div class="kp-section">
-          <div class="kp-section-title">Boosters ouverts</div>
-          <div class="kp-empty"><b>Aucune ouverture comptabilisée</b>
-            Le suivi démarre avec cette version : les ouvertures antérieures ne sont pas récupérables.
-            Les boosters <em>possédés</em> ne sont pas comptés comme ouverts.
-          </div>
-        </div>`;
-    }
-
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Boosters ouverts
-          <span>comptabilisés depuis le ${statsDate(data.since)}</span>
-        </div>
-        <div class="kp-grid">
-          <div class="kp-card-stat"><span>Ouvertures</span><b>${fmt(total)}</b><small>tous comptes suivis</small></div>
-          <div class="kp-card-stat"><span>Booster le plus ouvert</span><b>${esc(top[0]?.name ?? '—')}</b><small>${
-            top.length > 1
-              ? `ex æquo : ${top.map((row) => `${esc(row.name)} (${fmt(row.value)})`).join(', ')}`
-              : top[0]
-                ? `${fmt(top[0].value)} ouverture(s)`
-                : '—'
-          }</small></div>
-        </div>
-
-        <div class="kp-seg" style="margin-top:8px">
-          <button class="kp-seg-btn ${state.stats.openingsView === 'packs' ? 'is-active' : ''}" type="button" data-act="stat-openings-view" data-view="packs">Par booster</button>
-          <button class="kp-seg-btn ${state.stats.openingsView === 'accounts' ? 'is-active' : ''}" type="button" data-act="stat-openings-view" data-view="accounts">Par compte</button>
-        </div>
-
-        ${
-          state.stats.openingsView === 'packs'
-            ? `<div class="kp-bars">${rank
-                .map((row) => statsShareBar(`${row.rank}. ${row.name}`, row.value, max, '#60a5fa'))
-                .join('')}</div>`
-            : `<div class="kp-stat-accounts">${byAccount
-                .map((row) => {
-                  const packs = Object.entries(row.byPack ?? {})
-                    .map(([packId, entry]) => ({ id: packId, name: entry?.name ?? statsPackLabel(packId), count: entry?.count ?? 0 }))
-                    .sort((a, b) => b.count - a.count);
-                  const shown = packs.slice(0, 5);
-                  return `
-                <div class="kp-stat-account is-column">
-                  <div class="kp-stat-account-main">
-                    <b>#${row.rank} · ${esc(row.name)}</b>
-                    <small>${fmt(row.value)} booster(s) ouvert(s)</small>
-                  </div>
-                  <div class="kp-stat-sub">
-                    ${shown.map((pack) => `<span class="kp-chip"><em>${esc(pack.name)}</em> ${fmt(pack.count)}</span>`).join('')}
-                    ${packs.length > shown.length ? `<span class="kp-chip">+${fmt(packs.length - shown.length)} autre(s)</span>` : ''}
-                  </div>
-                </div>`;
-                })
-                .join('')}</div>`
-        }
-      </div>`;
-  }
-
-  function statsChakraSection(derived) {
-    const rows = derived.rows.filter((account) => account.chakra);
-    const unknown = derived.rows.length - rows.length;
-    const total = rows.reduce((sum, account) => sum + (Number(account.chakra.value) || 0), 0);
-
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Chakra <span>cumul des soldes connus</span></div>
-        ${
-          rows.length
-            ? `<div class="kp-bars">${[...rows]
-                .sort((a, b) => (b.chakra.value || 0) - (a.chakra.value || 0))
-                .map((account) => {
-                  const value = Number(account.chakra.value) || 0;
-                  const max = Math.max(1, ...rows.map((row) => Number(row.chakra.value) || 0));
-                  return `
-                    <div class="kp-bar-row">
-                      <span title="${esc(account.pseudo)}">${esc(account.pseudo)}</span>
-                      <div class="kp-bar"><i style="width:${Math.max(2, Math.round((value / max) * 100))}%;--kp-bar-color:#facc15"></i></div>
-                      <b>◆ ${fmt(value)}</b>
-                    </div>`;
-                })
-                .join('')}</div>
-              <div class="kp-hint">Total connu : <b>◆ ${fmt(total)}</b> · valeurs relevées lors de la dernière synchro.</div>`
-            : '<div class="kp-empty"><b>Aucun solde connu</b>Le chakra est une donnée privée : seul un compte connecté dans ce navigateur peut être relevé.</div>'
-        }
-        ${
-          unknown
-            ? `<div class="kp-hint">${fmt(unknown)} compte(s) sans solde connu : non inclus dans le total.</div>`
-            : ''
-        }
-      </div>`;
-  }
-
-  function statsRankingSection(derived) {
-    const rarity = state.stats.ranking;
-    const metric = state.stats.metric;
-    const rows = statRankAccounts(derived.rows, rarity, metric);
-    const info = rarityInfo(rarity);
-    const missing = derived.rows.filter((account) => !account.collection?.qtyKnown && account.collection).length;
-    const max = Math.max(1, ...rows.map((row) => row.value));
-
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Classement ${esc(info.label)} <span>parmi les comptes suivis</span></div>
-        <div class="kp-chips">
-          ${['M', 'H']
-            .map(
-              (code) =>
-                `<button class="kp-chip is-btn ${rarity === code ? 'is-active' : ''}" type="button" data-act="stat-ranking" data-ranking="${code}">${esc(
-                  rarityInfo(code).label
-                )}</button>`
-            )
-            .join('')}
-          <span class="kp-chip-sep"></span>
-          ${[
-            ['unique', 'Cartes différentes'],
-            ['qty', 'Exemplaires']
-          ]
-            .map(
-              ([key, label]) =>
-                `<button class="kp-chip is-btn ${metric === key ? 'is-active' : ''}" type="button" data-act="stat-metric" data-metric="${key}">${esc(
-                  label
-                )}</button>`
-            )
-            .join('')}
-        </div>
-        ${
-          rows.length
-            ? `<div class="kp-stat-ranks">${rows
-                .map(
-                  (row) => `
-                <div class="kp-stat-rank ${row.self ? 'is-self' : ''}">
-                  <b class="kp-rank">#${row.rank}</b>
-                  <span class="kp-stat-rank-name">${esc(row.pseudo)}</span>
-                  <div class="kp-bar"><i style="width:${Math.max(2, Math.round((row.value / max) * 100))}%;--kp-bar-color:${
-                    info.color
-                  }"></i></div>
-                  <b>${fmt(row.value)}</b>
-                  <small>${metric === 'qty' ? `${fmt(row.unique)} diff.` : row.qty != null ? `${fmt(row.qty)} ex.` : 'ex. inconnus'}</small>
-                </div>`
-                )
-                .join('')}</div>`
-            : metric === 'qty'
-              ? `<div class="kp-empty"><b>Quantités inconnues</b>Le site ne fournit pas le nombre d’exemplaires des autres comptes : ce classement ne peut pas être établi pour ${esc(
-                  info.label
-                )}. Le classement par cartes différentes reste disponible.</div>`
-              : `<div class="kp-empty"><b>Aucune carte ${esc(info.label)}</b>Aucun compte suivi n’en possède, ou les collections ne sont pas accessibles.</div>`
-        }
-        ${
-          metric === 'qty' && missing
-            ? `<div class="kp-hint">${fmt(missing)} compte(s) sans quantités exactes : ils ne figurent pas dans ce classement par exemplaires.</div>`
-            : ''
-        }
-        <div class="kp-hint">Les exemplaires du compte connecté sont exacts ; pour les autres comptes, seul le nombre de cartes différentes est garanti.</div>
-      </div>`;
-  }
-
-  function statsCardsSection(derived) {
-    const data = statsData();
-    const summary = derived.summary;
-    const codes = statsRarityCodes(summary);
-    const rarity = state.stats.rarity;
-    const catalog = statCatalogTotals([...state.characters.values()]);
-    const ownedIds = new Set(Object.keys(derived.owners));
-    const missing = statMissingTotals([...state.characters.values()], ownedIds, rarity);
-
-    const pick = (code) => {
-      const entry = summary.byRarity?.[code] ?? { unique: 0, qty: 0 };
-      const cat = catalog.byRarity?.[code] ?? 0;
-      const miss = missing.byRarity?.[code] ?? 0;
-      return { ...entry, catalog: cat, missing: miss };
-    };
-
-    const rows = rarity === 'all' ? Object.entries(summary.byRarity ?? {}) : [[rarity, summary.byRarity?.[rarity] ?? { unique: 0, qty: 0 }]];
-    const max = Math.max(1, ...rows.map(([, entry]) => entry.unique));
-    const selected = rarity === 'all'
-      ? { unique: summary.unique, qty: summary.qty, catalog: catalog.total, missing: missing.total }
-      : pick(rarity);
-
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Cartes détenues <span>${fmt(derived.total)} compte(s) suivi(s)</span></div>
-        <div class="kp-chips is-wrap">
-          <button class="kp-chip is-btn ${rarity === 'all' ? 'is-active' : ''}" type="button" data-act="stat-rarity" data-rarity="all">Toutes</button>
-          ${codes
-            .map(
-              (code) =>
-                `<button class="kp-chip is-btn ${rarity === code ? 'is-active' : ''}" type="button" data-act="stat-rarity" data-rarity="${esc(
-                  code
-                )}" style="--kp-chip-color:${rarityInfo(code).color}">${esc(rarityInfo(code).label)}</button>`
-            )
-            .join('')}
-        </div>
-
-        <div class="kp-grid" style="margin-top:8px">
-          <div class="kp-card-stat"><span>Exemplaires</span><b>${summary.qtyKnown ? '' : '≥ '}${fmt(selected.qty)}</b><small>${
-            rarity === 'all' ? 'toutes raretés' : rarityInfo(rarity).label
-          }</small></div>
-          <div class="kp-card-stat"><span>Cartes différentes</span><b>${fmt(selected.unique)}</b><small>dédoublonnées</small></div>
-          <div class="kp-card-stat"><span>Manquantes</span><b>${fmt(selected.missing)}</b><small>sur ${fmt(selected.catalog)} au catalogue</small></div>
-        </div>
-
-        ${
-          summary.qtyKnown
-            ? ''
-            : '<div class="kp-hint">Les quantités d’autres comptes ne sont pas fournies par le site : le total d’exemplaires est un minimum.</div>'
-        }
-
-        <div class="kp-bars" style="margin-top:8px">
-          ${rows
-            .sort((a, b) => b[1].unique - a[1].unique)
-            .map(([code, entry]) => statsShareBar(rarityInfo(code).label, entry.unique, max, rarityInfo(code).color))
-            .join('')}
-        </div>
-        <div class="kp-hint">Une carte détenue par plusieurs comptes n’est comptée qu’une fois dans « différentes » ; les exemplaires multiples sont comptés dans « exemplaires » quand le site les fournit.</div>
-      </div>`;
-  }
-
-  function statsQualitySection(derived) {
-    const accounts = derived.rows;
-    const failed = accounts.filter((account) => account.error);
-    const noCollection = accounts.filter((account) => !account.collection && !account.error);
-    const partial = accounts.filter((account) => account.collection && !account.collection.qtyKnown);
-    const data = statsData();
-
-    return `
-      <div class="kp-section">
-        <div class="kp-section-title">Qualité des données</div>
-        <div class="kp-stat-facts">
-          <span><em>Journal d’ouvertures</em> depuis le ${statsDate(data.since)} (${fmt(data.recent.length)} évènement(s) récents conservés)</span>
-          <span><em>Collections lues</em> ${fmt(accounts.filter((account) => account.collection).length)} / ${fmt(accounts.length)}</span>
-          ${partial.length ? `<span><em>Quantités partielles</em> ${fmt(partial.length)} compte(s)</span>` : ''}
-          ${failed.length ? `<span class="is-bad"><em>Échecs</em> ${failed.map((account) => `${esc(account.pseudo)} (${esc(account.error)})`).join(' · ')}</span>` : ''}
-          ${noCollection.length ? `<span><em>Sans collection</em> ${noCollection.map((account) => esc(account.pseudo)).join(', ')}</span>` : ''}
-        </div>
-        <div class="kp-hint">Périmètre : uniquement les comptes suivis. Ces chiffres ne représentent pas l’ensemble des joueurs de Kyara.</div>
-      </div>`;
-  }
-
-  function viewStat() {
-    if (!state.user) return state.error ? errorHTML() : loginHTML();
-    if (!state.stats.ready && !state.stats.loading) loadStats();
-    if (!state.packs && !state.packsLoading) loadPacks();
-
-    const derived = statsDerived();
-    const data = statsData();
-    const derivedOpening = data.openings.byAccount[String(state.user.id)]?.total ?? 0;
-
-    return `
-      <div class="kp-stat-head">
-        <div>
-          <b>Statistiques</b>
-          <small>${fmt(derived.total)} compte(s) suivi(s) · journal depuis le ${statsDate(data.since)}</small>
-        </div>
-        <button class="kp-btn" type="button" data-act="stat-refresh" ${state.stats.syncing ? 'disabled' : ''}>${
-          state.stats.syncing ? 'Synchro…' : 'Actualiser'
-        }</button>
-      </div>
-      <div class="kp-hint" data-stat-progress></div>
-
-      <div class="kp-grid">
-        <div class="kp-card-stat"><span>Boosters ouverts</span><b>${fmt(data.openings.total)}</b><small>comptabilisés</small></div>
-        <div class="kp-card-stat"><span>Cartes</span><b>${summaryQty(derived)}</b><small>${fmt(derived.summary.unique)} différentes</small></div>
-        <div class="kp-card-stat"><span>Chakra connu</span><b>◆ ${fmt(
-          derived.rows.reduce((sum, account) => sum + (account.chakra ? Number(account.chakra.value) || 0 : 0), 0)
-        )}</b><small>${fmt(derived.rows.filter((a) => a.chakra).length)} solde(s)</small></div>
-        <div class="kp-card-stat"><span>Ce compte</span><b>${fmt(derivedOpening)}</b><small>booster(s) ouvert(s)</small></div>
-      </div>
-
-      ${statsOpeningsSection()}
-      ${statsAccountsSection(derived)}
-      ${statsChakraSection(derived)}
-      ${statsRankingSection(derived)}
-      ${statsCardsSection(derived)}
-      ${statsQualitySection(derived)}
-    `;
-  }
-
-  function summaryQty(derived) {
-    return `${derived.summary.qtyKnown ? '' : '≥ '}${fmt(derived.summary.qty)}`;
-  }
-
-  /* ------------------------------------------------------------------ */
-  /* Statistiques : calculs purs                                       */
-  /* ------------------------------------------------------------------ */
-  /* STATS:BEGIN — bloc autonome, extrait par test/verify-stats.mjs.
-   * Aucune fonction ici ne touche au DOM, au réseau ou au stockage :
-   * les trois onglets (Stat, Vente, Compte) partagent donc exactement
-   * les mêmes règles de calcul. */
+  /* GLOBALSTATS:BEGIN — bloc autonome, extrait par test/verify-statglobal.mjs.
+   * Aucune fonction ici ne touche au DOM, au réseau ou au stockage.
+   * Elles travaillent sur les classements publics du site et sur les profils
+   * publics qu'ils contiennent : jamais sur « mon » compte. */
 
   function statRarityOf(value) {
     const code = String(value ?? '').trim().toUpperCase();
     return code || 'C';
   }
 
-  /** Données de statistiques vides (premier lancement). */
+  /** Structure vide (première analyse). */
   function statEmptyData() {
     return {
       version: 1,
-      since: Date.now(),
-      accounts: {},
-      openings: { total: 0, byPack: {}, byRarity: {}, byAccount: {} },
-      recent: []
+      at: 0,
+      depth: 50,
+      totals: { players: null, mythicOwners: null, catalogSize: null, listings: null, listingsAt: 0 },
+      profiles: {},
+      pools: {},
+      catalog: { total: 0, byRarity: {} },
+      collections: {},
+      failures: []
     };
   }
 
-  /**
-   * Revalide un objet relu du stockage : chaque champ est vérifié pour qu'une
-   * valeur corrompue ne puisse pas casser les calculs (et jamais inventée).
-   */
+  /** Revalide un objet relu du stockage : aucune valeur n'est inventée. */
   function statNormalizeData(raw) {
-    const data = raw && typeof raw === 'object' ? raw : {};
-    const out = {
-      version: 1,
-      since: Number(data.since) > 0 ? Number(data.since) : Date.now(),
-      accounts: {},
-      openings: { total: 0, byPack: {}, byRarity: {}, byAccount: {} },
-      recent: []
-    };
-
+    const source = raw && typeof raw === 'object' ? raw : {};
     const num = (value) => {
       const n = Number(value);
-      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+    };
+    const out = statEmptyData();
+    out.at = Number(source.at) > 0 ? Number(source.at) : 0;
+    const depth = num(source.depth);
+    out.depth = depth && depth >= 1 ? Math.min(100, depth) : 50;
+
+    const totals = source.totals && typeof source.totals === 'object' ? source.totals : {};
+    out.totals = {
+      players: num(totals.players),
+      mythicOwners: num(totals.mythicOwners),
+      catalogSize: num(totals.catalogSize),
+      listings: num(totals.listings),
+      listingsAt: Number(totals.listingsAt) > 0 ? Number(totals.listingsAt) : 0
     };
 
-    for (const [id, account] of Object.entries(data.accounts ?? {})) {
-      if (!account || typeof account !== 'object') continue;
+    for (const [id, profile] of Object.entries(source.profiles ?? {})) {
+      if (!profile || typeof profile !== 'object') continue;
       const key = String(id);
-      const collection = account.collection && typeof account.collection === 'object' ? account.collection : null;
-      const cards = {};
-      if (collection && collection.cards && typeof collection.cards === 'object') {
-        for (const [cardId, qty] of Object.entries(collection.cards)) {
-          const n = Number(qty);
-          if (Number.isFinite(n) && n > 0) cards[String(cardId)] = Math.floor(n);
-        }
-      }
-      const unique = Object.keys(cards).length;
-      let qty = 0;
-      for (const value of Object.values(cards)) qty += value;
-      out.accounts[key] = {
-        id: key,
-        pseudo: String(account.pseudo ?? 'Joueur'),
-        avatar: typeof account.avatar === 'string' ? account.avatar : null,
-        self: Boolean(account.self),
-        addedAt: Number(account.addedAt) > 0 ? Number(account.addedAt) : Date.now(),
-        lastSyncAt: Number(account.lastSyncAt) > 0 ? Number(account.lastSyncAt) : 0,
-        error: typeof account.error === 'string' && account.error ? account.error : null,
-        public: account.public && typeof account.public === 'object' ? { ...account.public } : null,
-        chakra:
-          account.chakra && Number.isFinite(Number(account.chakra.value))
-            ? { value: Number(account.chakra.value), at: Number(account.chakra.at) || 0 }
-            : null,
-        collection: collection
-          ? { at: Number(collection.at) || 0, cards, unique, qty, qtyKnown: collection.qtyKnown !== false }
-          : null
-      };
-    }
-
-    const openings = data.openings && typeof data.openings === 'object' ? data.openings : {};
-    out.openings.total = num(openings.total);
-    for (const [packId, entry] of Object.entries(openings.byPack ?? {})) {
-      const count = num(entry?.count);
-      if (!count) continue;
-      out.openings.byPack[String(packId)] = { name: String(entry?.name ?? `Booster #${packId}`), count };
-    }
-    for (const [code, count] of Object.entries(openings.byRarity ?? {})) {
-      const n = num(count);
-      if (n) out.openings.byRarity[statRarityOf(code)] = n;
-    }
-    for (const [accountId, entry] of Object.entries(openings.byAccount ?? {})) {
-      if (!entry || typeof entry !== 'object') continue;
-      const byPack = {};
-      for (const [packId, pack] of Object.entries(entry.byPack ?? {})) {
-        const count = num(pack?.count);
-        if (count) byPack[String(packId)] = { name: String(pack?.name ?? `Booster #${packId}`), count };
-      }
       const byRarity = {};
-      for (const [code, count] of Object.entries(entry.byRarity ?? {})) {
-        const n = num(count);
+      for (const [code, value] of Object.entries(profile.byRarity ?? {})) {
+        const n = num(value);
         if (n) byRarity[statRarityOf(code)] = n;
       }
-      out.openings.byAccount[String(accountId)] = {
-        pseudo: String(entry.pseudo ?? 'Joueur'),
-        total: num(entry.total),
-        byPack,
-        byRarity
+      out.profiles[key] = {
+        id: key,
+        pseudo: String(profile.pseudo ?? 'Joueur'),
+        avatar: typeof profile.avatar === 'string' ? profile.avatar : null,
+        owned: num(profile.owned),
+        mythics: num(profile.mythics),
+        heritage: num(profile.heritage),
+        boostersOpened: num(profile.boostersOpened),
+        points: num(profile.points),
+        series: num(profile.series),
+        achievements: num(profile.achievements),
+        byRarity,
+        at: Number(profile.at) > 0 ? Number(profile.at) : 0,
+        error: typeof profile.error === 'string' && profile.error ? profile.error : null
       };
     }
 
-    // Les totaux globaux sont dérivés des comptes : retirer un compte retire
-    // aussi ses ouvertures, sans avoir à conserver un historique complet.
-    if (Object.keys(out.openings.byAccount).length) {
-      const aggregated = statAggregateOpenings(out.openings.byAccount);
-      out.openings.total = aggregated.total;
-      out.openings.byPack = aggregated.byPack;
-      out.openings.byRarity = aggregated.byRarity;
+    for (const [name, list] of Object.entries(source.pools ?? {})) {
+      if (!Array.isArray(list)) continue;
+      out.pools[name] = list.map((id) => String(id)).filter(Boolean);
     }
 
-    out.recent = Array.isArray(data.recent)
-      ? data.recent
-          .filter((event) => event && typeof event === 'object')
-          .slice(0, 200)
-          .map((event) => ({
-            ts: Number(event.ts) || 0,
-            accountId: String(event.accountId ?? ''),
-            packId: String(event.packId ?? ''),
-            packName: String(event.packName ?? ''),
-            count: num(event.count) || 1,
-            byRarity: event.byRarity && typeof event.byRarity === 'object' ? { ...event.byRarity } : {}
-          }))
+    const catalog = source.catalog && typeof source.catalog === 'object' ? source.catalog : {};
+    out.catalog = { total: num(catalog.total) ?? 0, byRarity: {} };
+    for (const [code, value] of Object.entries(catalog.byRarity ?? {})) {
+      const n = num(value);
+      if (n) out.catalog.byRarity[statRarityOf(code)] = n;
+    }
+
+    for (const [id, entry] of Object.entries(source.collections ?? {})) {
+      if (!entry || typeof entry !== 'object') continue;
+      const cards = {};
+      for (const cardId of Array.isArray(entry.ids) ? entry.ids : []) {
+        const key = String(cardId);
+        if (key) cards[key] = 1;
+      }
+      out.collections[String(id)] = {
+        at: Number(entry.at) > 0 ? Number(entry.at) : 0,
+        ids: Object.keys(cards)
+      };
+    }
+
+    out.failures = Array.isArray(source.failures)
+      ? source.failures
+          .filter((row) => row && typeof row === 'object')
+          .map((row) => ({ id: String(row.id ?? ''), pseudo: String(row.pseudo ?? 'Joueur'), error: String(row.error ?? '') }))
       : [];
 
     return out;
   }
 
-  /** Rang avec ex æquo : 1, 1, 3 (et non 1, 2, 3). */
+  /**
+   * Pool analysé : on prend une part de chaque classement public, puis on
+   * complète avec le classement collection. Dédoublonné, ordre stable.
+   */
+  function statBuildPool(ladders, depth) {
+    const limit = Math.max(1, Math.floor(Number(depth) || 50));
+    const order = ['collection', 'mythics', 'series', 'achievements'];
+    const quota = Math.max(1, Math.ceil(limit / order.length));
+    const seen = new Set();
+    const out = [];
+
+    const push = (id) => {
+      const key = String(id ?? '');
+      if (!key || seen.has(key) || out.length >= limit) return;
+      seen.add(key);
+      out.push(key);
+    };
+
+    for (const name of order) {
+      for (const row of (ladders?.[name] ?? []).slice(0, quota)) push(row?.id);
+    }
+    for (const name of order) {
+      for (const row of ladders?.[name] ?? []) push(row?.id);
+    }
+    return out;
+  }
+
+  /** Rang avec ex æquo : 1, 1, 3. `value` doit être numérique. */
   function statAssignRanks(rows) {
     let previous = null;
     let rank = 0;
@@ -3438,102 +2996,73 @@
   }
 
   /**
-   * Classement des comptes pour une rareté.
-   * `metric = 'unique'` compte les cartes différentes, `'qty'` les exemplaires.
-   * Quand les quantités d'un compte sont inconnues, `qty` reste null (jamais estimé).
+   * Classement (descendant) d'une liste `{ id, pseudo, value }`.
+   * `onlyPositive` retire les valeurs absentes ou nulles.
    */
-  function statRankAccounts(accounts, rarity, metric = 'unique') {
-    const code = statRarityOf(rarity);
-    const rows = [];
-    for (const account of accounts ?? []) {
-      const collection = account?.collection;
-      if (!collection) continue;
-      const unique = Number(collection.byRarity?.[code]) || 0;
-      const qtyKnown = collection.qtyKnown !== false;
-      const qty = qtyKnown ? Number(collection.qtyByRarity?.[code]) || 0 : null;
-      const value = metric === 'qty' ? qty : unique;
-      if (value == null || value <= 0) continue;
-      rows.push({
-        id: String(account.id),
-        pseudo: String(account.pseudo ?? 'Joueur'),
-        self: Boolean(account.self),
-        value,
-        unique,
-        qty,
-        qtyKnown
-      });
-    }
+  function statRank(entries, onlyPositive = true) {
+    const rows = (Array.isArray(entries) ? entries : [])
+      .map((entry) => ({
+        id: String(entry?.id ?? ''),
+        pseudo: String(entry?.pseudo ?? 'Joueur'),
+        avatar: typeof entry?.avatar === 'string' ? entry.avatar : null,
+        value: Number(entry?.value) || 0
+      }))
+      .filter((row) => row.id && (!onlyPositive || row.value > 0));
     rows.sort((a, b) => b.value - a.value || a.pseudo.localeCompare(b.pseudo, 'fr'));
     return statAssignRanks(rows);
   }
 
   /**
-   * Index des propriétaires : pour chaque carte, les comptes distincts qui en
-   * possèdent au moins un exemplaire, plus la somme des exemplaires connus.
-   * Un compte qui possède 5 fois la carte ne compte qu'une fois.
+   * Union des collections analysées : types possédés par au moins un joueur.
+   * `list` contient des tableaux d'ids ou `null` quand la collection est
+   * inaccessible ; dans ce cas le résultat est partiel (`missing`).
    */
-  function statOwnerIndex(accounts) {
-    const index = {};
-    for (const account of accounts ?? []) {
-      const cards = account?.collection?.cards;
-      if (!cards || typeof cards !== 'object') continue;
-      const accountId = String(account.id);
-      for (const [cardId, rawQty] of Object.entries(cards)) {
-        const id = String(cardId);
-        const entry = index[id] ?? (index[id] = { owners: [], qty: 0, qtyKnown: 0 });
-        if (!entry.owners.includes(accountId)) entry.owners.push(accountId);
-        const qty = Number(rawQty);
-        if (Number.isFinite(qty) && qty > 0) {
-          entry.qty += Math.floor(qty);
-          entry.qtyKnown += 1;
-        }
+  function statUnionCollections(list, rarityOf) {
+    const cards = new Set();
+    let available = 0;
+    let missing = 0;
+    for (const entry of Array.isArray(list) ? list : []) {
+      if (!Array.isArray(entry)) {
+        missing += 1;
+        continue;
+      }
+      available += 1;
+      for (const id of entry) {
+        const key = String(id ?? '');
+        if (key) cards.add(key);
       }
     }
-    return index;
-  }
-
-  /** Nombre de propriétaires d'une carte (0 si personne parmi les comptes suivis). */
-  function statOwnerCount(index, cardId) {
-    return index?.[String(cardId)]?.owners?.length ?? 0;
+    const byRarity = {};
+    for (const id of cards) {
+      const code = statRarityOf(typeof rarityOf === 'function' ? rarityOf(id) : 'C');
+      byRarity[code] = (byRarity[code] ?? 0) + 1;
+    }
+    return { total: cards.size, byRarity, available, missing };
   }
 
   /**
-   * Bilan des cartes détenues par un ensemble de comptes.
-   * `rarityOf(id)` donne la rareté officielle (catalogue) ; une carte détenue
-   * par plusieurs comptes ne compte qu'une fois dans `unique`.
+   * Cumul des types possédés par joueur : un même type possédé par 5 joueurs
+   * compte 5 fois. `profiles` contient des `byRarity` (types distincts).
    */
-  function statSummary(accounts, rarityOf) {
-    const cards = new Map();
-    let qtyKnown = true;
-    for (const account of accounts ?? []) {
-      const collection = account?.collection;
-      if (!collection?.cards) continue;
-      if (collection.qtyKnown === false) qtyKnown = false;
-      for (const [cardId, rawQty] of Object.entries(collection.cards)) {
-        const id = String(cardId);
-        const qty = Number(rawQty);
-        const known = Number.isFinite(qty) && qty > 0;
-        const entry = cards.get(id) ?? { qty: 0, known: false };
-        entry.qty += known ? Math.floor(qty) : 1;
-        entry.known = entry.known || known;
-        cards.set(id, entry);
+  function statSumByRarity(profiles) {
+    const byRarity = {};
+    let total = 0;
+    let counted = 0;
+    for (const profile of Array.isArray(profiles) ? profiles : []) {
+      if (!profile || !profile.byRarity || typeof profile.byRarity !== 'object') continue;
+      counted += 1;
+      for (const [code, value] of Object.entries(profile.byRarity ?? {})) {
+        const n = Math.max(0, Math.floor(Number(value) || 0));
+        if (!n) continue;
+        const rarity = statRarityOf(code);
+        byRarity[rarity] = (byRarity[rarity] ?? 0) + n;
+        total += n;
       }
     }
-
-    const byRarity = {};
-    let qty = 0;
-    for (const [id, entry] of cards) {
-      const code = statRarityOf(typeof rarityOf === 'function' ? rarityOf(id) : 'C');
-      const bucket = byRarity[code] ?? (byRarity[code] = { unique: 0, qty: 0 });
-      bucket.unique += 1;
-      bucket.qty += entry.qty;
-      qty += entry.qty;
-      if (!entry.known) qtyKnown = false;
-    }
-    return { unique: cards.size, qty, qtyKnown, byRarity };
+    return { total, byRarity, players: counted };
   }
 
-  /** Nombre de cartes du catalogue par rareté (référentiel complet). */
+  /** Répartition du catalogue par rareté (référentiel complet du site). */
   function statCatalogTotals(catalog) {
     const byRarity = {};
     let total = 0;
@@ -3547,239 +3076,234 @@
     return { total, byRarity };
   }
 
-  /** Cartes du catalogue absentes des comptes suivis, par rareté. */
-  function statMissingTotals(catalog, ownedIds, rarity) {
-    const wanted = rarity && rarity !== 'all' ? statRarityOf(rarity) : null;
-    const owned = ownedIds instanceof Set ? ownedIds : new Set(ownedIds ?? []);
-    const byRarity = {};
-    let total = 0;
-    for (const card of Array.isArray(catalog) ? catalog : []) {
-      const id = card?.id ?? card?.characterId;
-      if (id == null) continue;
-      const code = statRarityOf(card?.rarity);
-      if (wanted && code !== wanted) continue;
-      if (owned.has(String(id))) continue;
-      byRarity[code] = (byRarity[code] ?? 0) + 1;
-      total += 1;
-    }
-    return { total, byRarity };
-  }
-
-  /** Agrège les ouvertures des comptes (source de vérité des totaux). */
-  function statAggregateOpenings(byAccount) {
-    const out = { total: 0, byPack: {}, byRarity: {} };
-    for (const entry of Object.values(byAccount ?? {})) {
-      const total = Math.max(0, Math.floor(Number(entry?.total) || 0));
-      if (!total) continue;
-      out.total += total;
-      for (const [packId, pack] of Object.entries(entry?.byPack ?? {})) {
-        const count = Math.max(0, Math.floor(Number(pack?.count) || 0));
-        if (!count) continue;
-        const slot =
-          out.byPack[String(packId)] ?? (out.byPack[String(packId)] = { name: String(pack?.name ?? `Booster #${packId}`), count: 0 });
-        slot.count += count;
-      }
-      for (const [code, count] of Object.entries(entry?.byRarity ?? {})) {
-        const n = Math.max(0, Math.floor(Number(count) || 0));
-        if (!n) continue;
-        const rarity = statRarityOf(code);
-        out.byRarity[rarity] = (out.byRarity[rarity] ?? 0) + n;
+  /**
+   * Index des propriétaires parmi les joueurs analysés : pour chaque carte,
+   * les joueurs distincts qui en possèdent au moins un exemplaire.
+   */
+  function statOwnerIndex(collections) {
+    const index = {};
+    for (const [playerId, entry] of Object.entries(collections ?? {})) {
+      const ids = entry && Array.isArray(entry.ids) ? entry.ids : [];
+      for (const cardId of ids) {
+        const key = String(cardId);
+        const slot = index[key] ?? (index[key] = []);
+        if (!slot.includes(playerId)) slot.push(playerId);
       }
     }
-    return out;
+    return index;
   }
 
-  /** Classement des boosters par nombre réel d'ouvertures, égalités comprises. */
-  function statOpeningsRank(byPack) {
-    const rows = Object.entries(byPack ?? {})
-      .map(([id, entry]) => ({
-        id: String(id),
-        name: String(entry?.name ?? `Booster #${id}`),
-        value: Math.max(0, Math.floor(Number(entry?.count) || 0))
-      }))
-      .filter((row) => row.value > 0);
-    rows.sort((a, b) => b.value - a.value || a.name.localeCompare(b.name, 'fr'));
-    return statAssignRanks(rows);
+  function statOwnerCount(index, cardId) {
+    return index?.[String(cardId)]?.length ?? 0;
   }
 
-  /** Classement des comptes par ouvertures (+ répartition par booster). */
-  function statOpeningsByAccount(byAccount) {
-    const rows = Object.entries(byAccount ?? {})
-      .map(([id, entry]) => ({
-        id: String(id),
-        name: String(entry?.pseudo ?? 'Joueur'),
-        value: Math.max(0, Math.floor(Number(entry?.total) || 0)),
-        byPack: entry?.byPack ?? {}
-      }))
-      .filter((row) => row.value > 0);
-    rows.sort((a, b) => b.value - a.value || a.name.localeCompare(b.name, 'fr'));
-    return statAssignRanks(rows);
+  /** Liste des raretés à afficher : ordre officiel + toute rareté détectée. */
+  function statRarityCodes(...sources) {
+    const codes = new Set(RARITY_ORDER);
+    for (const source of sources) {
+      for (const code of Object.keys(source ?? {})) codes.add(statRarityOf(code));
+    }
+    return [...codes].sort((a, b) => {
+      const ra = RARITY_ORDER.indexOf(a);
+      const rb = RARITY_ORDER.indexOf(b);
+      if (ra !== rb) return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb);
+      return a.localeCompare(b, 'fr');
+    });
   }
 
-  /* STATS:END */
+  /* GLOBALSTATS:END */
 
   /* ------------------------------------------------------------------ */
-  /* Statistiques : collecte et stockage                                 */
+  /* Statistiques globales : collecte et stockage                        */
   /* ------------------------------------------------------------------ */
 
-  let statsPersistTimer = null;
-  let statsCache = { sig: '', rows: [], total: 0, summary: null, owners: {}, catalog: { total: 0, byRarity: {} } };
+  let statPersistTimer = null;
+  let statDerivedCache = { sig: '', profiles: [], owners: {}, union: null, sum: null, poolSize: 0 };
 
-  function statsData() {
+  function statGlobalData() {
     if (!state.stats.data || typeof state.stats.data !== 'object') state.stats.data = statEmptyData();
     return state.stats.data;
   }
 
   function persistStatsSoon() {
-    if (statsPersistTimer) return;
-    statsPersistTimer = setTimeout(() => {
-      statsPersistTimer = null;
+    if (statPersistTimer) return;
+    statPersistTimer = setTimeout(() => {
+      statPersistTimer = null;
       persistStatsNow();
     }, 1200);
   }
 
   function persistStatsNow() {
-    const data = statsData();
-    data.recent = (data.recent ?? []).slice(0, STATS_RECENT_KEEP);
-    return storageSet(STATS_KEY, data);
+    return storageSet(STATS_KEY, statGlobalData());
   }
 
-  /** Copie du compte connecté : collection chiffrée + dernier solde de chakra. */
-  function statsEnsureSelf() {
-    const user = state.user;
-    if (!user?.id) return null;
-    const data = statsData();
-    const id = String(user.id);
-    const account = data.accounts[id] ?? (data.accounts[id] = { id, addedAt: Date.now() });
-    account.id = id;
-    account.pseudo = user.pseudo ?? account.pseudo ?? 'Moi';
-    account.avatar = user.avatar ?? account.avatar ?? null;
-    account.self = true;
-    account.error = null;
-
-    const chakra = toNum(user.chakra);
-    if (chakra != null) {
-      const previous = account.chakra;
-      // On ne réécrit l'horodatage que si la valeur change (ou après 5 min).
-      if (!previous || previous.value !== chakra || Date.now() - previous.at > 5 * 60 * 1000) {
-        account.chakra = { value: chakra, at: Date.now() };
-      }
-    }
-
-    // La collection n'est recopiée que lorsqu'elle est réellement chargée.
-    if (state.ready && Array.isArray(state.collection)) {
-      const cards = {};
-      for (const row of ownedRows()) {
-        const qty = Math.max(1, Number(row.qty) || 1);
-        cards[row.id] = (cards[row.id] ?? 0) + qty;
-      }
-      const qty = Object.values(cards).reduce((sum, n) => sum + n, 0);
-      const unique = Object.keys(cards).length;
-      const previous = account.collection;
-      // Signature identique : on garde l'horodatage précédent pour ne pas
-      // invalider les caches à chaque rendu.
-      if (!previous || previous.unique !== unique || previous.qty !== qty) {
-        account.collection = { at: Date.now(), cards, unique, qty, qtyKnown: true };
-        account.lastSyncAt = Date.now();
-      }
-    }
-    persistStatsSoon();
-    return account;
-  }
-
-  /**
-   * Relit un compte suivi. Pour un autre joueur, seuls les ids de cartes et les
-   * infos publiques sont accessibles : les quantités restent inconnues
-   * (`qtyKnown: false`) et ne sont jamais estimées.
-   */
-  async function statsSyncAccount(account) {
-    if (!account) return;
-    if (account.self) {
-      statsEnsureSelf();
-      return;
-    }
-    try {
-      const user = await api(`/api/users/${encodeURIComponent(account.id)}`, { timeout: 20000 }).catch((err) => {
-        if (err.status === 400 || err.status === 404) return null;
-        throw err;
-      });
-      if (user) {
-        account.pseudo = user.pseudo ?? user.name ?? account.pseudo;
-        account.avatar = user.avatar ?? account.avatar ?? null;
-        account.public = {
-          owned: toNum(user.owned ?? user.collectionSize ?? user.cards),
-          mythics: toNum(user.mythics),
-          points: toNum(user.points),
-          rank: user.rank?.label ?? null
-        };
-      }
-
-      const ids = await fetchOwnedIds(account.id);
-      if (!ids) {
-        account.collection = null;
-        account.error = 'Collection inaccessible (profil privé ou endpoint indisponible)';
-      } else {
-        const cards = {};
-        for (const cardId of ids) cards[String(cardId)] = 1;
-        account.collection = {
-          at: Date.now(),
-          cards,
-          unique: ids.length,
-          qty: ids.length,
-          qtyKnown: false
-        };
-        account.error = null;
-      }
-      account.lastSyncAt = Date.now();
-    } catch (err) {
-      account.error = friendlyError(err);
-      account.lastSyncAt = Date.now();
-    }
-    persistStatsSoon();
-  }
-
-  function updateStatsProgressText() {
+  function statProgress(text) {
     if (!shadow) return;
     const el = shadow.querySelector('[data-stat-progress]');
-    if (!el) return;
-    el.textContent = state.stats.syncing
-      ? `Synchronisation des comptes… ${state.stats.syncDone}/${state.stats.syncTotal}`
-      : '';
+    if (el) el.textContent = text;
   }
 
-  /** Relit les comptes périmés, un par un, sans bloquer l'interface. */
-  async function statsSyncAll(force = false) {
+  /** Analyse complète : classements publics, puis profils du pool. */
+  async function analyzeGlobalStats(force = false) {
     if (state.stats.syncing) return;
-    statsEnsureSelf();
-    const accounts = Object.values(statsData().accounts);
-    const stale = accounts.filter((account) => {
-      if (account.self) return false;
-      if (force) return true;
-      if (!account.lastSyncAt) return true;
-      if (account.error) return true;
-      return Date.now() - account.lastSyncAt > STATS_CACHE_MS;
-    });
-
-    if (!stale.length) {
+    const data = statGlobalData();
+    if (!force && data.at && Date.now() - data.at < STAT_CACHE_MS) {
       if (state.tab === 'stat') render();
       return;
     }
 
+    const runId = (state.stats.runId ?? 0) + 1;
+    state.stats.runId = runId;
     state.stats.syncing = true;
-    state.stats.syncDone = 0;
-    state.stats.syncTotal = stale.length;
+    state.stats.error = null;
+    state.stats.progress = 'Lecture des classements publics…';
+    state.stats.done = 0;
+    state.stats.total = 0;
     if (state.tab === 'stat') render();
 
-    for (const account of stale) {
-      await statsSyncAccount(account);
-      state.stats.syncDone += 1;
-      updateStatsProgressText();
-      await sleep(400);
-    }
+    const alive = () => state.stats.runId === runId;
 
-    state.stats.syncing = false;
-    await persistStatsNow();
-    render();
+    try {
+      // 1) Classements publics. Seuls ces quatre tris sont réellement pris en
+      //    compte par le serveur ; les autres retombent silencieusement sur
+      //    « collection », on ne les demande donc pas.
+      const categories = ['collection', 'mythics', 'series', 'achievements'];
+      const ladders = {};
+      for (const name of categories) {
+        if (!alive()) return;
+        statProgress(`Classement ${name}…`);
+        try {
+          const payload = await api(`/api/leaderboard/ladder?by=${name}`, { timeout: 25000 });
+          ladders[name] = Array.isArray(payload?.rows) ? payload.rows : [];
+          if (name === 'collection') {
+            data.totals.players = toNum(payload?.total);
+            data.totals.catalogSize = toNum(payload?.catalogSize);
+            // Le catalogue est déjà en cache local : référence exacte des raretés.
+            data.catalog = statCatalogTotals([...state.characters.values()]);
+          } else if (name === 'mythics') {
+            data.totals.mythicOwners = toNum(payload?.total);
+          }
+        } catch (err) {
+          if (name === 'collection') throw err;
+          ladders[name] = [];
+        }
+        await sleep(300);
+      }
+
+      if (!alive()) return;
+
+      // 2) Taille réelle du marché (annonces actives).
+      try {
+        const market = await api('/api/market/listings?pageSize=1&sort=price_desc', { timeout: 20000 });
+        const total = toNum(market?.total);
+        if (total != null) {
+          data.totals.listings = total;
+          data.totals.listingsAt = Date.now();
+        }
+      } catch {
+        /* marché indisponible : la tuile restera vide */
+      }
+
+      // 3) Pool analysé (dédoublonné).
+      const ids = statBuildPool(ladders, data.depth || STAT_DEFAULT_DEPTH);
+      data.pools = Object.fromEntries(
+        categories.map((name) => [name, (ladders[name] ?? []).slice(0, data.depth || STAT_DEFAULT_DEPTH).map((row) => String(row.id))])
+      );
+
+      // 4) Profils publics : owned, mythics, heritage, boostersOpened, byRarity…
+      state.stats.total = ids.length;
+      state.stats.done = 0;
+      const profiles = {};
+      const failures = [];
+      for (const id of ids) {
+        if (!alive()) return;
+        state.stats.done += 1;
+        if (state.stats.done % 4 === 0 || state.stats.done === ids.length) {
+          statProgress(`Profils publics… ${state.stats.done}/${ids.length}`);
+          if (state.tab === 'stat') renderStatsProgress();
+        }
+        try {
+          const user = await api(`/api/users/${encodeURIComponent(id)}`, { timeout: 20000 });
+          if (user && typeof user === 'object') {
+            const byRarity = {};
+            for (const [code, value] of Object.entries(user.byRarity ?? {})) {
+              const n = toNum(value);
+              if (n != null && n > 0) byRarity[statRarityOf(code)] = n;
+            }
+            profiles[id] = {
+              id,
+              pseudo: String(user.pseudo ?? user.name ?? `Joueur ${id}`),
+              avatar: typeof user.avatar === 'string' ? user.avatar : null,
+              owned: toNum(user.owned),
+              mythics: toNum(user.mythics),
+              heritage: toNum(user.heritage),
+              boostersOpened: toNum(user.boostersOpened),
+              points: toNum(user.points),
+              series: toNum(user.series),
+              achievements: toNum(user.achievements),
+              byRarity,
+              at: Date.now(),
+              error: null
+            };
+          } else {
+            throw new Error('profil vide');
+          }
+        } catch (err) {
+          const fallback = (ladders.collection ?? []).find((row) => String(row.id) === id) ?? null;
+          failures.push({ id, pseudo: fallback?.pseudo ?? `Joueur ${id}`, error: friendlyError(err) });
+        }
+        await sleep(STAT_REQUEST_GAP);
+      }
+
+      if (!alive()) return;
+
+      // 5) Collections (ids uniques) : uniquement pour le compteur « possédés
+      //    par au moins un joueur analysé ». Échec = résultat partiel signalé.
+      const collections = {};
+      state.stats.total = ids.length;
+      state.stats.done = 0;
+      for (const id of ids) {
+        if (!alive()) return;
+        state.stats.done += 1;
+        if (state.stats.done % 4 === 0 || state.stats.done === ids.length) {
+          statProgress(`Collections… ${state.stats.done}/${ids.length}`);
+          if (state.tab === 'stat') renderStatsProgress();
+        }
+        try {
+          const owned = await fetchOwnedIds(id);
+          collections[id] = { at: Date.now(), ids: Array.isArray(owned) ? owned : [] };
+        } catch {
+          collections[id] = { at: Date.now(), ids: [], incomplete: true };
+        }
+        await sleep(STAT_REQUEST_GAP);
+      }
+
+      if (!alive()) return;
+
+      data.profiles = profiles;
+      data.collections = collections;
+      data.failures = failures;
+      data.at = Date.now();
+      state.stats.ready = true;
+      await persistStatsNow();
+    } catch (err) {
+      state.stats.error = friendlyError(err);
+    } finally {
+      if (state.stats.runId === runId) {
+        state.stats.syncing = false;
+        state.stats.progress = '';
+        state.stats.done = 0;
+        state.stats.total = 0;
+      }
+      if (state.tab === 'stat') render();
+    }
+  }
+
+  /** Rendu partiel pendant l'analyse : évite de reconstruire tout le panneau. */
+  function renderStatsProgress() {
+    const derived = statsDerived();
+    const body = shadow?.querySelector('[data-stat-body]');
+    if (body) body.innerHTML = statBodyHTML(derived);
   }
 
   async function loadStats() {
@@ -3790,155 +3314,50 @@
       state.stats.data = statNormalizeData(saved);
       state.stats.ready = true;
       state.stats.error = null;
-      statsEnsureSelf();
     } catch (err) {
       state.stats.error = friendlyError(err);
     } finally {
       state.stats.loading = false;
       if (state.tab === 'stat') render();
     }
-    statsSyncAll(false);
-  }
-
-  async function statsAddAccount(hit) {
-    if (!hit?.id) return;
-    const data = statsData();
-    const id = String(hit.id);
-    if (data.accounts[id]) {
-      notify(`${hit.pseudo ?? 'Ce compte'} est déjà suivi.`);
-      return;
-    }
-    if (Object.keys(data.accounts).length >= STATS_MAX_ACCOUNTS) {
-      notify(`Limite de ${STATS_MAX_ACCOUNTS} comptes suivis atteinte.`);
-      return;
-    }
-    data.accounts[id] = {
-      id,
-      pseudo: hit.pseudo ?? 'Joueur',
-      avatar: hit.avatar ?? null,
-      self: false,
-      addedAt: Date.now(),
-      lastSyncAt: 0,
-      error: null,
-      collection: null,
-      public: { owned: hit.owned ?? null, mythics: hit.mythics ?? null, points: hit.points ?? null, rank: hit.rank?.label ?? null }
-    };
-    state.stats.query = '';
-    state.stats.results = null;
-    state.stats.searching = false;
-    await persistStatsNow();
-    render();
-    await statsSyncAccount(data.accounts[id]);
-    await persistStatsNow();
-    render();
-  }
-
-  function statsRemoveAccount(id) {
-    const data = statsData();
-    const account = data.accounts[String(id)];
-    if (!account) return;
-    if (account.self) {
-      notify('Le compte connecté ne peut pas être retiré.');
-      return;
-    }
-    delete data.accounts[String(id)];
-    // Les ouvertures appartiennent au compte : on retire aussi ses contributions.
-    delete data.openings.byAccount[String(id)];
-    const aggregated = statAggregateOpenings(data.openings.byAccount);
-    data.openings.total = aggregated.total;
-    data.openings.byPack = aggregated.byPack;
-    data.openings.byRarity = aggregated.byRarity;
-    persistStatsNow();
-    render();
-  }
-
-  let statsSearchTimer = null;
-
-  function scheduleStatsAccountSearch() {
-    if (statsSearchTimer) clearTimeout(statsSearchTimer);
-    statsSearchTimer = setTimeout(() => {
-      statsSearchTimer = null;
-      statsSearchAccounts();
-    }, 350);
-  }
-
-  /** Recherche de compte pour la liste suivie (même endpoint que le profil). */
-  async function statsSearchAccounts() {
-    const query = state.stats.query.trim();
-    if (query.length < 2) {
-      state.stats.results = null;
-      state.stats.searchError = null;
-      if (state.tab === 'stat') render();
-      return;
-    }
-    state.stats.searching = true;
-    state.stats.searchError = null;
-    if (state.tab === 'stat') render();
-    try {
-      const results = await searchFriendsByPseudo(query);
-      state.stats.results = results.slice(0, 8);
-      if (!state.stats.results.length) state.stats.searchError = `Aucun joueur nommé « ${query} ».`;
-    } catch (err) {
-      state.stats.results = null;
-      state.stats.searchError = friendlyError(err);
-    } finally {
-      state.stats.searching = false;
-      if (state.tab === 'stat') render();
-    }
+    if (!state.stats.data.at) analyzeGlobalStats(false);
   }
 
   /**
-   * Données dérivées (raretés, classements, propriétaires), recalculées
-   * seulement quand une collection change.
+   * Données dérivées (index propriétaires, union, cumul), recalculées
+   * uniquement quand les profils ou collections changent.
    */
   function statsDerived() {
-    const accounts = Object.values(statsData().accounts);
-    const sig =
-      accounts.map((a) => `${a.id}:${a.collection?.at ?? 0}:${a.collection?.unique ?? 0}`).join('|') +
-      `:${state.characters.size}`;
-    if (statsCache.sig === sig) return statsCache;
+    const data = statGlobalData();
+    const profiles = Object.values(data.profiles ?? {});
+    const sig = `${Object.keys(data.profiles ?? {}).length}:${Object.keys(data.collections ?? {}).length}:${state.characters.size}`;
+    if (statDerivedCache.sig === sig) return statDerivedCache;
 
     const rarityOf = (id) => state.characters.get(String(id))?.rarity ?? '';
-    const rows = accounts.map((account) => {
-      if (!account.collection) return { ...account, collection: null };
-      const byRarity = {};
-      const qtyByRarity = {};
-      for (const [cardId, rawQty] of Object.entries(account.collection.cards ?? {})) {
-        const code = statRarityOf(rarityOf(cardId));
-        byRarity[code] = (byRarity[code] ?? 0) + 1;
-        qtyByRarity[code] = (qtyByRarity[code] ?? 0) + (Number(rawQty) || 1);
-      }
-      return { ...account, collection: { ...account.collection, byRarity, qtyByRarity } };
-    });
-
-    statsCache = {
+    const collections = Object.entries(data.collections ?? {}).map(([, entry]) => (entry?.ids?.length ? entry.ids : null));
+    const union = statUnionCollections(collections, rarityOf);
+    statDerivedCache = {
       sig,
-      rows,
-      total: rows.length,
-      summary: statSummary(rows, rarityOf),
-      owners: statOwnerIndex(rows),
-      catalog: statCatalogTotals([...state.characters.values()])
+      profiles,
+      owners: statOwnerIndex(data.collections),
+      union,
+      sum: statSumByRarity(profiles),
+      poolSize: profiles.length
     };
-    return statsCache;
+    return statDerivedCache;
   }
 
-  /** Propriétaires connus d'une carte, parmi les comptes suivis. */
+  /** Propriétaires connus d'une carte, parmi les joueurs analysés. */
   function statsOwnerStats(cardId) {
     if (!state.stats.ready) return null;
     const derived = statsDerived();
-    if (!derived.total) return null;
-    const entry = derived.owners[String(cardId)];
-    return {
-      count: entry?.owners?.length ?? 0,
-      total: derived.total,
-      qty: entry?.qty ?? 0,
-      qtyKnown: entry?.qtyKnown ?? 0
-    };
+    if (!derived.poolSize) return null;
+    return { count: statOwnerCount(derived.owners, cardId), total: derived.poolSize };
   }
 
   /**
-   * Pastille « N propriétaires » : toujours relative aux comptes suivis,
-   * jamais présentée comme un chiffre du site entier.
+   * Pastille « N poss. » : toujours relative aux joueurs analysés, jamais
+   * présentée comme un chiffre du site entier.
    */
   function ownerPill(cardId, compact = true) {
     const info = statsOwnerStats(cardId);
@@ -3946,233 +3365,256 @@
     const label = compact ? `${fmt(info.count)} poss.` : `${fmt(info.count)} propriétaire${info.count > 1 ? 's' : ''}`;
     const title =
       info.count > 0
-        ? `${fmt(info.count)} des ${fmt(info.total)} comptes suivis possèdent cette carte${
-            info.qty ? ` · ${fmt(info.qty)} exemplaire(s) connus` : ''
-          }`
-        : `Aucun des ${fmt(info.total)} comptes suivis ne possède cette carte`;
+        ? `${fmt(info.count)} des ${fmt(info.total)} joueurs analysés possèdent cette carte`
+        : `Aucun des ${fmt(info.total)} joueurs analysés ne possède cette carte`;
     return `<span class="kp-owner-pill ${info.count ? '' : 'is-none'}" title="${esc(title)}">${label}</span>`;
   }
 
-  function statsPackLabel(packId) {
-    const pack = (state.packs ?? []).find((item) => String(item.id) === String(packId));
-    return pack?.name ?? `Booster #${packId}`;
-  }
+  /* ------------------------------------------------------------------ */
+  /* Statistiques globales : rendu                                       */
+  /* ------------------------------------------------------------------ */
 
-  /** Enregistre une ouverture réelle (une seule pour un booster). */
-  function statsRecordOpening(accountId, pack, cards, source) {
-    const data = statsData();
-    const id = String(accountId ?? state.user?.id ?? '');
-    if (!id) return;
-    const packId = String(pack?.id ?? '');
-    const name = pack?.name ?? statsPackLabel(packId);
-    const byRarity = {};
-    for (const card of cards ?? []) {
-      const code = statRarityOf(card?.rarity);
-      byRarity[code] = (byRarity[code] ?? 0) + 1;
-    }
-
-    data.openings.total += 1;
-    if (packId) {
-      const entry = data.openings.byPack[packId] ?? (data.openings.byPack[packId] = { name, count: 0 });
-      entry.name = name;
-      entry.count += 1;
-    }
-    for (const [code, n] of Object.entries(byRarity)) {
-      data.openings.byRarity[code] = (data.openings.byRarity[code] ?? 0) + n;
-    }
-
-    const pseudo = data.accounts[id]?.pseudo ?? state.user?.pseudo ?? 'Moi';
-    const perAccount =
-      data.openings.byAccount[id] ?? (data.openings.byAccount[id] = { pseudo, total: 0, byPack: {}, byRarity: {} });
-    perAccount.pseudo = pseudo;
-    perAccount.total += 1;
-    if (packId) {
-      const entry = perAccount.byPack[packId] ?? (perAccount.byPack[packId] = { name, count: 0 });
-      entry.name = name;
-      entry.count += 1;
-    }
-    perAccount.byRarity = perAccount.byRarity ?? {};
-    for (const [code, n] of Object.entries(byRarity)) {
-      perAccount.byRarity[code] = (perAccount.byRarity[code] ?? 0) + n;
-    }
-
-    data.recent.unshift({
-      ts: Date.now(),
-      accountId: id,
-      packId,
-      packName: name,
-      count: 1,
-      byRarity
-    });
-    data.recent = data.recent.slice(0, STATS_RECENT_KEEP);
-    persistStatsSoon();
-    if (state.tab === 'stat' || state.tab === 'account' || state.tab === 'auto') render();
-  }
-
-  /** Ouvertures faites par l'auto-open (une entrée par booster réellement ouvert). */
-  function statsRecordAutoOpenings(pack, results) {
-    const id = state.user?.id;
-    if (!id) return;
-    for (const result of results ?? []) {
-      const list = Array.isArray(result?.cards) ? result.cards.map(autoCard) : [];
-      statsRecordOpening(id, pack, list, 'auto');
-    }
-  }
-
-  /**
-   * Ouverture faite à la main sur le site, remontée par le script de page.
-   * `results` est la liste des boosters ouverts dans la requête.
-   */
-  function statsHandleManualOpen(payload) {
-    if (!state.user?.id) return;
-    const packId = String(payload?.packId ?? '');
-    if (!packId) return;
-    const pack = (state.packs ?? []).find((item) => String(item.id) === packId) ?? { id: packId, name: statsPackLabel(packId) };
-    const results = Array.isArray(payload?.results) ? payload.results : [];
-    if (!results.length) {
-      statsRecordOpening(state.user.id, pack, [], 'manual');
-      return;
-    }
-    for (const cards of results) {
-      statsRecordOpening(state.user.id, pack, Array.isArray(cards) ? cards : [], 'manual');
-    }
-  }
-
-  /** Injecte le script de page qui observe les ouvertures manuelles. */
-  function installPageHook() {
+  function statDate(ts) {
+    if (!(Number(ts) > 0)) return 'jamais';
     try {
-      if (!ext?.runtime?.getURL) return;
-      if (document.querySelector('script[data-kyareeh-hook]')) return;
-      const url = ext.runtime.getURL('content/page-hook.js');
-      const el = document.createElement('script');
-      el.src = url;
-      el.async = false;
-      el.dataset.kyareehHook = '1';
-      (document.head ?? document.documentElement).appendChild(el);
-      el.addEventListener('load', () => el.remove());
+      return new Date(Number(ts)).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
     } catch {
-      /* tant pis : seules les ouvertures de l'auto-open seront comptées */
+      return '—';
     }
-
-    // Repli si le CSP du site bloque le script injecté : on enveloppe le fetch
-    // de la page depuis le content script (Firefox, `wrappedJSObject`).
-    setTimeout(() => {
-      try {
-        const page = window.wrappedJSObject;
-        if (page && !page.__kyareehOpenHook) installWrappedOpeningHook();
-      } catch {
-        /* environnement sans wrappedJSObject : on garde le script de page */
-      }
-    }, 1500);
   }
 
-  /** Extrait les cartes tirées d'une réponse `/open-many` (id + rareté seulement). */
-  function extractOpeningResults(json) {
-    const results = Array.isArray(json?.results) ? json.results : [];
-    return results.map((result) => {
-      const list = Array.isArray(result?.cards) ? result.cards : [];
-      return list.map((raw) => {
-        const card = raw?.character ?? raw?.card ?? raw;
-        return {
-          id: String(card?.id ?? card?.characterId ?? raw?.characterId ?? ''),
-          rarity: String(card?.rarity ?? '').toUpperCase()
-        };
-      });
-    });
+  function statShareBar(label, value, max, color) {
+    return `
+      <div class="kp-bar-row">
+        <span title="${esc(label)}">${esc(label)}</span>
+        <div class="kp-bar"><i style="width:${Math.max(2, Math.round((value / Math.max(1, max)) * 100))}%;--kp-bar-color:${color}"></i></div>
+        <b>${fmt(value)}</b>
+      </div>`;
   }
 
-  /**
-   * Repli Firefox : enveloppe `window.fetch` de la page pour observer les
-   * ouvertures manuelles. Aucune requête n'est modifiée, aucune erreur ne
-   * remonte au site.
-   */
-  function installWrappedOpeningHook() {
-    try {
-      if (typeof exportFunction !== 'function') return false;
-      const page = window.wrappedJSObject;
-      if (!page || page.__kyareehOpenHook) return false;
-      const original = page.fetch;
-      if (typeof original !== 'function') return false;
+  function statRankList(rows, info, emptyText) {
+    if (!rows.length) return `<div class="kp-empty"><b>Aucune donnée</b>${emptyText}</div>`;
+    const max = Math.max(1, ...rows.map((row) => row.value));
+    return `
+      <div class="kp-stat-ranks">${rows
+        .map(
+          (row) => `
+        <div class="kp-stat-rank">
+          <b class="kp-rank">#${row.rank}</b>
+          <span class="kp-stat-rank-name">
+            ${row.avatar ? `<img src="${esc(row.avatar)}" alt="" loading="lazy">` : ''}${esc(row.pseudo)}
+          </span>
+          <div class="kp-bar"><i style="width:${Math.max(2, Math.round((row.value / max) * 100))}%;--kp-bar-color:${info.color}"></i></div>
+          <b>${fmt(row.value)}</b>
+        </div>`
+        )
+        .join('')}</div>`;
+  }
 
-      const wrapper = function kyareehFetch(input, init) {
-        const response = original.apply(this, arguments);
-        try {
-          const url = typeof input === 'string' ? input : input && input.url ? input.url : '';
-          const match = String(url).match(/\/api\/packs\/([^/?#]+)\/open-many/);
-          if (!match) return response;
+  /** Classements publics disponibles (projection pour l'affichage). */
+  function statTopFromPool(profiles, key, limit = 20) {
+    const rows = (profiles ?? []).map((profile) => ({
+      id: profile.id,
+      pseudo: profile.pseudo,
+      avatar: profile.avatar,
+      value: Number(profile?.[key])
+    }));
+    return statRank(rows).slice(0, limit);
+  }
 
-          // Une ouverture faite par l'extension porte ce marqueur : pas de doublon.
-          const headers = init && init.headers;
-          let marked = false;
-          try {
-            if (headers && typeof headers.get === 'function') marked = headers.get('x-kyareeh') != null;
-            else if (headers && typeof headers === 'object') {
-              marked = Object.keys(headers).some((key) => String(key).toLowerCase() === 'x-kyareeh');
-            }
-          } catch {
-            /* en-têtes illisibles : on compte quand même */
-          }
-          if (marked) return response;
+  function statOverviewSection(data) {
+    const totals = data.totals ?? {};
+    return `
+      <div class="kp-grid">
+        <div class="kp-card-stat"><span>Joueurs classés</span><b>${totals.players != null ? fmt(totals.players) : '—'}</b><small>classement collection (site)</small></div>
+        <div class="kp-card-stat"><span>Avec ≥ 1 mythique</span><b>${totals.mythicOwners != null ? fmt(totals.mythicOwners) : '—'}</b><small>classement mythiques (site)</small></div>
+        <div class="kp-card-stat"><span>Types au catalogue</span><b>${fmt(totals.catalogSize ?? data.catalog?.total ?? 0)}</b><small>référentiel du site</small></div>
+        <div class="kp-card-stat"><span>Annonces du marché</span><b>${totals.listings != null ? fmt(totals.listings) : '—'}</b><small>${
+          totals.listingsAt ? `relevé le ${statDate(totals.listingsAt)}` : 'indisponible'
+        }</small></div>
+      </div>`;
+  }
 
-          let packId = match[1];
-          try {
-            packId = decodeURIComponent(packId);
-          } catch {
-            /* id déjà décodé */
-          }
-          return response.then((res) => {
-            try {
-              if (res && res.ok && typeof res.clone === 'function') {
-                res
-                  .clone()
-                  .text()
-                  .then((text) => {
-                    try {
-                      statsHandleManualOpen({ packId, results: extractOpeningResults(JSON.parse(text)) });
-                    } catch {
-                      /* réponse non JSON */
-                    }
-                  })
-                  .catch(() => {});
-              }
-            } catch {
-              /* ignore */
-            }
-            return res;
-          });
-        } catch {
-          return response;
+  function statMythicSection(derived) {
+    const rows = statTopFromPool(derived.profiles, 'mythics', 20);
+    return `
+      <div class="kp-section">
+        <div class="kp-section-title">Plus de cartes Mythiques <span>profils publics</span></div>
+        ${statRankList(rows, rarityInfo('M'), 'Aucun profil public avec une carte Mythique.')}
+        <div class="kp-hint">Compteur <em>mythics</em> publié par le site sur chaque profil public (exemplaires possédés), lu sur les ${fmt(
+          derived.poolSize
+        )} joueurs analysés.</div>
+      </div>`;
+  }
+
+  function statHeritageSection(derived) {
+    const rows = statTopFromPool(derived.profiles, 'heritage', 20);
+    const any = rows.some((row) => row.value > 0);
+    return `
+      <div class="kp-section">
+        <div class="kp-section-title">Plus de cartes Héritage <span>${fmt(derived.poolSize)} joueurs analysés</span></div>
+        ${
+          any
+            ? statRankList(rows, rarityInfo('H'), '')
+            : `<div class="kp-empty"><b>Aucune carte Héritage détectée</b>Le champ <code>heritage</code> est à 0 sur tous les profils analysés. Le site ne propose pas de classement par Héritage : ce résultat porte donc uniquement sur les ${fmt(
+                derived.poolSize
+              )} joueurs analysés.</div>`
         }
-      };
-
-      page.fetch = exportFunction(wrapper, page);
-      page.__kyareehOpenHook = true;
-      return true;
-    } catch {
-      return false;
-    }
+        <div class="kp-hint">Le site ne trie pas par Héritage : ce classement est reconstruit à partir du champ public <code>heritage</code> des joueurs analysés, pas de la totalité des ${fmt(
+          statGlobalData().totals?.players ?? 0
+        )} joueurs classés.</div>
+      </div>`;
   }
 
-  let openingBridgeInstalled = false;
+  function statBoostersSection(derived) {
+    const rows = statTopFromPool(derived.profiles, 'boostersOpened', 20);
+    const known = derived.profiles.filter((profile) => profile.boostersOpened != null);
+    const sum = known.reduce((total, profile) => total + (Number(profile.boostersOpened) || 0), 0);
+    return `
+      <div class="kp-section">
+        <div class="kp-section-title">Boosters ouverts <span>champ public par joueur</span></div>
+        <div class="kp-grid">
+          <div class="kp-card-stat"><span>Cumul analysé</span><b>${fmt(sum)}</b><small>${fmt(known.length)} joueur(s) avec la donnée</small></div>
+          <div class="kp-card-stat"><span>Moyenne</span><b>${known.length ? fmt(Math.round(sum / known.length)) : '—'}</b><small>boosters par joueur</small></div>
+        </div>
+        <div style="margin-top:8px">${statRankList(rows, rarityInfo('E'), 'Aucun profil public avec un compteur d’ouvertures.')}</div>
+        <div class="kp-hint">Le site publie un <b>total par joueur</b> (<code>boostersOpened</code>), jamais un total global ni une répartition par type de booster. « Booster le plus ouvert » n’est donc pas calculable : le cumul affiché porte uniquement sur les ${fmt(
+          known.length
+        )} joueurs analysés.</div>
+      </div>`;
+  }
 
-  /**
-   * Reçoit les ouvertures manuelles du script de page. `postMessage` clone la
-   * donnée : seuls l'id du booster et les raretés arrivent ici.
-   */
-  function installOpeningBridge() {
-    if (openingBridgeInstalled) return;
-    openingBridgeInstalled = true;
-    window.addEventListener('message', (event) => {
-      try {
-        if (event.origin && event.origin !== location.origin) return;
-        const message = event.data;
-        if (!message || typeof message !== 'object' || message.source !== 'kyareeh') return;
-        if (message.type !== 'packs-open') return;
-        statsHandleManualOpen(message.data);
-      } catch {
-        /* un message inattendu ne doit jamais casser la page */
-      }
-    });
+  function statPointsSection(derived) {
+    const rows = statTopFromPool(derived.profiles, 'points', 20);
+    return `
+      <div class="kp-section">
+        <div class="kp-section-title">Plus de points <span>classement public</span></div>
+        ${statRankList(rows, { color: '#facc15' }, 'Aucun point public disponible.')}
+        <div class="kp-hint">Le <b>chakra</b> est une donnée privée : le site ne le publie ni dans les profils publics ni dans ses classements. Les points, eux, sont publics et servent de repère d’activité.</div>
+      </div>`;
+  }
+
+  function statCardsSection(derived) {
+    const data = statGlobalData();
+    const catalog = data.catalog ?? { total: 0, byRarity: {} };
+    const union = derived.union ?? { total: 0, byRarity: {}, missing: 0 };
+    const sum = derived.sum ?? { total: 0, byRarity: {}, players: 0 };
+    const codes = statRarityCodes(catalog.byRarity, union.byRarity, sum.byRarity);
+    const rarity = state.stats.rarity;
+    const pick = (source) => (rarity === 'all' ? Number(source?.total) || 0 : Number(source?.byRarity?.[rarity]) || 0);
+    const maxCatalog = Math.max(1, ...codes.map((code) => Number(catalog.byRarity?.[code]) || 0));
+
+    return `
+      <div class="kp-section">
+        <div class="kp-section-title">Types de cartes <span>${fmt(derived.poolSize)} joueurs analysés</span></div>
+        <div class="kp-chips is-wrap">
+          <button class="kp-chip is-btn ${rarity === 'all' ? 'is-active' : ''}" type="button" data-act="stat-rarity" data-rarity="all">Toutes</button>
+          ${codes
+            .map(
+              (code) =>
+                `<button class="kp-chip is-btn ${rarity === code ? 'is-active' : ''}" type="button" data-act="stat-rarity" data-rarity="${esc(
+                  code
+                )}" style="--kp-chip-color:${rarityInfo(code).color}">${esc(rarityInfo(code).label)}</button>`
+            )
+            .join('')}
+        </div>
+
+        <div class="kp-grid" style="margin-top:8px">
+          <div class="kp-card-stat"><span>Au catalogue</span><b>${fmt(pick(catalog))}</b><small>sur ${fmt(catalog.total)} types chargés</small></div>
+          <div class="kp-card-stat"><span>Possédés par ≥ 1 joueur</span><b>${union.missing ? '≥ ' : ''}${fmt(pick(union))}</b><small>${fmt(
+            union.available
+          )} collection(s) lue(s)</small></div>
+          <div class="kp-card-stat"><span>Possédés cumulés</span><b>${fmt(pick(sum))}</b><small>${fmt(sum.players)} joueur(s)</small></div>
+        </div>
+
+        <div class="kp-hint">
+          <b>Au catalogue</b> : tous les types du référentiel, qu’ils soient possédés ou non.
+          <b>Possédés par ≥ 1 joueur</b> : union des collections analysées, chaque type compté une seule fois${
+            union.missing ? ` (${fmt(union.missing)} collection(s) inaccessible(s), donc minimum)` : ''
+          }.
+          <b>Possédés cumulés</b> : somme par joueur, un même type possédé par 5 joueurs compte 5 fois.
+        </div>
+
+        <div class="kp-bars" style="margin-top:8px">
+          ${codes
+            .map((code) => ({
+              code,
+              catalogue: Number(catalog.byRarity?.[code]) || 0,
+              union: Number(union.byRarity?.[code]) || 0,
+              cumul: Number(sum.byRarity?.[code]) || 0
+            }))
+            .filter((row) => row.catalogue || row.union || row.cumul)
+            .sort((a, b) => b.catalogue - a.catalogue)
+            .map((row) =>
+              statShareBar(
+                `${rarityInfo(row.code).label} · possédés ${fmt(row.union)} · cumul ${fmt(row.cumul)}`,
+                row.catalogue,
+                maxCatalog,
+                rarityInfo(row.code).color
+              )
+            )
+            .join('')}
+        </div>
+        <div class="kp-hint">Les barres représentent les types <b>au catalogue</b> par rareté ; le détail à droite donne l’union et le cumul des joueurs analysés.</div>
+      </div>`;
+  }
+
+  function statQualitySection(data, derived) {
+    const failures = data.failures ?? [];
+    return `
+      <div class="kp-section">
+        <div class="kp-section-title">Qualité des données</div>
+        <div class="kp-stat-facts">
+          <span><em>Analyse</em> ${data.at ? `du ${statDate(data.at)} · ${fmt(derived.poolSize)} profils lus` : 'pas encore lancée'}</span>
+          <span><em>Source</em> classements et profils publics de kyara.games</span>
+          <span><em>Limite du site</em> 100 lignes maximum par classement, 4 tris réels (collection, mythiques, séries, succès)</span>
+          <span><em>Chakra</em> privé : absent des profils publics, donc absent de cet onglet</span>
+          ${failures.length ? `<span class="is-bad"><em>Échecs</em> ${fmt(failures.length)} profil(s) : ${esc(failures.slice(0, 4).map((row) => row.pseudo).join(', '))}${failures.length > 4 ? '…' : ''}</span>` : ''}
+        </div>
+        <div class="kp-hint">Périmètre : les ${fmt(derived.poolSize)} joueurs analysés, choisis en tête des classements publics. Les chiffres ne représentent jamais la totalité des ${fmt(
+          data.totals?.players ?? 0
+        )} joueurs du site, sauf mention explicite.</div>
+      </div>`;
+  }
+
+  function statBodyHTML(derived) {
+    const data = statGlobalData();
+    return `
+      ${statOverviewSection(data)}
+      ${statMythicSection(derived)}
+      ${statHeritageSection(derived)}
+      ${statBoostersSection(derived)}
+      ${statPointsSection(derived)}
+      ${statCardsSection(derived)}
+      ${statQualitySection(data, derived)}
+    `;
+  }
+
+  function viewStat() {
+    if (state.stats.loading) {
+      return '<div class="kp-empty"><span class="kp-spinner"></span> Chargement…</div>';
+    }
+    if (!state.stats.ready) loadStats();
+
+    const data = statGlobalData();
+    const derived = statsDerived();
+
+    return `
+      <div class="kp-stat-head">
+        <div>
+          <b>Statistiques globales</b>
+          <small>Classements publics de Kyara · ${data.at ? `analyse du ${statDate(data.at)}` : 'aucune analyse'} · ${fmt(
+            derived.poolSize
+          )} joueurs analysés</small>
+        </div>
+        <button class="kp-btn" type="button" data-act="stat-refresh" ${state.stats.syncing ? 'disabled' : ''}>${
+          state.stats.syncing ? 'Analyse…' : 'Actualiser'
+        }</button>
+      </div>
+      <div class="kp-hint" data-stat-progress>${esc(state.stats.progress ?? '')}</div>
+      ${state.stats.error ? `<div class="kp-alert is-bad">${esc(state.stats.error)}</div>` : ''}
+      <div data-stat-body>${statBodyHTML(derived)}</div>
+    `;
   }
 
   /* ------------------------------------------------------------------ */
@@ -6340,8 +5782,7 @@
           data = await api(`/api/packs/${encodeURIComponent(pack.id)}/open-many`, {
             method: 'POST',
             body: { count: 1, maxChakra: cost.chakra },
-            timeout: 45000,
-            marker: true
+            timeout: 45000
           });
         } catch (err) {
           const code = err?.code ?? (err?.message === 'pass_required' ? 'pass_required' : null);
@@ -6392,8 +5833,6 @@
         }
 
         const pulled = recordAutoResults(pack, results, cost, 1);
-        // Journal des ouvertures : chaque résultat correspond à un booster ouvert.
-        statsRecordAutoOpenings(pack, results);
         if (data?.user && typeof data.user === 'object') mergeUser(data.user);
         rateHits = 0;
         idleStep = 0;
@@ -8419,34 +7858,10 @@
         searchProfile();
         break;
       case 'stat-refresh':
-        statsEnsureSelf();
-        statsSyncAll(true);
-        break;
-      case 'stat-search':
-        statsSearchAccounts();
-        break;
-      case 'stat-add': {
-        const hit = (state.stats.results ?? []).find((row) => String(row.id) === String(el.getAttribute('data-id')));
-        if (hit) statsAddAccount(hit);
-        break;
-      }
-      case 'stat-remove':
-        statsRemoveAccount(el.getAttribute('data-id'));
+        analyzeGlobalStats(true);
         break;
       case 'stat-rarity':
         state.stats.rarity = el.getAttribute('data-rarity') || 'all';
-        render();
-        break;
-      case 'stat-ranking':
-        state.stats.ranking = el.getAttribute('data-ranking') === 'H' ? 'H' : 'M';
-        render();
-        break;
-      case 'stat-metric':
-        state.stats.metric = el.getAttribute('data-metric') === 'qty' ? 'qty' : 'unique';
-        render();
-        break;
-      case 'stat-openings-view':
-        state.stats.openingsView = el.getAttribute('data-view') === 'accounts' ? 'accounts' : 'packs';
         render();
         break;
       case 'profile-open':
@@ -8707,15 +8122,6 @@
       searchProfile();
       return;
     }
-    if (target.closest('[data-role="stat-account-search"]')) {
-      event.preventDefault();
-      const results = state.stats.results;
-      if (Array.isArray(results) && results.length === 1) {
-        statsAddAccount(results[0]);
-        return;
-      }
-      statsSearchAccounts();
-    }
   }
 
   function onInput(event) {
@@ -8744,13 +8150,6 @@
     if (profileSearch) {
       state.profile.query = profileSearch.value;
       scheduleProfileSearch();
-      return;
-    }
-
-    const statSearch = target.closest('[data-role="stat-account-search"]');
-    if (statSearch) {
-      state.stats.query = statSearch.value;
-      scheduleStatsAccountSearch();
       return;
     }
 
@@ -8870,17 +8269,15 @@
       sellBlockState,
       updateLockBadges,
       prepareSell,
-      // Statistiques (utile pour les tests du harness)
+      // Statistiques globales (utile pour les tests du harness)
       loadStats,
-      statsSyncAll,
-      statsAddAccount,
-      statsRemoveAccount,
+      analyzeGlobalStats,
       statsDerived,
-      statsRecordOpening,
-      statsRecordAutoOpenings,
-      statsHandleManualOpen,
-      installWrappedOpeningHook,
-      extractOpeningResults
+      statBuildPool,
+      statUnionCollections,
+      statSumByRarity,
+      statOwnerIndex,
+      statRank
     };
   }
 

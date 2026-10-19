@@ -2934,9 +2934,21 @@ img.kp-avatar {
 }
 
 .kp-stat-rank-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.kp-stat-rank-name img {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--kp-bg-3);
 }
 
 .kp-stat-rank > b:nth-of-type(2) {

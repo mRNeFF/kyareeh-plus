@@ -4,7 +4,7 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v0.12.0)
+## Fonctionnalités (v0.13.0)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -22,9 +22,8 @@ Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de c
 - **Cartes (nouvel onglet)** : en tête, la *chasse à la carte* — probabilité exacte par booster, pour **tous** les boosters disponibles (pool réel, vedettes et pack doré inclus), nombre de boosters attendus, coût moyen et chance d'au moins une sur 100 boosters. Une fois la carte choisie, seule cette carte reste affichée. En dessous, l'espérance de chakra par booster (retour en %) et les prix moyens par rareté.
 - **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
 - **Auto-Open (nouvel onglet)** : coche **un ou plusieurs** boosters — l'ouverture en tire un **au hasard** à chaque fois, **un booster à la fois**, puis attend un délai aléatoire **entier de 1 min à T_max**, avec **T_max = (9 − B) × I + R** : **B** = boosters dans la jauge, **I** = intervalle de régénération (10 min par défaut), **R** = temps **réel** restant avant le prochain gain (lu dans `nextFreeAt` de l'API, donc jamais remis à zéro par une ouverture). Exemples : 8 boosters et prochain gain dans 7 min → 17 min ; 2 boosters et prochain gain dans 10 min → 80 min ; jauge pleine (10/10) ou T_max < 1 min → **ouverture immédiate**. Avant chaque décision l'état réel est relu (boosters et chrono), et le calcul est refait après chaque attente. Ça continue **jusqu'à ce que tu cliques sur Arrêter**, en attendant les boosters suivants quand il n'y en a plus. Il peut être lancé **même avec 0 booster** : la boucle reste en attente, se relance dès qu'un booster ouvrable apparaît, et ne s'arrête que sur **Arrêter** (elle reprend aussi après un rechargement de page). Il consomme d'abord les boosters offerts (dons, gratuits, bonus), puis le chakra **seulement si tu l'autorises**. Compte à rebours en direct avant le prochain booster. Autres options : **bruit à chaque booster** (carillon, plus aigu sur une Légendaire/Mythique, désactivable), arrêt automatique sur Légendaire/Mythique, et **rafraîchissement automatique du compte** (10 min par défaut) pour voir arriver de nouveaux boosters. Suivi en direct : boosters ouverts, cartes, chakra dépensé, répartition par rareté, meilleures trouvailles et dernier tirage. Les **meilleures trouvailles** gardent les cartes **Épique et au-dessus** dans un pool à part (et non plus les 60 dernières cartes) : une Légendaire ou une Mythique tirée en début de session reste affichée, avec un compteur `×N` si tu l'as eue plusieurs fois, et un halo renforcé sur L/M. Un **watchdog** relance la boucle si elle se tait plus de 2 min (onglet gelé, timer avalé, erreur réseau) et un **journal horodaté** (bouton *Copier le journal*) garde la trace de chaque ouverture, attente, erreur et relance. Si le laissez-passer du site a expiré, un bouton ouvre la page du booster pour le renouveler.
-- **Onglet Stat (nouveau)** : statistiques des **comptes suivis** (liste gérée à la main dans l'onglet, plafonnée à 25, recherche par pseudo, retrait d'un compte sauf le compte connecté). Contenu : **boosters réellement ouverts** (journal local alimenté par l'auto-open *et* par les ouvertures manuelles faites sur le site, capturées sans modifier les requêtes), classement des boosters (égalités affichées ex æquo) et répartition par compte ; **chakra connu** par compte et cumul des soldes connus ; **classements Mythique et Héritage** par cartes différentes ou par exemplaires, avec rangs et ex æquo ; **cartes détenues** avec filtre par rareté (exemplaires, cartes différentes, manquantes sur le catalogue) ; bloc **qualité des données** (comptes en échec, quantités partielles, date de départ du journal). Le suivi démarre à l'installation : les ouvertures antérieures ne sont pas récupérables, et **les boosters possédés ne sont jamais comptés comme ouverts**.
-- **Propriétaires par carte** : dans Vente (Mes cartes, Marché global et fiche carte), une pastille indique combien de **comptes suivis** possèdent la carte (`3 poss.`, info-bulle « 3 des 12 comptes suivis · 4 exemplaires connus »). Un compte qui possède plusieurs exemplaires ne compte qu'une fois. Le chiffre est toujours relatif aux comptes suivis, jamais présenté comme un total du site.
-- **Ouvertures dans Compte** : section dédiée au compte connecté (total, booster favori, répartition), avec les mêmes règles de calcul que l'onglet Stat et un lien direct vers celui-ci.
+- **Onglet Stat (global, v0.13.0)** : statistiques **publiques du site**, sans aucune notion de compte personnel. Il lit les classements publics de Kyara (collection, mythiques, séries, succès) et les profils publics qu'ils contiennent, puis affiche : **joueurs classés**, **joueurs avec au moins une Mythique**, **types au catalogue** et **annonces du marché** ; le **top des cartes Mythiques** ; le **top Héritage** (reconstruit à partir du champ public `heritage`, avec le périmètre affiché) ; les **boosters ouverts** (top des ouvreurs et cumul sur les joueurs analysés — le site ne publie ni total global ni répartition par type) ; le **top points** (le chakra est privé, donc absent) ; et les **types de cartes** avec **filtre par rareté** et trois compteurs distincts : au catalogue, possédés par au moins un joueur analysé (union), possédés cumulés (somme par joueur). L'analyse porte sur les **50 joueurs** en tête de chaque classement, elle est mise en cache 12 h et relançable à la demande ; chaque bloc rappelle son périmètre.
+- **Propriétaires par carte** : dans Vente (Mes cartes, Marché global et fiche carte), une pastille indique combien de **joueurs analysés** possèdent la carte (`6 poss.`, info-bulle « 6 des 50 joueurs analysés possèdent cette carte »). Un joueur qui possède plusieurs exemplaires ne compte qu'une fois, et le chiffre n'est jamais présenté comme un total du site.
 - **Valeur d'un autre compte** : recherche instantanée au fil de la saisie via l'endpoint du site (`/api/me/friends/search`), qui trouve **n'importe quel joueur** y compris avec une petite collection (le classement, utilisé en repli, ne renvoie que les 10 plus grosses collections). Correspondance exacte affichée en premier, avec la relation (`ami`, `demande envoyée`, `demande reçue`). Puis page dédiée avec valeur exacte (prix du jeu), répartition par rareté, plus belles cartes, et bouton **← Mon compte**.
 - **Réglages** : cache des prix, délai entre ventes, taille max du lot, décote, type de vente, pourcentages, mode simulation.
 - **Mise à jour** : bouton **Mettre à jour et recharger** dans les Réglages — vérifie GitHub, recharge l'extension et rafraîchit la page en un clic (après un `git pull` en local). La popup garde un bouton **Recharger l'extension**.
@@ -223,17 +222,17 @@ La valorisation est **exacte**, pas estimée :
 
 Si la liste n'est pas accessible (profil restreint, endpoint modifié), l'extension retombe sur une **estimation** par rareté (médiane des médianes du cache), clairement libellée « estimée », avec le nombre de cartes sans référence.
 
-### Statistiques (onglet Stat)
+### Statistiques globales (onglet Stat)
 
-Le périmètre est **toujours les comptes suivis**, jamais l'ensemble du site :
+Le périmètre est **public** : classements et profils que le site expose déjà, jamais un compte personnel.
 
-1. le compte connecté est suivi automatiquement ; les autres s'ajoutent par pseudo dans l'onglet Stat (25 max) ;
-2. leur collection est lue via `GET /api/trades/owned/:id` (ids uniques) et croisée avec le catalogue `/api/characters` pour les raretés ;
-3. seules les quantités du compte connecté (`/api/me/collection`) sont exactes : pour les autres, l'extension affiche `unique` et marque les exemplaires comme inconnus (`≥`), sans jamais les estimer ;
-4. les **ouvertures** viennent d'un journal local : chaque booster ouvert par l'auto-open est enregistré, et un petit script injecté dans la page (`content/page-hook.js`) observe uniquement les réponses de `POST /api/packs/:id/open-many` faites à la main. Il ne modifie ni ne bloque aucune requête, et ne lit que l'id du booster et la rareté des cartes tirées. Les requêtes de l'extension portent un en-tête `x-kyareeh` pour ne pas être comptées deux fois ;
-5. le journal démarre à l'installation : aucune ouverture antérieure n'est reconstituée, et les boosters **possédés** ne sont jamais comptés comme ouverts.
+1. Sources : `GET /api/leaderboard/ladder?by=collection|mythics|series|achievements` (les seuls tris réellement pris en compte par le serveur — les autres retombent silencieusement sur `collection`), puis `GET /api/users/:id` pour chaque joueur du pool, et `GET /api/trades/owned/:id` pour l'union des types possédés.
+2. Chaque classement renvoie **100 lignes maximum** ; l'extension prend les 50 premiers de chacun, dédoublonnés, ce qui forme le « pool analysé ».
+3. Champs réellement publics utilisés : `owned`, `mythics`, `heritage`, `boostersOpened`, `points`, `series`, `achievements`, `byRarity`, `avatar`, `pseudo`. Le **chakra est privé** : il n'apparaît ni dans les profils publics ni dans les classements, donc l'onglet affiche les points à la place.
+4. Les totaux du site (`105 742` joueurs classés, `52 022` avec au moins une Mythique, `6 736` types au catalogue) viennent des champs `total` et `catalogSize` de l'API. Le reste (Héritage, cumul de boosters, union des types) est **borné au pool analysé**, et chaque bloc l'indique.
+5. Le site ne publie **pas** de répartition des ouvertures par booster : « booster le plus ouvert » n'est pas calculable et n'est pas simulé.
 
-Les calculs sont regroupés dans un bloc pur (`STATS:BEGIN`/`STATS:END`) utilisé par les trois onglets, et vérifiés par `npm run verify:stats`.
+Les calculs sont regroupés dans un bloc pur (`GLOBALSTATS:BEGIN`/`GLOBALSTATS:END`), partagé par l'onglet Stat et les pastilles de l'onglet Vente, et vérifiés par `npm run verify:statglobal`.
 
 ### Espérance des boosters
 
@@ -272,7 +271,7 @@ Validation : `npm run verify:odds` compare la formule aux `perBooster.perCardPct
 npm install          # optionnel, pour web-ext
 npm run start        # lance Firefox avec l'extension
 npm run lint
-npm run verify:stats # calculs de l'onglet Stat
+npm run verify:statglobal # calculs de l'onglet Stat global
 npm run verify:analysis
 npm run build
 ```
@@ -284,7 +283,6 @@ manifest.json
 content/
   ui.js             # panneau, chargement des données, moteur de prix, vente, statistiques
   ui.css            # styles injectés dans le Shadow DOM
-  page-hook.js      # observe les ouvertures manuelles de boosters (aucune requête modifiée)
 popup/              # popup de la barre d'outils
 icons/
 ```
