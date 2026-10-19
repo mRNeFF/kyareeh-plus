@@ -53,7 +53,8 @@
         { id: 999001, name: 'Naruto Uzumaki', rarity: 'L', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b17-6LajS4M0J8c0.png' },
         { id: 999002, name: 'Monkey D. Luffy', rarity: 'E', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b40-5K1xJ0m6w7jK.png' },
         { id: 45627, name: 'Yuki Nagato', rarity: 'R', series: 'The Melancholy of Haruhi Suzumiya', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b45627-8Gm5zY0q9dKx.png' },
-        { id: 45628, name: 'Itsuki Koizumi', rarity: 'R', series: 'The Melancholy of Haruhi Suzumiya', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b45628-2Kp9xR1mQ7aB.png' }
+        { id: 45628, name: 'Itsuki Koizumi', rarity: 'R', series: 'The Melancholy of Haruhi Suzumiya', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b45628-2Kp9xR1mQ7aB.png' },
+        { id: 31337, name: 'Héritage Test', rarity: 'H', series: 'Test', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b45628-2Kp9xR1mQ7aB.png' }
       ];
 
       // Revente bloquée 48 h après un achat : même vocabulaire que le site.
@@ -177,7 +178,18 @@
           });
         }
         if (url.includes('/api/trades/owned/')) {
+          const id = decodeURIComponent(url.split('/api/trades/owned/')[1].split(/[?#]/)[0]);
+          if (id === 'amo-uuid') return json([31337, 127691]);
+          if (id === 'amoulle-uuid') return json([31337, 127691, 999001, 45627, 45628, 127691]);
           return json([127691, 999001, 10668, 282077, 21122, 999002, 127691]);
+        }
+        if (url.includes('/api/users/')) {
+          const id = decodeURIComponent(url.split('/api/users/')[1].split(/[?#]/)[0]);
+          const seen = {
+            'amo-uuid': { id: 'amo-uuid', pseudo: 'Amo', avatar: null, rank: { id: 'rookie', label: 'Rookie' }, owned: 12, mythics: 0, points: 40, best: [] },
+            'amoulle-uuid': { id: 'amoulle-uuid', pseudo: 'Amoulle', avatar: null, rank: { id: 'expert', label: 'Expert' }, owned: 5499, mythics: 12, points: 9819, best: [] }
+          };
+          return json(seen[id] || { id, pseudo: 'Joueur ' + id, avatar: null, owned: 0, mythics: 0, points: 0, best: [] });
         }
         if (url.includes('/api/fair-play/prices')) {
           const ids = new URL(url, location.href).searchParams.get('ids').split(',');
@@ -396,6 +408,15 @@
       };
     </script>
 
+    <script>
+      // ?nohook=1 simule un CSP qui bloque le script injecté : sert à tester le
+      // repli `wrappedJSObject` du content script (API Firefox simulée).
+      if (new URLSearchParams(location.search).has('nohook')) {
+        window.__kyareehDisablePageHook = true;
+        window.wrappedJSObject = window;
+        window.exportFunction = (fn) => fn;
+      }
+    </script>
     <script src="/content/ui.js"></script>
     <script>
       setTimeout(() => {

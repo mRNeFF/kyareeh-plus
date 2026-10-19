@@ -2767,3 +2767,250 @@ img.kp-avatar {
 @keyframes kp-spin {
   to { transform: rotate(360deg); }
 }
+
+/* ------------------------------------------------------------------ */
+/* Onglet Stat                                                         */
+/* ------------------------------------------------------------------ */
+
+.kp-stat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.kp-stat-head b {
+  display: block;
+  font-size: 13px;
+}
+
+.kp-stat-head small {
+  color: var(--kp-muted);
+  font-size: 9.5px;
+}
+
+.kp-stat-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.kp-stat-results {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 8px;
+}
+
+.kp-stat-result {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 7px;
+  border-radius: 9px;
+  background: var(--kp-bg-3);
+}
+
+.kp-stat-result img {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.kp-stat-result b {
+  display: block;
+  font-size: 10.5px;
+}
+
+.kp-stat-result small {
+  color: var(--kp-muted);
+  font-size: 9px;
+}
+
+.kp-stat-result .kp-btn {
+  padding: 4px 9px;
+  font-size: 9.5px;
+}
+
+.kp-stat-accounts {
+  display: grid;
+  gap: 4px;
+}
+
+.kp-stat-account {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--kp-bg-2);
+}
+
+.kp-stat-account.is-column {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.kp-stat-account.is-error {
+  border-color: rgba(255, 107, 107, 0.35);
+}
+
+.kp-stat-account img {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--kp-bg-3);
+}
+
+.kp-stat-account-main b {
+  display: block;
+  font-size: 10.5px;
+}
+
+.kp-stat-account-main small {
+  color: var(--kp-muted);
+  font-size: 9px;
+}
+
+.kp-self-tag {
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(255, 77, 46, 0.16);
+  color: var(--kp-accent);
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
+
+.kp-stat-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.kp-stat-sub .kp-chip {
+  padding: 2px 6px;
+  font-size: 9px;
+}
+
+.kp-stat-ranks {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+}
+
+.kp-stat-rank {
+  display: grid;
+  grid-template-columns: 28px minmax(64px, 1fr) minmax(40px, 1.2fr) 48px 56px;
+  gap: 7px;
+  align-items: center;
+  padding: 4px 7px;
+  border-radius: 8px;
+  background: var(--kp-bg-2);
+  font-size: 10px;
+}
+
+.kp-stat-rank.is-self {
+  box-shadow: inset 0 0 0 1px rgba(255, 77, 46, 0.35);
+}
+
+.kp-stat-rank .kp-bar {
+  height: 5px;
+}
+
+.kp-rank {
+  color: var(--kp-accent);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9.5px;
+}
+
+.kp-stat-rank-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kp-stat-rank > b:nth-of-type(2) {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  text-align: right;
+}
+
+.kp-stat-rank small {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+  text-align: right;
+}
+
+.kp-stat-facts {
+  display: grid;
+  gap: 3px;
+  margin: 8px 0;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: var(--kp-bg-2);
+  font-size: 10px;
+}
+
+.kp-stat-facts span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kp-stat-facts em {
+  color: var(--kp-muted);
+  font-style: normal;
+}
+
+.kp-stat-facts .is-bad {
+  color: var(--kp-bad);
+}
+
+.kp-owner-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.16);
+  color: #93c5fd;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  vertical-align: 1px;
+}
+
+.kp-owner-pill.is-none {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--kp-muted);
+}
+
+.kp-chips.is-wrap {
+  flex-wrap: wrap;
+}
+
+.kp-chip.is-btn {
+  font-family: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.kp-chip.is-btn:hover {
+  border-color: var(--kp-line);
+}
+
+.kp-chip.is-btn.is-active {
+  border-color: var(--kp-accent);
+  color: #fff;
+  background: rgba(255, 77, 46, 0.16);
+}
