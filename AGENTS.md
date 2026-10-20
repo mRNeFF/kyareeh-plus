@@ -9,7 +9,7 @@ Extension **Firefox (Manifest V3)** nommée **Kyareeh+** (`kyara-plus@axel.dev`)
 panneau de contrôle à [kyara.games](https://kyara.games) : tableau de bord du compte, valorisation
 en chakra, vente assistée, marché, chasses de cartes, auto-open de boosters et statistiques.
 
-- Version actuelle : **1.0.1** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **1.0.2** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `150960f`
