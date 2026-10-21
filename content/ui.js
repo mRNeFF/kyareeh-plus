@@ -332,6 +332,7 @@
       </button>
       <section class="kp-panel" hidden aria-label="Kyareeh+">
         <header class="kp-head">
+          <nav class="kp-modes" id="kp-modes"></nav>
           <div class="kp-brand">
             <span class="kp-logo">◆</span>
             <div><b>Kyareeh+</b><small>chakra &amp; doublons</small></div>
@@ -358,6 +359,7 @@
       panel: qs('.kp-panel'),
       stats: qs('#kp-stats'),
       banner: qs('#kp-banner'),
+      modes: qs('#kp-modes'),
       tabs: qs('#kp-tabs'),
       view: qs('#kp-view'),
       foot: qs('#kp-foot'),
@@ -2722,8 +2724,150 @@
     return count;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* +Duel : collection, deck et salons                                  */
+  /* ------------------------------------------------------------------ */
+
+  function duelState() {
+    if (!state.__duel) {
+      state.__duel = { mode: 'tools', tab: 'collection', deck: [], detail: null, relay: '' };
+    }
+    return state.__duel;
+  }
+
+  function duelCards() {
+    return (typeof window !== 'undefined' && window.KYARA_DUEL_DATA?.champions) || [];
+  }
+
+  function duelOwnedIds() {
+    const set = new Set();
+    try {
+      for (const row of ownedRows()) {
+        const id = row?.id ?? row?.rawId;
+        if (id != null) set.add(String(id));
+      }
+    } catch {
+      /* pas connecté */
+    }
+    return set;
+  }
+
+  function duelCardById(id) {
+    return duelCards().find((card) => String(card.id) === String(id)) ?? null;
+  }
+
+  function duelEffectText(move) {
+    const parts = [];
+    if (move.damage) parts.push(`${move.damage} dégâts`);
+    if (move.heal) parts.push(`soin ${move.heal}`);
+    if (move.guard) parts.push(`garde ${move.guard}`);
+    if (move.buff) parts.push(`+${move.buff} dégâts préparés`);
+    if (move.teamAtk) parts.push(`+${move.teamAtk} ATQ équipe`);
+    if (move.healTeam) parts.push(`soin équipe ${move.healTeam}`);
+    if (move.recoil) parts.push(`−${move.recoil} PV`);
+    if (move.skipFoe) parts.push('sonne la cible');
+    return parts.join(' · ');
+  }
+
+  function renderModes() {
+    if (!ui?.modes) return;
+    const duel = duelState();
+    ui.modes.innerHTML = [
+      ['tools', '+Tools'],
+      ['duel', '+Duel']
+    ]
+      .map(
+        ([id, label]) =>
+          `<button class="kp-mode ${duel.mode === id ? 'is-active' : ''}" type="button" data-act="mode" data-mode="${id}">${label}</button>`
+      )
+      .join('');
+  }
+
+  function viewDuelCollection() {
+    const duel = duelState();
+    const cards = duelCards();
+    const owned = duelOwnedIds();
+    const deck = duel.deck;
+    const detail = duel.detail ? duelCardById(duel.detail) : null;
+    const slots = Array.from({ length: 5 }, (_, index) => {
+      const card = deck[index] ? duelCardById(deck[index]) : null;
+      return `<span class="kp-deck-slot ${card ? 'is-full' : ''}">${card ? esc(card.name) : '—'}</span>`;
+    }).join('');
+
+    const detailHtml = detail
+      ? `<div class="kp-duel-detail">
+          <img src="${esc(detail.image)}" alt="">
+          <div>
+            <b>${esc(detail.name)}</b>
+            <small>${esc(detail.rarityLabel ?? '')} · ${esc(detail.role ?? '')} · ${esc(detail.series ?? '')}</small>
+            <div class="kp-duel-stats">${detail.hp} PV · ATQ ${detail.atk}</div>
+            <ul>${(detail.attacks ?? [])
+              .map(
+                (move) =>
+                  `<li><b>${esc(move.name)}</b> <i>${esc(move.kind === 'support' ? 'soutien' : move.kind === 'ultimate' ? 'ultime' : 'attaque')}</i><br><small>${esc(move.desc ?? '')}</small><br><span>${esc(duelEffectText(move))}</span></li>`
+              )
+              .join('')}</ul>
+            <div class="kp-duel-passive"><b>${esc(detail.passive?.name ?? 'Passif')}</b> — ${esc(detail.passive?.desc ?? '')}</div>
+          </div>
+        </div>`
+      : '';
+
+    const grid = cards
+      .map((card) => {
+        const mine = owned.has(String(card.id));
+        const picked = deck.includes(String(card.id));
+        return `<div class="kp-duel-card ${mine ? '' : 'is-locked'} ${picked ? 'is-picked' : ''}" data-act="duel-card" data-id="${esc(String(card.id))}">
+          <img src="${esc(card.image)}" alt="" loading="lazy">
+          <b>${esc(card.name)}</b>
+          <small>${esc(card.rarityLabel ?? '')} · ${esc(card.role ?? '')}</small>
+          <small>${card.hp} PV · ATQ ${card.atk}</small>
+          ${
+            mine
+              ? `<button class="kp-deck-add" type="button" data-act="duel-pick" data-id="${esc(String(card.id))}">${picked ? '✓' : '+'}</button>`
+              : '<span class="kp-duel-lock">non possédée</span>'
+          }
+        </div>`;
+      })
+      .join('');
+
+    return `<div class="kp-duel-head"><b>Collection</b><span>${cards.length} cartes · ${deck.length}/5 dans le deck</span></div>
+      <div class="kp-deck-bar">${slots}<button class="kp-btn" type="button" data-act="duel-clear">Vider</button></div>
+      ${detailHtml}
+      <div class="kp-duel-grid">${grid}</div>`;
+  }
+
+  function viewDuelRooms() {
+    const duel = duelState();
+    return `<div class="kp-duel-head"><b>Duel</b><span>crée ou rejoins un salon</span></div>
+      <div class="kp-duel-room">
+        <label class="kp-duel-field">Adresse du relais
+          <input data-role="duel-relay" placeholder="wss://…" value="${esc(duel.relay)}">
+        </label>
+        <div class="kp-duel-row">
+          <button class="kp-btn is-primary" type="button" data-act="duel-create">Créer un salon</button>
+          <input data-role="duel-code" placeholder="Code (5 lettres)" maxlength="5">
+          <button class="kp-btn" type="button" data-act="duel-join">Rejoindre</button>
+        </div>
+        <p class="kp-duel-note">Le relais WebSocket n'est pas encore configuré : renseigne l'adresse Railway dès qu'elle est disponible.</p>
+      </div>`;
+  }
+
   function renderTabs() {
     if (!ui) return;
+    renderModes();
+    const duel = duelState();
+    if (duel.mode === 'duel') {
+      ui.tabs.innerHTML = [
+        ['collection', 'Collection'],
+        ['duel', 'Duel']
+      ]
+        .map(
+          ([id, label]) =>
+            `<button class="kp-tab ${duel.tab === id ? 'is-active' : ''}" type="button" data-act="duel-tab" data-tab="${id}">${esc(label)}</button>`
+        )
+        .join('');
+      return;
+    }
     const sellable = countSellableCards();
     const tabs = [
       ['account', 'Compte'],
@@ -2763,6 +2907,11 @@
 
   function renderView() {
     if (!ui) return;
+    const duel = duelState();
+    if (duel.mode === 'duel') {
+      ui.view.innerHTML = duel.tab === 'duel' ? viewDuelRooms() : viewDuelCollection();
+      return;
+    }
     const fn = {
       account: viewAccount,
       sell: viewSell,
@@ -8076,6 +8225,53 @@
     if (act === 'sell-detail' && target.closest('input[data-sel]')) return;
 
     switch (act) {
+      case 'mode': {
+        const duel = duelState();
+        duel.mode = el.getAttribute('data-mode') === 'duel' ? 'duel' : 'tools';
+        render();
+        break;
+      }
+      case 'duel-tab': {
+        const duel = duelState();
+        duel.tab = el.getAttribute('data-tab') === 'duel' ? 'duel' : 'collection';
+        render();
+        break;
+      }
+      case 'duel-card': {
+        const duel = duelState();
+        const id = String(el.getAttribute('data-id') ?? '');
+        duel.detail = duel.detail === id ? null : id;
+        render();
+        break;
+      }
+      case 'duel-pick': {
+        const duel = duelState();
+        const id = String(el.getAttribute('data-id') ?? '');
+        if (!duelOwnedIds().has(id)) break;
+        if (duel.deck.includes(id)) duel.deck = duel.deck.filter((value) => value !== id);
+        else if (duel.deck.length < 5) duel.deck = [...duel.deck, id];
+        render();
+        break;
+      }
+      case 'duel-clear': {
+        duelState().deck = [];
+        render();
+        break;
+      }
+      case 'duel-create':
+      case 'duel-join': {
+        const duel = duelState();
+        const relayInput = shadow.querySelector('[data-role="duel-relay"]');
+        const relay = String(relayInput?.value ?? '').trim();
+        duel.relay = relay;
+        if (!relay) {
+          notify('Renseigne l’adresse du relais (wss://…) avant de créer ou rejoindre un salon.');
+        } else {
+          notify('Relais enregistré. La connexion sera branchée dès que l’adresse Railway sera en ligne.');
+        }
+        render();
+        break;
+      }
       case 'toggle':
         toggle();
         break;
