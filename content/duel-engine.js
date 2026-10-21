@@ -1,9 +1,11 @@
-// Kyara Duel — moteur de règles (arène 5 contre 5, Mythiques).
+// Kyara Duel — moteur de règles v2 (combat « à la Pokémon » : un champion actif par camp,
+// banc de 4, changements, choix simultanés et secrets, chakra conservé).
 // Fichier PUR : aucun DOM, réseau, stockage, horloge ni Math.random. L'état est un objet JSON
-// simple ; applyAction ne modifie jamais son entrée. Le hasard vient d'un PRNG (mulberry32)
-// dont l'état vit dans state.rng.
-// Chargement : content script (window.KYARA_DUEL_ENGINE) ou Node (require / import par défaut).
+// simple ; aucune fonction ne modifie son entrée. Le hasard vient d'un PRNG (mulberry32) dont
+// l'état vit dans state.rng : même graine + mêmes choix = même duel.
+// Chargement : page/content script (window.KYARA_DUEL_ENGINE) ou Node (require / import par défaut).
 // Règles complètes : content/duel-rules.js (window.KYARA_DUEL_RULES) et docs/REGLES-DUEL.md.
+// Contrat : docs/DUEL-V2.md §1.
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module && module.exports) module.exports = api;
@@ -12,32 +14,48 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  // ─── Constantes réglables (§2 de la spécification) ─────────────────────────────────────────
+  // ─── Constantes réglables ─────────────────────────────────────────────────────────────────
   // Copiées dans state.rules à la création du duel : un duel en cours garde ses règles.
+  // Seules ces constantes servent à équilibrer (jamais les chiffres des cartes).
   const RULES = Object.freeze({
     deckSize: 5,
-    startChakra: 1,      // chakra au début du duel (avant le gain du premier tour)
-    chakraPerTurn: 1,    // gagné au début de chaque tour joué
+    startChakra: 1,        // chakra au début du duel (avant le gain du premier tour)
+    chakraPerTurn: 1,      // gagné par les deux joueurs au début de chaque tour
     maxChakra: 5,
     attackCost: 0,
     supportCost: 1,
-    ultimateCost: 4,     // et une seule fois par champion et par duel
-    atkBonusCap: 3,      // plafond des bonus d'ATQ permanents
+    ultimateCost: 4,       // et une seule fois par champion et par duel
+    switchCost: 0,         // chakra payé pour changer d'actif (le changement consomme toujours l'action)
+    atkBonusCap: 3,        // plafond des bonus d'ATQ permanents
     guardCap: 20,
-    guardDecayPct: 100,  // % de garde perdue au début de chaque tour de son camp (arrondi au supérieur)
-    secondPlayerGuard: 6, // garde de départ des champions du camp qui joue en second dans la 1re manche
-    buffCap: 3,          // plafond des dégâts préparés
-    poisonDamage: 1,     // PV perdus en fin de manche
+    guardDecayPct: 100,    // % de garde perdue par l'actif au début de chaque tour (arrondi au supérieur)
+    benchGuardDecayPct: 0, // idem pour les champions du banc
+    buffCap: 3,            // plafond des dégâts préparés
+    poisonDamage: 1,       // PV perdus en fin de tour
     curseDamage: 1,
-    weaknessMalus: 4,    // dégâts en moins par coup infligé
-    rageBonus: 2,        // dégâts en plus par coup infligé
-    regenHeal: 4,        // PV rendus en fin de manche
+    weaknessMalus: 4,      // dégâts en moins par coup infligé
+    rageBonus: 2,          // dégâts en plus par coup infligé
+    regenHeal: 4,          // PV rendus en fin de tour
+    benchDots: 0,          // 1 : poison, malédiction et régénération frappent aussi le banc
     hasteSecondHitPct: 35, // Hâte : le 2e coup inflige ce % des dégâts d'un coup normal (arrondi)
-    lowHpPct: 50,        // « sous 50 % de PV » = PV ≤ 50 % des PV max
+    damagePct: 100,        // multiplicateur global (%) des dégâts des capacités
+    typeChart: 1,          // 0 : table des types neutralisée (tout à ×1)
+    typeStrong: 1.25,      // Duelliste ▶ Mystique ▶ Gardien ▶ Duelliste
+    typeWeak: 0.8,         // sens inverse du triangle
+    typeStrongMinor: 1.15, // Stratège ▶ Soutien
+    typeWeakMinor: 0.9,    // Soutien ▷ Stratège
+    lowHpPct: 50,          // « sous 50 % de PV » = PV ≤ 50 % des PV max
     reviveHpPct: 50,
-    maxRounds: 30,
-    turnSeconds: 60,     // délai de tour en ligne (appliqué par le relais)
-    logSize: 120         // lignes de journal conservées dans l'état
+    fatigueTurn: 18,       // dès ce tour (0 = désactivé), les deux actifs s'épuisent en fin de tour
+    fatigueDamage: 3,      // PV perdus au premier tour d'épuisement, multipliés par 2, 3… les tours suivants
+    dyingStrike: 1,        // 1 : un champion mis K.O. avant d'agir joue quand même sa capacité (dernier souffle)
+    speedBand: 1,          // la vitesse est comparée par paliers de N points (1 = exacte)
+    speedLuck: 0,          // % de tours où l'ordre des capacités est tiré au sort malgré la vitesse
+    maxTurns: 40,          // limite de tours → victoire au % de PV restants
+    chooseSeconds: 45,     // délai de choix en ligne (appliqué par le relais)
+    replaceSeconds: 20,    // délai de remplacement en ligne
+    turnSeconds: 45,       // alias v1 de chooseSeconds
+    logSize: 200           // lignes de journal conservées dans l'état
   });
 
   const STATUS_KEYS = ['poison', 'curse', 'weakness', 'rage', 'regen', 'haste'];
@@ -51,6 +69,38 @@
     haste: 'Hâte'
   };
   const KIND_LABELS = { attack: 'Attaque', support: 'Soutien', ultimate: 'Ultime' };
+
+  // ─── Types (= rôles des cartes) ───────────────────────────────────────────────────────────
+  // strong : types que ses capacités frappent plus fort ; weak : types qu'elles frappent moins fort.
+  const TYPES = Object.freeze({
+    Duelliste: Object.freeze({ label: 'Duelliste', color: '#ff5a4e', strong: Object.freeze(['Mystique']), weak: Object.freeze(['Gardien']) }),
+    Mystique: Object.freeze({ label: 'Mystique', color: '#a66bff', strong: Object.freeze(['Gardien']), weak: Object.freeze(['Duelliste']) }),
+    Gardien: Object.freeze({ label: 'Gardien', color: '#4aa3ff', strong: Object.freeze(['Duelliste']), weak: Object.freeze(['Mystique']) }),
+    Stratège: Object.freeze({ label: 'Stratège', color: '#ffc24a', strong: Object.freeze(['Soutien']), weak: Object.freeze([]) }),
+    Soutien: Object.freeze({ label: 'Soutien', color: '#3fd68a', strong: Object.freeze([]), weak: Object.freeze(['Stratège']) })
+  });
+  // Paires du « petit » rapport de force (Stratège / Soutien) : multiplicateurs mineurs.
+  const MINOR = new Set(['Stratège>Soutien', 'Soutien>Stratège']);
+  const NEUTRAL_COLOR = '#c8c8d0';
+
+  function typeOf(champion) {
+    const raw = String((champion && (champion.type || champion.role)) || '').trim();
+    if (raw === 'Gardienne') return 'Gardien';
+    return TYPES[raw] ? raw : '';
+  }
+
+  function colorOfType(type) {
+    return TYPES[type] ? TYPES[type].color : NEUTRAL_COLOR;
+  }
+
+  function effectiveness(attType, defType, rules) {
+    const r = rules || RULES;
+    if (!r.typeChart || !TYPES[attType] || !TYPES[defType]) return 1;
+    const minor = MINOR.has(`${attType}>${defType}`);
+    if (TYPES[attType].strong.includes(defType)) return minor ? r.typeStrongMinor : r.typeStrong;
+    if (TYPES[attType].weak.includes(defType)) return minor ? r.typeWeakMinor : r.typeWeak;
+    return 1;
+  }
 
   // ─── PRNG ─────────────────────────────────────────────────────────────────────────────────
   function seedOf(seed) {
@@ -107,7 +157,11 @@
     return rules.attackCost;
   }
 
-  // 'enemy' | 'ally' | 'none' (§2.3).
+  function hasKeys(obj) {
+    return !!obj && typeof obj === 'object' && Object.keys(obj).length > 0;
+  }
+
+  // 'enemy' (l'actif adverse) | 'ally' (un allié vivant, banc compris) | 'none'.
   function targetMode(move) {
     if (!move) return 'none';
     if ((move.damage ?? 0) > 0 || Array.isArray(move.randomDamage) || hasKeys(move.apply) || move.skipFoe === true || (Array.isArray(move.instakill) && move.instakill.length)) return 'enemy';
@@ -117,10 +171,6 @@
 
   function dealsDamage(move) {
     return (move.damage ?? 0) > 0 || Array.isArray(move.randomDamage);
-  }
-
-  function hasKeys(obj) {
-    return !!obj && typeof obj === 'object' && Object.keys(obj).length > 0;
   }
 
   const MOVE_FIELDS = ['damage', 'randomDamage', 'heal', 'healTeam', 'healTeamFull', 'guard', 'buff', 'selfAtk', 'teamAtk',
@@ -138,12 +188,15 @@
       move.targeting = targetMode(move);
       return move;
     });
+    const type = typeOf(card);
     return {
       id: card.id,
       name: card.name,
       image: card.image ?? '',
       series: card.series ?? '',
       role: card.role ?? '',
+      type,
+      color: colorOfType(type),
       hp: card.hp,
       maxHp: card.hp,
       atk: card.atk,
@@ -169,24 +222,28 @@
   }
 
   // ─── Création ─────────────────────────────────────────────────────────────────────────────
+  // L'ordre du deck est l'alignement : le premier champion entre en jeu, les 4 autres forment le banc.
   function createMatch(opts) {
     const { data, seed, players } = opts ?? {};
     if (!Array.isArray(players) || players.length !== 2) throw new Error('Il faut exactement 2 joueurs.');
     const rules = Object.assign({}, RULES, opts.rules ?? {});
     const byId = new Map(mythics(data).map((c) => [Number(c.id), c]));
     const s = {
-      v: 1,
+      v: 2,
       rules,
       seed: seedOf(seed),
       rng: seedOf(seed),
-      round: 0,
       turn: 0,
-      first: 0,
-      half: 0,
-      turnSeq: 0,
+      round: 0,
+      phase: 'choose',
+      need: [false, false],
+      choices: [null, null],
+      bonus: false,
+      order: [0, 1],
+      acted: [false, false],
+      cancel: [false, false],
       seq: 0,
       koCount: 0,
-      extraTurn: false,
       winner: null,
       endReason: null,
       players: players.map((p, i) => {
@@ -196,7 +253,9 @@
           id: p.id ?? `j${i + 1}`,
           name: String(p.name ?? `Joueur ${i + 1}`),
           chakra: rules.startChakra,
+          active: 0,
           skipNext: false,
+          extra: false,
           champions: p.deck.map((id) => buildChampion(byId.get(Number(id)), rules))
         };
       }),
@@ -204,65 +263,91 @@
       lastEvents: []
     };
     const ev = [];
-    startRound(s, ev);
+    for (let side = 0; side < 2; side += 1) {
+      const c = s.players[side].champions[0];
+      emit(s, ev, c, 'switch', { player: side, playerName: s.players[side].name, from: null, to: 0, fromName: null, lead: true });
+    }
+    for (let side = 0; side < 2; side += 1) firePassive(s, ev, s.players[side].champions[0], 'onSwitchIn', {});
+    startTurn(s, ev);
     finishTransition(s, ev);
     return s;
   }
 
   // ─── Lecture ──────────────────────────────────────────────────────────────────────────────
-  function currentPlayer(state) {
-    if (!state || state.winner !== null && state.winner !== undefined) return null;
-    return state.turn;
+  function isOver(state) {
+    return !state || state.phase === 'ended' || (state.winner !== null && state.winner !== undefined);
+  }
+
+  function pendingPlayers(state) {
+    if (isOver(state) || !Array.isArray(state.need)) return [];
+    return [0, 1].filter((i) => state.need[i] && !state.choices[i]);
   }
 
   function isLow(s, c) {
     return c.hp * 100 <= c.maxHp * s.rules.lowHpPct;
   }
 
-  function legalActions(state, playerIndex) {
-    if (currentPlayer(state) !== playerIndex) return [];
-    const me = state.players[playerIndex];
-    const foeSide = 1 - playerIndex;
-    const foe = state.players[foeSide];
+  function activeOf(s, side) {
+    const pl = s.players[side];
+    return pl.champions[pl.active];
+  }
+
+  // Actions possibles pour le joueur p dans la phase courante, sans regarder s'il a déjà choisi.
+  function legalFor(s, p) {
+    if (isOver(s) || !s.need[p]) return [];
+    const me = s.players[p];
     const out = [];
-    me.champions.forEach((c, j) => {
-      if (!c.alive) return;
+    if (s.phase === 'replace') {
+      me.champions.forEach((c, j) => {
+        if (c.alive && j !== me.active) out.push({ type: 'switch', to: j });
+      });
+      return out;
+    }
+    if (me.skipNext) return [{ type: 'pass' }];
+    const c = me.champions[me.active];
+    const foeSide = 1 - p;
+    const foeActive = activeOf(s, foeSide);
+    if (c && c.alive) {
       c.moves.forEach((m, k) => {
         if (me.chakra < m.cost) return;
         if (m.kind === 'ultimate' && c.ultimateUsed) return;
         if (c.disabled > 0 && m.kind !== 'support') return;
-        if (m.sacrifice && !me.champions.some((x, i) => i !== j && x.alive)) return;
+        if (m.sacrifice && !me.champions.some((x, i) => i !== me.active && x.alive)) return;
         if (m.targeting === 'enemy') {
-          foe.champions.forEach((t, i) => {
-            if (t.alive) out.push({ type: 'move', actor: j, move: k, target: { side: foeSide, index: i } });
-          });
+          if (foeActive && foeActive.alive) out.push({ type: 'move', move: k, target: { side: foeSide, index: s.players[foeSide].active } });
         } else if (m.targeting === 'ally') {
           me.champions.forEach((t, i) => {
-            if (t.alive) out.push({ type: 'move', actor: j, move: k, target: { side: playerIndex, index: i } });
+            if (t.alive) out.push({ type: 'move', move: k, target: { side: p, index: i } });
           });
         } else {
-          out.push({ type: 'move', actor: j, move: k });
+          out.push({ type: 'move', move: k });
         }
       });
-    });
+    }
+    if (me.chakra >= s.rules.switchCost) {
+      me.champions.forEach((t, j) => {
+        if (t.alive && j !== me.active) out.push({ type: 'switch', to: j });
+      });
+    }
     out.push({ type: 'pass' });
     return out;
+  }
+
+  function legalActions(state, player) {
+    if (!pendingPlayers(state).includes(player)) return [];
+    return legalFor(state, player);
   }
 
   function actionKey(a) {
     if (!a || typeof a !== 'object') return '';
     if (a.type === 'pass') return 'pass';
+    if (a.type === 'switch') return `switch:${a.to}`;
     if (a.type !== 'move') return '';
     const t = a.target;
-    return `move:${a.actor}:${a.move}${t ? `:${t.side}:${t.index}` : ''}`;
+    return `move:${a.move}${t ? `:${t.side}:${t.index}` : ''}`;
   }
 
   // ─── Événements ───────────────────────────────────────────────────────────────────────────
-  function who(s, side, index) {
-    const c = s.players[side].champions[index];
-    return { side, index, name: c.name };
-  }
-
   function sideIndex(s, c) {
     for (let side = 0; side < 2; side += 1) {
       const index = s.players[side].champions.indexOf(c);
@@ -271,9 +356,15 @@
     return { side: -1, index: -1 };
   }
 
+  // Champs communs des événements de champion : side, index, name, champType, color.
+  function tag(s, side, index) {
+    const c = s.players[side].champions[index];
+    return { side, index, name: c.name, champType: c.type, color: c.color };
+  }
+
   function emit(s, ev, c, type, extra) {
     const pos = sideIndex(s, c);
-    ev.push(Object.assign({ type, side: pos.side, index: pos.index, name: c.name }, extra));
+    ev.push(Object.assign({ type, side: pos.side, index: pos.index, name: c.name, champType: c.type, color: c.color }, extra));
   }
 
   // ─── Primitives d'effets ──────────────────────────────────────────────────────────────────
@@ -292,7 +383,8 @@
     c.disabledFresh = false;
     s.koCount += 1;
     c.koOrder = s.koCount;
-    emit(s, ev, c, 'ko', { cause });
+    const pos = sideIndex(s, c);
+    emit(s, ev, c, 'ko', { cause, active: pos.side >= 0 && s.players[pos.side].active === pos.index });
   }
 
   function healBonusOf(c) {
@@ -371,7 +463,7 @@
     emit(s, ev, c, 'dispel', { status: pick, turns: removed, left: c.statuses[pick] ?? 0 });
   }
 
-  // Perte de PV « coût » (recul, sacrifice d'équipe) : ignore garde et invincibilité, jamais mortelle.
+  // Perte de PV « coût » (contrecoup, effort d'équipe) : ignore garde et invulnérabilité, jamais mortelle.
   function payHp(s, ev, c, amount, source) {
     if (!c.alive || amount <= 0) return;
     const lost = Math.min(amount, c.hp - 1);
@@ -382,7 +474,7 @@
   }
 
   // Dégâts subis. source : 'move' (capacité ennemie) | 'poison' | 'curse'.
-  function takeDamage(s, ev, c, amount, source, hit) {
+  function takeDamage(s, ev, c, amount, source, extra) {
     if (!c.alive) return;
     if (c.invincible > 0) {
       emit(s, ev, c, 'blocked', { by: 'invincible', what: source });
@@ -401,7 +493,7 @@
       emit(s, ev, c, 'survive', {});
     }
     c.hp -= rest;
-    emit(s, ev, c, 'damage', Object.assign({ amount: rest, absorbed, hp: Math.max(0, c.hp), source }, hit ? { hit } : {}));
+    emit(s, ev, c, 'damage', Object.assign({ amount: rest, absorbed, hp: Math.max(0, c.hp), source }, extra || {}));
     if (c.hp <= 0) {
       ko(s, ev, c, source === 'move' ? 'damage' : source);
       return;
@@ -415,15 +507,6 @@
     if (!c.alive) return;
     if (isLow(s, c)) firePassive(s, ev, c, 'lowHp', {});
     firePassive(s, ev, c, 'hpAtMost', {});
-  }
-
-  function strongestFoe(s, c) {
-    const pos = sideIndex(s, c);
-    let best = null;
-    for (const t of s.players[1 - pos.side].champions) {
-      if (t.alive && (!best || t.hp > best.hp)) best = t;
-    }
-    return best;
   }
 
   function mostWoundedAlly(s, c) {
@@ -444,8 +527,8 @@
       if (when === 'hpAtMost' && !(c.hp <= r.hpAtMost)) continue;
       if (r.ifLowHp && !isLow(s, c)) continue;
       if (r.perTurn) {
-        if (c.lastDamagedTurn === s.turnSeq) continue;
-        c.lastDamagedTurn = s.turnSeq;
+        if (c.lastDamagedTurn === s.turn) continue;
+        c.lastDamagedTurn = s.turn;
       }
       if (r.once) c.fired.push(i);
       emit(s, ev, c, 'passive', { passive: c.passive.name, when });
@@ -466,7 +549,9 @@
       }
       case 'status': applyStatus(s, ev, c, e.status, e.turns, 'passive'); break;
       case 'foeStatus': {
-        const t = 'target' in ctx ? ctx.target : strongestFoe(s, c);
+        // Cible : l'ennemi touché (« quand il touche ») ou l'actif adverse (début de tour).
+        const pos = sideIndex(s, c);
+        const t = 'target' in ctx ? ctx.target : activeOf(s, 1 - pos.side);
         if (t && t.alive) applyStatus(s, ev, t, e.status, e.turns, 'passive');
         break;
       }
@@ -484,82 +569,170 @@
     return c.passiveFx.rules.some((r) => r.when === 'static' && r.effects.some((e) => e.type === 'initiative' && test(e)));
   }
 
-  // ─── Déroulement ──────────────────────────────────────────────────────────────────────────
-  function initiative(s) {
-    const alive = s.players.map((p) => p.champions.filter((c) => c.alive));
-    if (s.round === 1) {
-      const ram = alive.map((list, side) => list.some((c) => hasInitiativeFx(c, (e) => e.foe && e.firstRound
-        && alive[1 - side].some((x) => x.name === e.foe))));
-      if (ram[0] !== ram[1]) return { first: ram[0] ? 0 : 1, reason: 'ram' };
-    }
-    const subaru = alive.map((list) => list.some((c) => hasInitiativeFx(c, (e) => !e.foe)));
-    if (subaru[0] !== subaru[1]) return { first: subaru[0] ? 0 : 1, reason: 'subaru' };
-    const speed = alive.map((list) => Math.max(0, ...list.map((c) => c.speed)));
-    if (speed[0] !== speed[1]) return { first: speed[0] > speed[1] ? 0 : 1, reason: 'speed', speed };
-    return { first: rand(s) < 0.5 ? 0 : 1, reason: 'tie', speed };
+  // ─── Ordre d'action ───────────────────────────────────────────────────────────────────────
+  // Champion qui sera actif au moment des capacités : le remplaçant d'un changement choisi,
+  // sinon l'actif en place.
+  function nextActive(s, side, acts) {
+    const pl = s.players[side];
+    const a = acts && acts[side];
+    return a && a.type === 'switch' && pl.champions[a.to] ? pl.champions[a.to] : pl.champions[pl.active];
   }
 
-  function startRound(s, ev) {
-    s.round += 1;
-    const init = initiative(s);
-    s.first = init.first;
-    s.half = 0;
-    const lead = init.reason === 'ram' || init.reason === 'subaru'
-      ? s.players[init.first].champions.find((c) => c.alive && hasInitiativeFx(c, init.reason === 'ram' ? (e) => !!e.foe : (e) => !e.foe))
-      : null;
-    ev.push(Object.assign({ type: 'round', round: s.round, first: s.first, playerName: s.players[s.first].name, reason: init.reason },
-      lead ? { by: lead.name } : {}));
-    if (s.round === 1 && s.rules.secondPlayerGuard > 0) {
-      for (const c of s.players[1 - s.first].champions) addGuard(s, ev, c, s.rules.secondPlayerGuard, 'rule');
+  // Priorité (Ram face à Rem au 1er tour, puis Subaru), seulement quand le champion concerné est
+  // l'actif ; puis vitesse de l'actif ; puis graine. Renvoie { order, reason, speeds, by? }.
+  function priorityOf(s, side, acts) {
+    const me = nextActive(s, side, acts);
+    const foe = nextActive(s, 1 - side, acts);
+    if (me && me.alive) {
+      if (s.turn === 1 && hasInitiativeFx(me, (e) => e.foe && e.firstRound && foe && foe.name === e.foe)) return { level: 2, reason: 'ram', by: me.name };
+      if (hasInitiativeFx(me, (e) => !e.foe)) return { level: 1, reason: 'subaru', by: me.name };
     }
-    startTurn(s, ev, s.first);
+    return { level: 0 };
   }
 
-  function startTurn(s, ev, p) {
-    s.turn = p;
-    s.turnSeq += 1;
-    s.extraTurn = false;
-    const pl = s.players[p];
-    ev.push({ type: 'turn', player: p, playerName: pl.name, round: s.round, extra: false });
-    if (s.rules.guardDecayPct > 0) {
-      for (const c of pl.champions) {
-        if (!c.alive || c.guard <= 0) continue;
-        const lost = Math.ceil((c.guard * s.rules.guardDecayPct) / 100);
+  function computeOrder(s, players, acts) {
+    const speeds = [0, 1].map((side) => {
+      const c = nextActive(s, side, acts);
+      return c ? c.speed : 0;
+    });
+    if (players.length < 2) return { order: players.slice(), reason: 'single', speeds };
+    const pr = [priorityOf(s, 0, acts), priorityOf(s, 1, acts)];
+    if (pr[0].level !== pr[1].level) {
+      const first = pr[0].level > pr[1].level ? 0 : 1;
+      return { order: [first, 1 - first], reason: pr[first].reason, by: pr[first].by, speeds };
+    }
+    const band = Math.max(1, s.rules.speedBand | 0);
+    const rank = speeds.map((v) => Math.floor(v / band));
+    if (rank[0] !== rank[1] && s.rules.speedLuck > 0 && rand(s) * 100 < s.rules.speedLuck) {
+      const first = rand(s) < 0.5 ? 0 : 1;
+      return { order: [first, 1 - first], reason: 'luck', speeds };
+    }
+    if (rank[0] !== rank[1]) {
+      const first = rank[0] > rank[1] ? 0 : 1;
+      return { order: [first, 1 - first], reason: 'speed', speeds };
+    }
+    const first = rand(s) < 0.5 ? 0 : 1;
+    return { order: [first, 1 - first], reason: 'tie', speeds };
+  }
+
+  // ─── Déroulement d'un tour ────────────────────────────────────────────────────────────────
+  function startTurn(s, ev) {
+    s.turn += 1;
+    s.round = s.turn;
+    s.phase = 'choose';
+    s.bonus = false;
+    s.need = [true, true];
+    s.choices = [null, null];
+    ev.push({ type: 'turn', turn: s.turn });
+    for (let side = 0; side < 2; side += 1) {
+      const pl = s.players[side];
+      pl.champions.forEach((c, j) => {
+        const pct = j === pl.active ? s.rules.guardDecayPct : s.rules.benchGuardDecayPct;
+        if (!c.alive || c.guard <= 0 || !(pct > 0)) return;
+        const lost = Math.min(c.guard, Math.ceil((c.guard * pct) / 100));
         c.guard -= lost;
         emit(s, ev, c, 'guardDecay', { amount: lost, guard: c.guard });
+      });
+    }
+    for (let side = 0; side < 2; side += 1) {
+      const pl = s.players[side];
+      const before = pl.chakra;
+      pl.chakra = Math.min(s.rules.maxChakra, pl.chakra + s.rules.chakraPerTurn);
+      ev.push({ type: 'chakra', player: side, playerName: pl.name, delta: pl.chakra - before, chakra: pl.chakra });
+    }
+    for (let side = 0; side < 2; side += 1) firePassive(s, ev, activeOf(s, side), 'turnStart', {});
+  }
+
+  function doSwitch(s, ev, p, to, forced) {
+    const pl = s.players[p];
+    const from = pl.active;
+    const out = pl.champions[from];
+    if (!forced && s.rules.switchCost > 0) {
+      pl.chakra -= s.rules.switchCost;
+      ev.push({ type: 'chakra', player: p, playerName: pl.name, delta: -s.rules.switchCost, chakra: pl.chakra });
+    }
+    pl.active = to;
+    const inc = pl.champions[to];
+    emit(s, ev, inc, 'switch', { player: p, playerName: pl.name, from, to, fromName: out ? out.name : null, forced: !!forced });
+    firePassive(s, ev, inc, 'onSwitchIn', {});
+  }
+
+  // Résout les actions choisies (tour normal ou action bonus « rejoue »).
+  function resolveChoices(s, ev) {
+    const players = [0, 1].filter((i) => s.need[i]);
+    const acts = [null, null];
+    for (const p of players) acts[p] = s.choices[p];
+    s.acted = [false, false];
+    s.cancel = [false, false];
+    s.need = [false, false];
+    s.choices = [null, null];
+    const wasBonus = s.bonus;
+    s.bonus = false;
+    // Action perdue (« sautera sa prochaine action ») : consommée ici.
+    for (const p of players) {
+      if (s.players[p].skipNext) {
+        s.players[p].skipNext = false;
+        acts[p] = { type: 'skip' };
       }
     }
-    if (pl.skipNext) {
-      pl.skipNext = false;
-      ev.push({ type: 'skip', player: p, playerName: pl.name });
-      endTurn(s, ev, p);
-      advance(s, ev);
+    const info = computeOrder(s, players, acts);
+    s.order = info.order.length === 2 ? info.order : [info.order[0] ?? 0, 1 - (info.order[0] ?? 0)];
+    ev.push(Object.assign({ type: 'turnOrder', turn: s.turn, order: info.order, reason: info.reason, speeds: info.speeds, bonus: wasBonus,
+      kinds: info.order.map((p) => acts[p].type) }, info.by ? { by: info.by } : {}));
+    // 1. Changements (les deux camps), dans l'ordre d'action.
+    for (const p of info.order) {
+      if (acts[p].type !== 'switch') continue;
+      doSwitch(s, ev, p, acts[p].to, false);
+      s.acted[p] = true;
+    }
+    // 2. Capacités et passes, par vitesse.
+    for (const p of info.order) {
+      if (s.winner !== null) break;
+      const a = acts[p];
+      if (a.type === 'switch') continue;
+      const pl = s.players[p];
+      if (a.type === 'skip') {
+        ev.push({ type: 'skip', player: p, playerName: pl.name });
+      } else if (s.cancel[p]) {
+        ev.push({ type: 'skip', player: p, playerName: pl.name, now: true });
+      } else if (a.type === 'pass') {
+        ev.push({ type: 'pass', player: p, playerName: pl.name });
+      } else {
+        const c = activeOf(s, p);
+        if (!c.alive && !(s.rules.dyingStrike && a.type === 'move')) {
+          emit(s, ev, c, 'fail', { player: p, playerName: pl.name, reason: 'ko', moveName: c.moves[a.move].name });
+        } else {
+          resolveMove(s, ev, p, a, !c.alive);
+        }
+      }
+      s.acted[p] = true;
+      checkEnd(s, ev);
+    }
+    if (s.winner !== null) return;
+    // 3. Action bonus (« rejoue ») avant la fin du tour.
+    const extra = [0, 1].filter((p) => s.players[p].extra);
+    for (const p of [0, 1]) s.players[p].extra = false;
+    const bonus = extra.filter((p) => activeOf(s, p).alive);
+    if (bonus.length) {
+      s.phase = 'choose';
+      s.bonus = true;
+      s.need = [bonus.includes(0), bonus.includes(1)];
+      for (const p of bonus) ev.push({ type: 'extraTurn', player: p, playerName: s.players[p].name });
       return;
     }
-    const before = pl.chakra;
-    pl.chakra = Math.min(s.rules.maxChakra, pl.chakra + s.rules.chakraPerTurn);
-    ev.push({ type: 'chakra', player: p, playerName: pl.name, delta: pl.chakra - before, chakra: pl.chakra });
-    for (const c of pl.champions) firePassive(s, ev, c, 'turnStart', {});
+    endOfTurn(s, ev);
   }
 
-  function endTurn(s, ev, p) {
-    for (const c of s.players[p].champions) {
-      if (c.disabled > 0) {
-        if (c.disabledFresh) c.disabledFresh = false;
-        else c.disabled -= 1;
-      }
-    }
-  }
-
-  function endRound(s, ev) {
-    const order = [s.first, 1 - s.first];
+  function endOfTurn(s, ev) {
+    const order = s.order;
     for (const side of order) {
-      for (const c of s.players[side].champions) {
-        if (!c.alive) continue;
+      const pl = s.players[side];
+      pl.champions.forEach((c, j) => {
+        if (!c.alive || (j !== pl.active && !s.rules.benchDots)) return;
         if ((c.statuses.poison ?? 0) > 0) takeDamage(s, ev, c, s.rules.poisonDamage, 'poison');
         if (c.alive && (c.statuses.curse ?? 0) > 0) takeDamage(s, ev, c, s.rules.curseDamage, 'curse');
         if (c.alive && (c.statuses.regen ?? 0) > 0) heal(s, ev, c, s.rules.regenHeal, 'regen');
-      }
+      });
     }
     for (const side of order) {
       for (const c of s.players[side].champions) {
@@ -576,28 +749,50 @@
           c.invincible -= 1;
           if (c.invincible === 0) emit(s, ev, c, 'expire', { status: 'invincible' });
         }
+        if (c.disabled > 0) {
+          if (c.disabledFresh) c.disabledFresh = false;
+          else {
+            c.disabled -= 1;
+            if (c.disabled === 0) emit(s, ev, c, 'expire', { status: 'disabled' });
+          }
+        }
       }
     }
-    ev.push({ type: 'roundEnd', round: s.round });
-  }
-
-  function advance(s, ev) {
-    if (s.winner !== null) return;
-    if (s.half === 0) {
-      s.half = 1;
-      startTurn(s, ev, 1 - s.first);
-      return;
+    if (s.rules.fatigueTurn > 0 && s.turn >= s.rules.fatigueTurn) {
+      const amount = s.rules.fatigueDamage * (s.turn - s.rules.fatigueTurn + 1);
+      ev.push({ type: 'fatigue', turn: s.turn, amount });
+      for (const side of order) {
+        const c = activeOf(s, side);
+        if (c.alive) takeDamage(s, ev, c, amount, 'fatigue');
+      }
     }
-    endRound(s, ev);
+    ev.push({ type: 'turnEnd', turn: s.turn });
     checkEnd(s, ev);
     if (s.winner !== null) return;
-    if (s.round >= s.rules.maxRounds) {
+    if (s.turn >= s.rules.maxTurns) {
       const pct = hpPct(s);
       const cmp = pct[0].hp * pct[1].max - pct[1].hp * pct[0].max;
       finish(s, ev, cmp > 0 ? 0 : cmp < 0 ? 1 : 'draw', 'rounds');
       return;
     }
-    startRound(s, ev);
+    const need = [0, 1].map((p) => !activeOf(s, p).alive);
+    if (need[0] || need[1]) {
+      s.phase = 'replace';
+      s.need = need;
+      s.choices = [null, null];
+      for (const p of [0, 1]) if (need[p]) ev.push({ type: 'phaseReplace', player: p, playerName: s.players[p].name });
+      return;
+    }
+    startTurn(s, ev);
+  }
+
+  function resolveReplace(s, ev) {
+    const players = [0, 1].filter((i) => s.need[i]);
+    const acts = players.map((p) => [p, s.choices[p]]);
+    s.need = [false, false];
+    s.choices = [null, null];
+    for (const [p, a] of acts) doSwitch(s, ev, p, a.to, true);
+    startTurn(s, ev);
   }
 
   function hpPct(s) {
@@ -614,16 +809,37 @@
   function finish(s, ev, winner, reason) {
     s.winner = winner;
     s.endReason = reason;
+    s.phase = 'ended';
+    s.need = [false, false];
+    s.choices = [null, null];
+    s.bonus = false;
     const pct = hpPct(s).map((x) => (x.max ? Math.round((x.hp * 1000) / x.max) / 10 : 0));
-    ev.push({ type: 'end', winner, reason, hpPct: pct, names: s.players.map((p) => p.name) });
+    ev.push({ type: 'end', winner, reason, hpPct: pct, names: s.players.map((p) => p.name), turn: s.turn });
   }
 
   // ─── Résolution d'une capacité (ordre fixe, documenté dans les règles) ────────────────────
-  function resolveMove(s, ev, p, action) {
+  function resolveMove(s, ev, p, action, dying) {
     const me = s.players[p];
-    const c = me.champions[action.actor];
+    const ai = me.active;
+    const c = me.champions[ai];
     const m = c.moves[action.move];
-    const target = action.target ? s.players[action.target.side].champions[action.target.index] : null;
+    const foeSide = 1 - p;
+    let target = null;
+    let retarget = false;
+    if (m.targeting === 'enemy') {
+      const fi = s.players[foeSide].active;
+      const t = s.players[foeSide].champions[fi];
+      if (!t || !t.alive) {
+        emit(s, ev, c, 'fail', { player: p, playerName: me.name, reason: 'noTarget', moveName: m.name });
+        return;
+      }
+      retarget = !!action.target && action.target.index !== fi;
+      target = t;
+    } else if (m.targeting === 'ally') {
+      let idx = action.target ? action.target.index : ai;
+      if (!me.champions[idx] || !me.champions[idx].alive) idx = ai;
+      target = me.champions[idx];
+    }
 
     // 1. Coût.
     if (m.cost > 0) {
@@ -631,11 +847,11 @@
       ev.push({ type: 'chakra', player: p, playerName: me.name, delta: -m.cost, chakra: me.chakra });
     }
     if (m.kind === 'ultimate') c.ultimateUsed = true;
-    ev.push({
-      type: 'move', player: p, playerName: me.name, actor: action.actor, side: p, index: action.actor, name: c.name,
-      move: action.move, moveName: m.name, kind: m.kind, cost: m.cost,
-      target: target ? { side: action.target.side, index: action.target.index, name: target.name } : null
-    });
+    const tpos = target ? sideIndex(s, target) : null;
+    ev.push(Object.assign({
+      type: 'move', player: p, playerName: me.name, move: action.move, moveName: m.name, kind: m.kind, cost: m.cost,
+      target: target ? tag(s, tpos.side, tpos.index) : null, retarget, dying: !!dying
+    }, tag(s, p, ai)));
 
     // 2. Annulation par « annule la prochaine attaque ».
     if (m.targeting === 'enemy' && target.attackBlock) {
@@ -644,7 +860,7 @@
       return;
     }
 
-    // 3. Sacrifice.
+    // 3. Sacrifice (allié vivant le plus faible, hors lanceur : forcément sur le banc).
     if (m.sacrifice) {
       let weakest = null;
       me.champions.forEach((x) => {
@@ -653,13 +869,17 @@
       if (weakest) ko(s, ev, weakest, 'sacrifice');
     }
 
-    // 4. Effets sur la cible ennemie.
+    // 4. Effets sur l'actif adverse.
     if (m.targeting === 'enemy') {
       if (dealsDamage(m)) {
         const hits = (c.statuses.haste ?? 0) > 0 ? 2 : 1;
         if (hits === 2) {
           delete c.statuses.haste;
           emit(s, ev, c, 'haste', {});
+        }
+        const mult = effectiveness(c.type, target.type, s.rules);
+        if (mult !== 1) {
+          emit(s, ev, target, 'effectiveness', { mult, attacker: tag(s, p, ai), label: mult > 1 ? 'strong' : 'weak' });
         }
         let prepared = c.buff;
         c.buff = 0;
@@ -671,28 +891,33 @@
           if ((c.statuses.weakness ?? 0) > 0) dmg -= s.rules.weaknessMalus;
           if (m.bonusIfLow && isLow(s, c)) dmg += m.bonusIfLow;
           dmg = Math.max(0, dmg);
+          dmg = Math.round((dmg * mult * s.rules.damagePct) / 100);
           if (h === 1) dmg = Math.round((dmg * s.rules.hasteSecondHitPct) / 100);
-          takeDamage(s, ev, target, dmg, 'move', hits === 2 ? h + 1 : 0);
+          const extra = { mult };
+          if (hits === 2) extra.hit = h + 1;
+          takeDamage(s, ev, target, dmg, 'move', extra);
         }
       }
       if (Array.isArray(m.instakill) && target.alive && m.instakill.includes(target.name)) ko(s, ev, target, 'instakill');
       if (m.apply && target.alive) for (const [k, n] of Object.entries(m.apply)) applyStatus(s, ev, target, k, n, 'move');
       if (m.skipFoe) {
-        const foe = s.players[1 - p];
-        foe.skipNext = true;
-        ev.push({ type: 'skipNext', player: 1 - p, playerName: foe.name });
+        const foe = s.players[foeSide];
+        const now = !s.acted[foeSide] && !s.cancel[foeSide] && s.order.indexOf(foeSide) > s.order.indexOf(p) && pendingAction(s, foeSide);
+        if (now) s.cancel[foeSide] = true;
+        else foe.skipNext = true;
+        ev.push({ type: 'skipNext', player: foeSide, playerName: foe.name, now });
       }
       firePassive(s, ev, c, 'onHit', { target: target.alive ? target : null });
     }
 
-    // 5. Soin / garde / dissipation : cible alliée choisie, ou le lanceur.
+    // 5. Soin / garde / dissipation : allié choisi (banc compris), ou le lanceur.
     const recv = m.targeting === 'ally' ? target : c;
     const bonus = healBonusOf(c);
     if (m.heal) heal(s, ev, recv, m.heal + bonus, 'move');
     if (m.guard) addGuard(s, ev, recv, m.guard, 'move');
     if (m.cleanse) cleanse(s, ev, recv);
 
-    // 6. Lanceur et équipe.
+    // 6. Lanceur et équipe (banc compris).
     if (m.buff) addBuff(s, ev, c, m.buff, 'move');
     if (m.selfAtk) addAtk(s, ev, c, m.selfAtk, 'move');
     if (m.teamAtk) for (const a of me.champions) addAtk(s, ev, a, m.teamAtk, 'move');
@@ -720,7 +945,7 @@
     }
     if (m.kind === 'support') firePassive(s, ev, c, 'afterSupport', {});
 
-    // 7. Résurrection puis chute du lanceur.
+    // 7. Résurrection (sur le banc) puis chute du lanceur.
     if (m.reviveAlly) {
       let fallen = null;
       for (const a of me.champions) if (a !== c && !a.alive && (!fallen || a.koOrder > fallen.koOrder)) fallen = a;
@@ -733,8 +958,13 @@
       }
     }
 
-    // 8. Tour supplémentaire.
-    if (m.extraTurn) s.extraTurn = true;
+    // 8. Action bonus en fin de tour.
+    if (m.extraTurn) me.extra = true;
+  }
+
+  // Le joueur a-t-il encore une action à résoudre ce tour-ci ?
+  function pendingAction(s, p) {
+    return !s.acted[p];
   }
 
   function finishTransition(s, ev) {
@@ -750,70 +980,168 @@
     return JSON.parse(JSON.stringify(state));
   }
 
-  // Cœur commun à applyAction et à l'IA (pas de validation, mute `s`).
-  function step(s, p, action, ev) {
-    if (action.type === 'pass') {
-      ev.push({ type: 'pass', player: p, playerName: s.players[p].name });
-    } else {
-      resolveMove(s, ev, p, action);
-    }
-    checkEnd(s, ev);
-    if (s.winner !== null) return;
-    if (s.extraTurn) {
-      s.extraTurn = false;
-      ev.push({ type: 'extraTurn', player: p, playerName: s.players[p].name });
-      ev.push({ type: 'turn', player: p, playerName: s.players[p].name, round: s.round, extra: true });
-      return;
-    }
-    endTurn(s, ev, p);
-    advance(s, ev);
-  }
-
-  function applyAction(state, playerIndex, action) {
+  // ─── Soumission d'un choix ────────────────────────────────────────────────────────────────
+  // Range le choix du joueur ; quand tous les choix attendus sont là, résout le tour (ou le
+  // remplacement). Renvoie { state, events, resolved }. Ne modifie jamais `state`.
+  function submit(state, player, action) {
     if (!state || !Array.isArray(state.players)) throw new Error('État de duel invalide.');
-    if (state.winner !== null && state.winner !== undefined) throw new Error('Le duel est terminé.');
-    if (playerIndex !== 0 && playerIndex !== 1) throw new Error('Joueur inconnu.');
-    if (state.turn !== playerIndex) throw new Error('Ce n’est pas ton tour.');
+    if (isOver(state)) throw new Error('Le duel est terminé.');
+    if (player !== 0 && player !== 1) throw new Error('Joueur inconnu.');
+    if (!state.need[player]) throw new Error(state.phase === 'replace' ? 'Tu n’as pas de remplaçant à choisir.' : 'Tu n’as rien à choisir maintenant.');
+    if (state.choices[player]) throw new Error('Ton choix est déjà fait pour ce tour.');
     const key = actionKey(action);
-    const legal = legalActions(state, playerIndex).find((a) => actionKey(a) === key);
-    if (!key || !legal) throw new Error('Action illégale : capacité indisponible, chakra insuffisant ou cible invalide.');
+    const legal = legalFor(state, player).find((a) => actionKey(a) === key);
+    if (!key || !legal) {
+      throw new Error(state.phase === 'replace'
+        ? 'Remplaçant invalide : choisis un champion vivant de ton banc.'
+        : 'Action illégale : capacité indisponible, chakra insuffisant, cible ou changement invalide.');
+    }
     const s = clone(state);
     const ev = [];
-    step(s, playerIndex, legal, ev);
+    s.choices[player] = JSON.parse(JSON.stringify(legal));
+    ev.push({ type: 'chosen', player, playerName: s.players[player].name, phase: s.phase });
+    const resolved = pendingPlayers(s).length === 0;
+    if (resolved) {
+      if (s.phase === 'replace') resolveReplace(s, ev);
+      else resolveChoices(s, ev);
+    }
     s.seq += 1;
     finishTransition(s, ev);
-    return { state: s, events: ev };
+    return { state: s, events: ev, resolved };
   }
 
-  // Abandon (ou absence prolongée) : défaite immédiate du joueur. Ajout au contrat du §3.
+  // Copie de l'état pour le joueur `player` : le choix secret de l'adversaire est masqué
+  // (remplacé par { type: 'hidden' } s'il a déjà choisi).
+  function viewFor(state, player) {
+    const s = clone(state);
+    if (Array.isArray(s.choices)) {
+      for (const p of [0, 1]) {
+        if (p !== player && s.choices[p]) s.choices[p] = { type: 'hidden' };
+      }
+    }
+    return s;
+  }
+
+  // Abandon (ou absence prolongée) : défaite immédiate du joueur.
   function forfeit(state, playerIndex, reason) {
-    if (!state || (state.winner !== null && state.winner !== undefined)) throw new Error('Le duel est terminé.');
+    if (isOver(state)) throw new Error('Le duel est terminé.');
     if (playerIndex !== 0 && playerIndex !== 1) throw new Error('Joueur inconnu.');
     const s = clone(state);
     const ev = [];
-    ev.push({ type: 'forfeit', player: playerIndex, playerName: s.players[playerIndex].name, reason: reason === 'timeout' ? 'timeout' : 'forfeit' });
-    finish(s, ev, 1 - playerIndex, reason === 'timeout' ? 'timeout' : 'forfeit');
+    const why = reason === 'timeout' ? 'timeout' : 'forfeit';
+    ev.push({ type: 'forfeit', player: playerIndex, playerName: s.players[playerIndex].name, reason: why });
+    finish(s, ev, 1 - playerIndex, why);
     s.seq += 1;
     finishTransition(s, ev);
-    return { state: s, events: ev };
+    return { state: s, events: ev, resolved: true };
   }
 
   // ─── IA ───────────────────────────────────────────────────────────────────────────────────
-  // Glouton à un coup : simule chaque action légale et garde la meilleure évaluation.
-  // Déterministe : départage avec un hachage de state.rng (sans faire avancer le PRNG).
-  function champValue(s, c) {
+  // Prévision à un tour : l'IA devine le choix adverse (meilleure réponse à son attaque par
+  // défaut), puis simule chacune de ses actions contre cette prévision et contre l'attaque la
+  // plus forte de l'adversaire. L'évaluation compte le matériel (PV, garde, bonus…) et le
+  // rapport de force entre actifs (dégâts attendus, type, vitesse, menace de K.O.) : c'est ce
+  // terme qui la fait changer d'actif. Elle ne lit jamais le choix secret adverse, ne fait pas
+  // avancer state.rng et simule avec une graine brouillée (pas de lecture de l'avenir).
+  function cloneChamp(c) {
+    const o = Object.assign({}, c);
+    o.statuses = Object.assign({}, c.statuses);
+    o.fired = c.fired.slice();
+    return o;
+  }
+
+  function fastClone(s) {
+    const o = Object.assign({}, s);
+    o.players = s.players.map((p) => Object.assign({}, p, { champions: p.champions.map(cloneChamp) }));
+    o.need = s.need.slice();
+    o.choices = s.choices.slice();
+    o.acted = s.acted.slice();
+    o.cancel = s.cancel.slice();
+    o.order = s.order.slice();
+    o.log = [];
+    o.lastEvents = [];
+    return o;
+  }
+
+  const AI = {
+    base: 12,          // valeur d'un champion vivant, hors PV
+    hp: 1,
+    guard: 0.55,
+    atk: 1.6,
+    buff: 0.5,
+    chakra: 0.9,
+    ultimate: 3,
+    matchup: 1.0,      // poids du rapport de force entre actifs
+    threat: 0.45       // part de la valeur d'un actif menacé de K.O. au prochain tour
+  };
+
+  function champWorth(s, c) {
     if (!c.alive) return 0;
     const st = c.statuses;
-    let v = 14 + c.hp + Math.min(c.hp, 12) * 0.6;
-    v += c.guard * 0.7;
-    v += (c.atk + c.atkBonus) * 1.6;
-    v += c.buff * 0.5;
-    v += (st.rage ?? 0) * 1.6 + (st.regen ?? 0) * 1.5 + (st.haste ? 7 : 0);
-    v -= (st.poison ?? 0) * s.rules.poisonDamage * 0.9 + (st.curse ?? 0) * 1.6 + (st.weakness ?? 0) * 1.2;
+    let v = AI.base + c.hp * AI.hp + Math.min(c.hp, 10) * 0.5;
+    v += c.guard * AI.guard;
+    v += (c.atk + c.atkBonus) * AI.atk;
+    v += c.buff * AI.buff;
+    v += (st.rage ?? 0) * 1.5 + (st.regen ?? 0) * 1.5 + (st.haste ? 6 : 0);
+    v -= (st.poison ?? 0) * s.rules.poisonDamage * 0.8 + (st.curse ?? 0) * 1.5 + (st.weakness ?? 0) * 1.5;
     v += c.invincible * 5 + (c.attackBlock ? 7 : 0) + (c.saveLethal ? 6 : 0);
     v -= c.disabled * 3;
-    if (!c.ultimateUsed) v += 3;
+    if (!c.ultimateUsed) v += AI.ultimate;
     return v;
+  }
+
+  // Dégâts qu'un champion peut infliger à un autre au prochain tour (meilleure capacité jouable).
+  function estDamage(s, att, def, chakra) {
+    if (!att.alive || !def.alive) return 0;
+    let best = 0;
+    const mult = effectiveness(att.type, def.type, s.rules);
+    for (const m of att.moves) {
+      if (!dealsDamage(m)) continue;
+      if (m.kind === 'ultimate' && att.ultimateUsed) continue;
+      if (m.cost > chakra) continue;
+      if (att.disabled > 1 && m.kind !== 'support') continue;
+      const base = Array.isArray(m.randomDamage) ? (m.randomDamage[0] + m.randomDamage[1]) / 2 : m.damage;
+      let d = base + att.atk + att.atkBonus + att.buff;
+      if ((att.statuses.rage ?? 0) > 1) d += s.rules.rageBonus;
+      if ((att.statuses.weakness ?? 0) > 1) d -= s.rules.weaknessMalus;
+      if (m.bonusIfLow && isLow(s, att)) d += m.bonusIfLow;
+      d = Math.max(0, d) * mult * s.rules.damagePct / 100;
+      if (att.statuses.haste) d *= 1 + s.rules.hasteSecondHitPct / 100;
+      if (d > best) best = d;
+    }
+    return best;
+  }
+
+  // Rapport de force de mon champion `mine` contre l'actif adverse `foe` (point de vue de `side`).
+  function pairScore(s, side, mine, foe) {
+    const myCh = Math.min(s.rules.maxChakra, s.players[side].chakra + s.rules.chakraPerTurn);
+    const foeCh = Math.min(s.rules.maxChakra, s.players[1 - side].chakra + s.rules.chakraPerTurn);
+    const myD = estDamage(s, mine, foe, myCh);
+    const foeD = estDamage(s, foe, mine, foeCh);
+    const myEff = mine.hp + mine.guard * (1 - s.rules.guardDecayPct / 100) + (mine.invincible > 1 ? 99 : 0);
+    const foeEff = foe.hp + foe.guard * (1 - s.rules.guardDecayPct / 100) + (foe.invincible > 1 ? 99 : 0);
+    let v = Math.min(myD, foeEff) - Math.min(foeD, myEff);
+    const faster = mine.speed > foe.speed;
+    const iKill = myD >= foeEff;
+    const heKills = foeD >= myEff;
+    if (heKills && !(iKill && faster)) v -= AI.threat * champWorth(s, mine);
+    if (iKill && !(heKills && !faster)) v += AI.threat * champWorth(s, foe);
+    return v;
+  }
+
+  function matchup(s, p) {
+    const me = s.players[p];
+    const foe = s.players[1 - p];
+    const mine = me.champions[me.active].alive ? [me.champions[me.active]] : me.champions.filter((c) => c.alive);
+    const theirs = foe.champions[foe.active].alive ? [foe.champions[foe.active]] : foe.champions.filter((c) => c.alive);
+    if (!mine.length || !theirs.length) return 0;
+    let best = -Infinity;
+    for (const a of mine) {
+      let worst = Infinity;
+      for (const b of theirs) worst = Math.min(worst, pairScore(s, p, a, b));
+      best = Math.max(best, worst);
+    }
+    return best;
   }
 
   function evaluate(s, p) {
@@ -823,28 +1151,105 @@
     let v = 0;
     for (let side = 0; side < 2; side += 1) {
       const pl = s.players[side];
-      let x = pl.chakra * 1.2 - (pl.skipNext ? 9 : 0);
-      for (const c of pl.champions) x += champValue(s, c);
+      let x = pl.chakra * AI.chakra - (pl.skipNext ? 8 : 0) + (s.bonus && s.need[side] ? 8 : 0);
+      for (const c of pl.champions) x += champWorth(s, c);
       v += side === p ? x : -x;
     }
-    return v;
+    return v + AI.matchup * matchup(s, p);
+  }
+
+  function simulate(base, acts) {
+    const s = fastClone(base);
+    s.choices = acts.slice();
+    try {
+      resolveChoices(s, []);
+    } catch (err) {
+      return null;
+    }
+    return s;
+  }
+
+  // Attaque « par défaut » : la capacité qui inflige le plus de dégâts à l'actif adverse.
+  function rawBestAttack(s, p, acts) {
+    let best = null;
+    let bestD = -1;
+    const c = activeOf(s, p);
+    const foe = activeOf(s, 1 - p);
+    for (const a of acts) {
+      if (a.type !== 'move') continue;
+      const m = c.moves[a.move];
+      if (!dealsDamage(m) || !foe.alive) continue;
+      const base = Array.isArray(m.randomDamage) ? (m.randomDamage[0] + m.randomDamage[1]) / 2 : m.damage;
+      const d = (base + (m.bonusIfLow && isLow(s, c) ? m.bonusIfLow : 0)) * effectiveness(c.type, foe.type, s.rules) - m.cost * 0.5;
+      if (d > bestD) {
+        bestD = d;
+        best = a;
+      }
+    }
+    return best ?? { type: 'pass' };
+  }
+
+  function noiseOf(rng, i) {
+    return mulberry((rng ^ Math.imul(i + 1, 0x9E3779B1)) >>> 0).out * 0.05;
   }
 
   function chooseAction(state, playerIndex) {
-    const acts = legalActions(state, playerIndex);
+    const p = playerIndex;
+    if (isOver(state) || !state.need?.[p] || state.choices?.[p]) return { type: 'pass' };
+    const acts = legalFor(state, p);
     if (!acts.length) return { type: 'pass' };
-    const base = Object.assign({}, state, { log: [], lastEvents: [] });
+    if (acts.length === 1) return JSON.parse(JSON.stringify(acts[0]));
+    const base = fastClone(state);
+    base.rng = mulberry((state.rng ^ 0x5bd1e995) >>> 0).next; // graine brouillée : l'IA ne lit pas l'avenir
+    base.choices = [null, null];
     let best = acts[acts.length - 1];
     let bestScore = -Infinity;
+    if (state.phase === 'replace') {
+      acts.forEach((a, i) => {
+        const s = fastClone(base);
+        s.players[p].active = a.to;
+        const score = evaluate(s, p) + noiseOf(state.rng, i);
+        if (score > bestScore) {
+          bestScore = score;
+          best = a;
+        }
+      });
+      return JSON.parse(JSON.stringify(best));
+    }
+    const f = 1 - p;
+    let scenarios;
+    if (base.need[f]) {
+      const foeActs = legalFor(base, f);
+      const mine = rawBestAttack(base, p, acts);
+      let pred = foeActs[foeActs.length - 1];
+      let predScore = -Infinity;
+      foeActs.forEach((fa, i) => {
+        const pair = [null, null];
+        pair[p] = mine;
+        pair[f] = fa;
+        const s = simulate(base, pair);
+        if (!s) return;
+        const sc = evaluate(s, f) + noiseOf(state.rng ^ 0x1234567, i);
+        if (sc > predScore) {
+          predScore = sc;
+          pred = fa;
+        }
+      });
+      const strike = rawBestAttack(base, f, foeActs);
+      scenarios = actionKey(strike) === actionKey(pred) ? [[pred, 1]] : [[pred, 0.6], [strike, 0.4]];
+    } else {
+      scenarios = [[null, 1]];
+    }
     acts.forEach((a, i) => {
-      const s = clone(base);
-      try {
-        step(s, playerIndex, a, []);
-      } catch (err) {
-        return;
+      let score = 0;
+      for (const [fa, w] of scenarios) {
+        const pair = [null, null];
+        pair[p] = a;
+        pair[f] = fa;
+        const s = simulate(base, pair);
+        score += w * (s ? evaluate(s, p) : -1e7);
       }
-      const noise = mulberry((state.rng ^ Math.imul(i + 1, 0x9E3779B1)) >>> 0).out * 0.05;
-      const score = evaluate(s, playerIndex) + noise;
+      score += noiseOf(state.rng, i);
       if (score > bestScore) {
         bestScore = score;
         best = a;
@@ -860,24 +1265,33 @@
     return `${label} ${turns}`;
   }
 
-  const SOURCES = { poison: 'du poison', curse: 'de la malédiction', recoil: 'en contrecoup', teamHp: 'pour l’effort de l’équipe' };
+  const SOURCES = { poison: 'du poison', curse: 'de la malédiction', fatigue: 'd’épuisement', recoil: 'en contrecoup', teamHp: 'pour l’effort de l’équipe' };
 
   function describeEvent(e) {
     if (!e || typeof e !== 'object') return '';
     switch (e.type) {
-      case 'round': {
-        const why = e.reason === 'subaru' ? ` (${e.by ?? 'Subaru'} ouvre toujours la manche)`
+      case 'turn': return `— Tour ${e.turn} —`;
+      case 'turnOrder': {
+        if (e.reason === 'single' || !e.order || e.order.length < 2) return '';
+        const why = e.reason === 'subaru' ? ` (${e.by ?? 'Subaru'} : son camp agit toujours d’abord)`
           : e.reason === 'ram' ? ` (${e.by ?? 'Ram'} face à Rem)`
-            : e.reason === 'tie' ? ' (égalité de vitesse, tirage au sort)' : ' (champion le plus rapide)';
-        return `— Manche ${e.round} — ${e.playerName} commence${why}.`;
+            : e.reason === 'tie' ? ' (égalité de vitesse, tirage au sort)' : e.reason === 'luck' ? ' (tirage au sort)' : ' (actif le plus rapide)';
+        return `Ordre d’action : joueur ${e.order[0] + 1} d’abord${why}.`;
       }
-      case 'turn': return e.extra ? `${e.playerName} rejoue immédiatement.` : `Tour de ${e.playerName}.`;
+      case 'chosen': return '';
       case 'chakra': if (e.delta === 0) return `${e.playerName} est au plafond de chakra (${e.chakra}).`;
         return e.delta > 0 ? `${e.playerName} gagne ${e.delta} chakra (${e.chakra}).` : `${e.playerName} dépense ${-e.delta} chakra (${e.chakra} restant).`;
-      case 'skip': return `${e.playerName} saute son tour.`;
-      case 'skipNext': return `${e.playerName} sautera son prochain tour.`;
+      case 'switch':
+        if (e.lead) return `${e.playerName} envoie ${e.name}.`;
+        if (e.forced) return `${e.playerName} envoie ${e.name} pour remplacer ${e.fromName}.`;
+        return `${e.playerName} rappelle ${e.fromName} et envoie ${e.name}.`;
+      case 'phaseReplace': return `${e.playerName} doit choisir un remplaçant.`;
+      case 'skip': return e.now ? `${e.playerName} perd son action de ce tour.` : `${e.playerName} perd son action.`;
+      case 'skipNext': return e.now ? `${e.playerName} perd son action de ce tour !` : `${e.playerName} perdra sa prochaine action.`;
       case 'pass': return `${e.playerName} passe.`;
-      case 'move': return `${e.name} utilise ${e.moveName}${e.target ? ` sur ${e.target.name}` : ''}.`;
+      case 'fail': return e.reason === 'ko' ? `${e.name} est KO : ${e.moveName} n’a pas lieu.` : `${e.moveName} échoue : aucune cible.`;
+      case 'move': return `${e.name} utilise ${e.moveName}${e.target ? ` sur ${e.target.name}` : ''}${e.retarget ? ' (nouvel actif)' : ''}.`;
+      case 'effectiveness': return e.mult > 1 ? `C’est efficace contre ${e.name} (×${e.mult}).` : `Ce n’est pas très efficace contre ${e.name} (×${e.mult}).`;
       case 'damage': {
         const abs = e.absorbed ? ` (${e.absorbed} absorbé${e.absorbed > 1 ? 's' : ''} par la garde)` : '';
         const hit = e.hit ? ` [coup ${e.hit}]` : '';
@@ -890,7 +1304,10 @@
       case 'buff': return `${e.name} prépare +${e.amount} dégâts (${e.buff}).`;
       case 'atk': return `${e.name} gagne +${e.amount} ATQ (bonus ${e.atkBonus}).`;
       case 'status': return `${e.name} : ${statusText(e.status, e.turns)}.`;
-      case 'expire': return e.status === 'invincible' ? `${e.name} n’est plus invulnérable.` : `${e.name} : fin de ${STATUS_LABELS[e.status] ?? e.status}.`;
+      case 'expire':
+        if (e.status === 'invincible') return `${e.name} n’est plus invulnérable.`;
+        if (e.status === 'disabled') return `${e.name} peut de nouveau attaquer.`;
+        return `${e.name} : fin de ${STATUS_LABELS[e.status] ?? e.status}.`;
       case 'cleanse': return e.removed?.length ? `Dissipation sur ${e.name} : ${e.removed.map((k) => STATUS_LABELS[k]).join(', ')}.` : `${e.name} : aucun mal à dissiper.`;
       case 'dispel': return `${e.name} dissipe ${e.turns} tour${e.turns > 1 ? 's' : ''} de ${STATUS_LABELS[e.status] ?? e.status}.`;
       case 'haste': return `${e.name} frappe deux fois (Hâte).`;
@@ -901,22 +1318,23 @@
         return '';
       case 'protect':
         if (e.effect === 'saveLethal') return `${e.name} survivra au prochain coup létal.`;
-        if (e.effect === 'invincible') return `${e.name} est invulnérable pendant ${e.turns} manche${e.turns > 1 ? 's' : ''}.`;
-        if (e.effect === 'attackBlock') return `Protection de ${e.name} : la prochaine capacité ennemie dirigée sur ce champion sera annulée.`;
+        if (e.effect === 'invincible') return `${e.name} est invulnérable pendant ${e.turns} tour${e.turns > 1 ? 's' : ''}.`;
+        if (e.effect === 'attackBlock') return `Protection de ${e.name} : la prochaine capacité ennemie qui le vise sera annulée.`;
         if (e.effect === 'disabled') return `${e.name} ne pourra plus attaquer pendant ${e.turns} tour${e.turns > 1 ? 's' : ''}.`;
         return '';
       case 'survive': return `${e.name} survit avec 1 PV !`;
       case 'passive': return `Passif de ${e.name} : ${e.passive}.`;
       case 'ko': {
-        const why = { instakill: ' (abattu)', sacrifice: ' (sacrifié)', revive: ' (se sacrifie)', poison: ' (poison)', curse: ' (malédiction)' }[e.cause] ?? '';
+        const why = { instakill: ' (abattu)', sacrifice: ' (sacrifié)', revive: ' (se sacrifie)', poison: ' (poison)', curse: ' (malédiction)', fatigue: ' (épuisement)' }[e.cause] ?? '';
         return `${e.name} est KO${why}.`;
       }
-      case 'revive': return `${e.name} revient au combat avec ${e.hp} PV.`;
-      case 'extraTurn': return `${e.playerName} obtient un tour supplémentaire.`;
-      case 'roundEnd': return '';
+      case 'revive': return `${e.name} revient sur le banc avec ${e.hp} PV.`;
+      case 'extraTurn': return `${e.playerName} obtient une action bonus avant la fin du tour.`;
+      case 'fatigue': return `Épuisement : les deux champions actifs perdent ${e.amount} PV.`;
+      case 'turnEnd': return '';
       case 'forfeit': return e.reason === 'timeout' ? `${e.playerName} est absent trop longtemps.` : `${e.playerName} abandonne.`;
       case 'end': {
-        const why = { ko: 'tous les champions adverses sont KO', rounds: `limite de manches (PV restants : ${e.hpPct?.[0]} % contre ${e.hpPct?.[1]} %)`, forfeit: 'abandon', timeout: 'absence' }[e.reason] ?? e.reason;
+        const why = { ko: 'tous les champions adverses sont KO', rounds: `limite de tours (PV restants : ${e.hpPct?.[0]} % contre ${e.hpPct?.[1]} %)`, forfeit: 'abandon', timeout: 'absence' }[e.reason] ?? e.reason;
         if (e.winner === 'draw') return `Match nul — ${why}.`;
         return `Victoire de ${e.names?.[e.winner] ?? `Joueur ${e.winner + 1}`} — ${why}.`;
       }
@@ -925,19 +1343,24 @@
   }
 
   return {
-    version: 1,
+    version: 2,
     RULES,
+    TYPES,
     STATUS_LABELS,
     KIND_LABELS,
     mythics,
     validateDeck,
     createMatch,
+    pendingPlayers,
     legalActions,
-    applyAction,
-    currentPlayer,
+    submit,
+    viewFor,
     chooseAction,
-    describeEvent,
     forfeit,
-    targetMode
+    describeEvent,
+    typeOf,
+    effectiveness,
+    targetMode,
+    actionKey
   };
 });

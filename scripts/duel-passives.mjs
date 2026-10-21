@@ -13,7 +13,9 @@
 // passiveFx = { rules: [ règle, … ] }
 // règle     = { when, effects: [ effet, … ], once?, perTurn?, hpAtMost?, ifLowHp? }
 //   when :
-//     'turnStart'    au début de chaque tour (joué) du joueur qui possède le champion
+//     'turnStart'    au début de chaque tour, SEULEMENT s'il est le champion actif (v2 : un banc ne joue pas)
+//     'onSwitchIn'   (v2) quand il entre en jeu : changement volontaire ou remplacement après un K.O.
+//                    (aucune donnée n'en utilise encore ; le moteur sait le jouer)
 //     'onDamaged'    chaque fois qu'il encaisse un coup d'une capacité ennemie (≥ 1 dégât, garde comprise)
 //     'onHit'        chaque fois qu'une de ses capacités touche un ennemi (non annulée)
 //     'lowHp'        quand ses PV passent à 50 % ou moins de ses PV max
@@ -31,14 +33,14 @@
 //   { type: 'teamAtk', amount }              +`amount` ATQ permanent à chaque allié vivant (lui compris)
 //   { type: 'status', status, turns }        statut sur lui-même (haste : turns = 1)
 //   { type: 'foeStatus', status, turns }     statut sur un ennemi : la cible touchée (onHit)
-//                                            ou l'ennemi vivant ayant le plus de PV (turnStart)
+//                                            ou le champion ACTIF adverse (turnStart, v2)
 //   { type: 'dispel', turns }                retire `turns` tours à un de ses maux (poison,
 //                                            malédiction, faiblesse : le plus long d'abord)
 //   { type: 'healMostWounded', amount }      soigne l'allié vivant le plus blessé (PV max − PV)
 //   { type: 'healBonus', amount }            (static) ses soins sont augmentés de `amount`
-//   { type: 'initiative' }                   (static) son camp ouvre toujours la manche
-//   { type: 'initiative', foe, firstRound }  (static) face au champion nommé `foe`, son camp
-//                                            ouvre la première manche
+//   { type: 'initiative' }                   (static) son camp agit toujours en premier tant qu'il est l'actif
+//   { type: 'initiative', foe, firstRound }  (static) face au champion actif nommé `foe`, son camp
+//                                            agit en premier au tour 1
 // Statuts : 'poison' | 'curse' | 'weakness' | 'rage' | 'regen' | 'haste'.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -173,7 +175,7 @@ export function passiveFxOf(card) {
   throw new Error(`passif non reconnu (${ctx})`);
 }
 
-const KNOWN_WHEN = new Set(['turnStart', 'onDamaged', 'onHit', 'lowHp', 'hpAtMost', 'afterSupport', 'static']);
+const KNOWN_WHEN = new Set(['turnStart', 'onSwitchIn', 'onDamaged', 'onHit', 'lowHp', 'hpAtMost', 'afterSupport', 'static']);
 const KNOWN_TYPES = new Set(['heal', 'guard', 'buff', 'atk', 'teamAtk', 'status', 'foeStatus', 'dispel', 'healMostWounded', 'healBonus', 'initiative']);
 const KNOWN_STATUS = new Set(Object.values(STATUS));
 
