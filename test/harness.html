@@ -181,7 +181,15 @@
             wishlist: []
           });
         }
-        if (url.includes('/api/me/collection')) return json(COLLECTION);
+        if (url.includes('/api/me/collection')) {
+          // ?duel=1 : le compte simulé possède aussi les 8 premières Mythiques du duel
+          // (deck en ligne complet possible dans le harness).
+          if (new URLSearchParams(location.search).has('duel') && window.KYARA_DUEL_DATA) {
+            const mythics = window.KYARA_DUEL_DATA.champions.filter((c) => c.rarity === 'M').slice(0, 8);
+            return json([...COLLECTION, ...mythics.map((c) => ({ characterId: c.id, qty: 1, listable: 0 }))]);
+          }
+          return json(COLLECTION);
+        }
         if (url.includes('/api/characters')) return json(CHARACTERS);
         if (url.includes('/api/config')) return json(CONFIG);
         if (url.includes('/api/me/market')) {
@@ -486,6 +494,11 @@
       };
     </script>
 
+    <!-- Même ordre que manifest.json (content_scripts). -->
+    <script src="/content/duel-data.js"></script>
+    <script src="/content/duel-rules.js"></script>
+    <script src="/content/duel-engine.js"></script>
+    <script src="/content/duel-net.js"></script>
     <script src="/content/ui.js"></script>
     <script>
       setTimeout(() => {
