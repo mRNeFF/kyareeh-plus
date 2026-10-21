@@ -1755,6 +1755,100 @@ img.kp-avatar {
   color: var(--kp-bad);
 }
 
+/* Cartes actuellement en vente, en haut de Vente auto */
+.kp-listed {
+  margin: 10px 0 8px;
+}
+
+.kp-listed-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.kp-listed-head b {
+  font-size: 11px;
+}
+
+.kp-listed-head span {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-listed-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 5px;
+}
+
+.kp-listed-card {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid var(--kp-line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--kp-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kp-listed-card:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.kp-listed-card img {
+  flex: none;
+  width: 38px;
+  height: 50px;
+  border-radius: 5px;
+  object-fit: cover;
+  object-position: top;
+  background: var(--kp-bg-2);
+}
+
+.kp-listed-info {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.kp-listed-info b {
+  overflow: hidden;
+  font-size: 9.5px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kp-listed-info small {
+  overflow: hidden;
+  color: var(--kp-muted);
+  font-size: 8px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kp-listed-info em {
+  color: var(--kp-accent-2);
+  font: 600 10px "JetBrains Mono", ui-monospace, monospace;
+  font-style: normal;
+}
+
+.kp-listed-empty {
+  padding: 7px 8px;
+  border: 1px dashed var(--kp-line);
+  border-radius: 8px;
+  color: var(--kp-muted);
+  font-size: 9px;
+}
+
 /* Graphique de ventes */
 .kp-sales {
   margin: 14px 0 4px;

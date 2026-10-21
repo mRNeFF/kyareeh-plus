@@ -5613,6 +5613,44 @@
       </section>`;
   }
 
+  /** Cartes actuellement en vente, avec images, juste sous les sous-onglets. */
+  function listedCardsBlock() {
+    const mineAll = Array.isArray(state.mine?.listings)
+      ? state.mine.listings
+      : Array.isArray(state.mine)
+        ? state.mine
+        : [];
+    const mine = mineAll.filter((listing) => !listing.status || listing.status === 'active');
+    if (!mine.length) {
+      return `<section class="kp-listed"><div class="kp-listed-head"><b>En vente</b><span>0</span></div><div class="kp-listed-empty">Aucune annonce active.</div></section>`;
+    }
+    return `<section class="kp-listed">
+      <div class="kp-listed-head"><b>En vente</b><span>${fmt(mine.length)} annonce(s)</span></div>
+      <div class="kp-listed-grid">
+        ${mine
+          .slice(0, 20)
+          .map((listing) => {
+            const card = listing.character ?? state.characters.get(String(listing.characterId)) ?? null;
+            const info = rarityInfo(card?.rarity);
+            const type = listing.type === 'auction' ? 'enchère' : 'fixe';
+            const left = listingTimeLeft(listing);
+            const price = listing.finalPrice ?? listing.currentBid ?? listing.price;
+            return `<button class="kp-listed-card" type="button" data-act="open-listing" data-listing="${esc(
+              listing.id ?? ''
+            )}" data-type="${esc(listing.type ?? 'fixed')}" data-name="${esc(card?.name ?? '')}" title="Ouvrir cette annonce sur kyara.games">
+              <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
+              <span class="kp-listed-info">
+                <b>${esc(card?.name ?? `Carte #${listing.characterId ?? '?'}`)}</b>
+                <small>${esc(info.label)} · ${type}${left ? ` · ${esc(left)}` : ''}</small>
+                <em>◆ ${fmt(price)}</em>
+              </span>
+            </button>`;
+          })
+          .join('')}
+      </div>
+    </section>`;
+  }
+
   function salesChart() {
     const totals = salesTotals(state.salesLog);
     const model = salesChartSeries(state.salesLog);
@@ -5682,6 +5720,7 @@
     if (view.mode === 'auto') {
       return `
         ${sellModeSwitch()}
+        ${listedCardsBlock()}
         <div class="kp-hint">Doublons uniquement · une copie conservée.</div>
         ${autoSellPanel(all, slots)}
         ${salesChart()}`;

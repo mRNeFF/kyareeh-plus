@@ -321,6 +321,26 @@ async function visualPass() {
         .toLowerCase()
         .includes('stratégie')}`
     );
+    const listedInfo = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const mine = window.__kyaraPlus.state.mine;
+         const listings = Array.isArray(mine?.listings) ? mine.listings : Array.isArray(mine) ? mine : [];
+         return {
+           count: document.querySelector('#kyara-plus-root').shadowRoot.querySelectorAll('.kp-listed-card').length,
+           mine: listings.length,
+           active: listings.filter((l) => !l.status || l.status === 'active').length
+         };
+       })()`
+    );
+    check(
+      'Cartes en vente affichées avec images',
+      listedInfo.count > 0,
+      `${listedInfo.count} carte(s) · mine=${listedInfo.mine} · active=${listedInfo.active}`
+    );
+    const listedShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+    writeFileSync(join(SHOTS, 'chrome-vente-auto-top.png'), Buffer.from(listedShot.data, 'base64'));
     const strategyValues = await evaluate(
       cdp,
       sessionId,
