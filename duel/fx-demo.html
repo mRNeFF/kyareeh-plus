@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kyara Duel — démo des effets</title>
+<style>
+  :root { color-scheme: dark; --bg: #0c0e16; --panel: #151925; --line: #262c40; --txt: #e8ecff; --mut: #8d96b5; --acc: #ffc24a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt); font: 14px/1.4 'Segoe UI', system-ui, sans-serif; }
+  header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 17px; }
+  header span { color: var(--mut); font-size: 12px; }
+  main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+  #stage-wrap { flex: 0 1 auto; max-width: 100%; overflow: auto; }
+  #stage { position: relative; width: 760px; height: 560px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line);
+    background: radial-gradient(ellipse at 30% 110%, #1d2a44, transparent 60%), radial-gradient(ellipse at 80% -10%, #2a1d44, transparent 55%), #0f1220; }
+  #stage::before { content: ''; position: absolute; left: 6%; right: 6%; bottom: 8%; height: 14%; border-radius: 50%; background: rgba(255,255,255,.04); }
+  .card { position: absolute; width: 150px; height: 213px; border-radius: 10px; overflow: hidden; border: 3px solid var(--c, #888);
+    background: #1a1d2b; box-shadow: 0 0 18px -4px var(--c, #888); }
+  .card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card .nm { position: absolute; left: 0; right: 0; bottom: 0; padding: 6px 8px; font-weight: 700; background: linear-gradient(transparent, rgba(0,0,0,.85)); }
+  .card .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 64px; font-weight: 900; color: var(--c); }
+  #foe { right: 8%; top: 10%; }
+  #me { left: 8%; bottom: 14%; width: 190px; height: 270px; }
+  .hp { position: absolute; left: 0; right: 0; top: 0; height: 8px; background: #000; }
+  .hp i { display: block; height: 100%; width: 70%; background: #3fd68a; }
+  .panel { flex: 1 1 380px; min-width: 300px; display: grid; gap: 12px; }
+  fieldset { margin: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 10px 12px 12px; }
+  legend { padding: 0 6px; color: var(--mut); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  button, select, input { font: inherit; color: var(--txt); background: #1e2334; border: 1px solid #343b57; border-radius: 7px; padding: 6px 10px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--acc); }
+  button.on { outline: 2px solid var(--acc); }
+  button.fx { background: #232a42; }
+  label { color: var(--mut); display: inline-flex; align-items: center; gap: 5px; }
+  input[type=number] { width: 70px; }
+  input[type=text] { width: 150px; }
+  .sw { width: 30px; height: 30px; padding: 0; border-radius: 50%; border: 3px solid transparent; }
+  .sw.on { border-color: #fff; outline: none; }
+  #log { font: 11px/1.4 Consolas, monospace; color: var(--mut); max-height: 90px; overflow: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kyara Duel — démo des effets</h1>
+  <span>duel/duel-fx.js · sons WebAudio, particules canvas, carte d'ultime</span>
+</header>
+<main>
+  <div id="stage-wrap">
+    <div id="stage">
+      <div class="card" id="foe"><div class="hp"><i></i></div><div class="nm">Adversaire</div></div>
+      <div class="card" id="me"><div class="hp"><i></i></div><div class="nm">Mon champion</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <fieldset>
+      <legend>Réglages</legend>
+      <div class="row" id="types"></div>
+      <div class="row" style="margin-top:8px">
+        <label>Sens
+          <select id="dir"><option value="me">Moi → adversaire</option><option value="foe">Adversaire → moi</option></select>
+        </label>
+        <label>Scène
+          <select id="size">
+            <option value="760x560">760 × 560</option>
+            <option value="760x900">760 × 900 (haut)</option>
+            <option value="1100x760">1100 × 760 (large)</option>
+            <option value="fluid">Fluide</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="mute"> Muet</label>
+        <label>Volume <input type="range" id="vol" min="0" max="1" step="0.05" value="0.7"></label>
+        <label><input type="checkbox" id="rm"> Mouvement réduit</label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Combat</legend>
+      <div class="row">
+        <label>Montant <input type="number" id="amount" value="12" min="0"></label>
+        <label><input type="checkbox" id="crit"> Critique</label>
+        <label>Efficacité
+          <select id="eff"><option value="1">×1</option><option value="1.25">×1,25 (super efficace)</option><option value="0.8">×0,8 (peu efficace)</option></select>
+        </label>
+        <label>Statut <select id="statusSel"></select></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="fx" data-fx="attack">Attaque</button>
+        <button class="fx" data-fx="support">Soutien</button>
+        <button class="fx" data-fx="ultshot">Tir d'ultime</button>
+        <button class="fx" data-fx="hit">Coup reçu</button>
+        <button class="fx" data-fx="heal">Soin</button>
+        <button class="fx" data-fx="guard">Garde</button>
+        <button class="fx" data-fx="status">Statut</button>
+        <button class="fx" data-fx="ko">K.O.</button>
+        <button class="fx" data-fx="switchOut">Rappel</button>
+        <button class="fx" data-fx="switchIn">Entrée</button>
+        <button class="fx" data-fx="reset">Réinitialiser</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="fx" data-fx="combo">Séquence : attaque + coup</button>
+        <button class="fx" data-fx="all">Tout enchaîner</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Carte d'ultime</legend>
+      <div class="row">
+        <label>Ultime <input type="text" id="ultName" value="Armée de Glace"></label>
+        <label>Champion <input type="text" id="ultChamp" value="Rem"></label>
+        <button class="fx" data-fx="ult">Lancer l'ultime</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Sons</legend>
+      <div class="row" id="sounds"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Journal</legend>
+      <div id="log"></div>
+    </fieldset>
+  </div>
+</main>
+
+<script src="../content/duel-data.js"></script>
+<script src="duel-fx.js"></script>
+<script>
+(function () {
+  'use strict';
+  var TYPES = [
+    { id: 'Duelliste', color: '#ff5a4e' },
+    { id: 'Mystique', color: '#a66bff' },
+    { id: 'Soutien', color: '#3fd68a' },
+    { id: 'Gardien', color: '#4aa3ff' },
+    { id: 'Stratège', color: '#ffc24a' }
+  ];
+  var STATUSES = [['poison', 'Poison'], ['curse', 'Malédiction'], ['weakness', 'Faiblesse'], ['rage', 'Rage'], ['regen', 'Régénération'], ['haste', 'Hâte'], ['dispel', 'Dissipation']];
+  var $ = function (id) { return document.getElementById(id); };
+  var stage = $('stage');
+  var foe = $('foe');
+  var me = $('me');
+  var type = TYPES[3];
+  var fx = null;
+
+  // Images : deux Mythiques de duel-data.js si dispo (sinon cases colorées).
+  var champs = ((window.KYARA_DUEL_DATA || {}).champions || []).filter(function (c) { return c.rarity === 'M' && c.image; });
+  var mine = champs[0] || { name: 'Rem' };
+  var theirs = champs[1] || { name: 'Ram' };
+  function paint(el, champ, color) {
+    el.style.setProperty('--c', color);
+    el.querySelectorAll('img,.ph').forEach(function (n) { n.remove(); });
+    el.querySelector('.nm').textContent = champ.name;
+    if (champ.image) {
+      var img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      img.alt = '';
+      img.onerror = function () { img.remove(); ph(); };
+      img.src = champ.image;
+      el.insertBefore(img, el.firstChild);
+    } else ph();
+    function ph() {
+      var d = document.createElement('div');
+      d.className = 'ph';
+      d.textContent = champ.name.charAt(0);
+      el.insertBefore(d, el.firstChild);
+    }
+  }
+  function repaint() {
+    paint(me, mine, type.color);
+    paint(foe, theirs, '#8d96b5');
+    $('ultChamp').value = $('ultChamp').dataset.touched ? $('ultChamp').value : mine.name;
+  }
+
+  function log(t) {
+    var l = $('log');
+    l.textContent = t + '\n' + l.textContent.split('\n').slice(0, 30).join('\n');
+  }
+
+  function build() {
+    if (fx) fx.destroy();
+    fx = window.KYARA_DUEL_FX.create(stage, {
+      muted: $('mute').checked,
+      volume: +$('vol').value,
+      reducedMotion: $('rm').checked ? true : undefined
+    });
+    // Le démo de mouvement réduit force l'option ; sinon on suit le système.
+    [me, foe].forEach(function (e) { e.getAnimations().forEach(function (a) { a.cancel(); }); });
+  }
+
+  // --- interface ---
+  var tb = $('types');
+  TYPES.forEach(function (t) {
+    var b = document.createElement('button');
+    b.className = 'sw' + (t === type ? ' on' : '');
+    b.style.background = t.color;
+    b.title = t.id;
+    b.addEventListener('click', function () {
+      type = t;
+      tb.querySelectorAll('.sw').forEach(function (x) { x.classList.remove('on'); });
+      b.classList.add('on');
+      repaint();
+    });
+    tb.appendChild(b);
+  });
+  var tl = document.createElement('span');
+  tl.style.color = 'var(--mut)';
+  tl.textContent = 'Type (couleur des effets)';
+  tb.appendChild(tl);
+
+  STATUSES.forEach(function (s) {
+    var o = document.createElement('option');
+    o.value = s[0];
+    o.textContent = s[1];
+    $('statusSel').appendChild(o);
+  });
+
+  var sb = $('sounds');
+  window.KYARA_DUEL_FX.SOUNDS.forEach(function (n) {
+    var b = document.createElement('button');
+    b.textContent = n;
+    b.addEventListener('click', function () { fx.sound(n); log('son : ' + n); });
+    sb.appendChild(b);
+  });
+
+  $('ultChamp').addEventListener('input', function () { this.dataset.touched = '1'; });
+  $('mute').addEventListener('change', function () { fx.setMuted(this.checked); });
+  $('vol').addEventListener('input', function () { fx.setVolume(+this.value); });
+  $('rm').addEventListener('change', function () { build(); });
+  $('size').addEventListener('change', function () {
+    var v = this.value;
+    if (v === 'fluid') {
+      stage.style.width = '100%';
+      stage.style.height = '70vh';
+      $('stage-wrap').style.width = '100%';
+    } else {
+      var p = v.split('x');
+      stage.style.width = p[0] + 'px';
+      stage.style.height = p[1] + 'px';
+      $('stage-wrap').style.width = '';
+    }
+  });
+
+  function ends() {
+    return $('dir').value === 'me' ? { from: me, to: foe } : { from: foe, to: me };
+  }
+  function amount() { return +$('amount').value || 0; }
+  function color() { return type.color; }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  var ACTIONS = {
+    attack: function () { var e = ends(); return fx.attack({ fromEl: e.from, toEl: e.to, color: color(), kind: 'attack' }); },
+    support: function () { var e = ends(); return fx.attack({ fromEl: e.from, toEl: e.from, color: color(), kind: 'support' }); },
+    ultshot: function () { var e = ends(); return fx.attack({ fromEl: e.from, toEl: e.to, color: color(), kind: 'ultimate' }); },
+    hit: function () { var e = ends(); return fx.hit({ el: e.to, color: color(), amount: amount(), crit: $('crit').checked, effectiveness: +$('eff').value }); },
+    heal: function () { return fx.heal({ el: ends().from, amount: amount() }); },
+    guard: function () { return fx.guard({ el: ends().from, amount: amount() }); },
+    status: function () { return fx.status({ el: ends().to, status: $('statusSel').value }); },
+    ko: function () { return fx.ko({ el: ends().to }); },
+    switchOut: function () { return fx.switchOut({ el: ends().from, color: color() }); },
+    switchIn: function () { return fx.switchIn({ el: ends().from, color: color() }); },
+    ult: function () {
+      return fx.ultimate({
+        name: $('ultName').value, champion: $('ultChamp').value, image: mine.image, color: color()
+      });
+    },
+    reset: function () { build(); repaint(); return Promise.resolve(); },
+    combo: function () {
+      return ACTIONS.attack().then(function () { return ACTIONS.hit(); });
+    },
+    all: async function () {
+      var order = ['attack', 'hit', 'support', 'heal', 'guard', 'status', 'ultshot', 'hit', 'ult', 'switchOut', 'switchIn', 'ko'];
+      for (var i = 0; i < order.length; i++) {
+        log('→ ' + order[i]);
+        await ACTIONS[order[i]]();
+        await sleep(250);
+      }
+    }
+  };
+  document.querySelectorAll('button[data-fx]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var name = b.dataset.fx;
+      var t0 = performance.now();
+      var p = ACTIONS[name]();
+      log(name + ' lancé');
+      if (p && p.then) p.then(function () { log(name + ' terminé (' + Math.round(performance.now() - t0) + ' ms)'); });
+    });
+  });
+
+  window.__demo = { actions: ACTIONS, get fx() { return fx; } };
+  repaint();
+  build();
+})();
+</script>
+</body>
+</html>
