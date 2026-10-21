@@ -10,6 +10,15 @@
 
   const ext = globalThis.browser ?? globalThis.chrome;
 
+  /* Le même code tourne sous Firefox et sous Chrome/Edge : le paquet Chrome est
+   * dérivé de manifest.json par scripts/build-chrome.mjs. Seuls les libellés qui
+   * nomment le navigateur ou sa page de gestion changent. */
+  const IS_GECKO = /firefox\//i.test(navigator.userAgent);
+  const BROWSER_NAME = IS_GECKO ? 'Firefox' : 'Chrome';
+  const RELOAD_HINT = IS_GECKO
+    ? 'Passe par about:debugging → « Recharger ».'
+    : 'Ouvre chrome://extensions puis clique sur « Actualiser » pour Kyareeh+.';
+
   /** Source unique de vérité : le manifeste. Évite toute désynchronisation au bump. */
   const VERSION = (() => {
     try {
@@ -418,7 +427,7 @@
     notify('Rechargement de l’extension…');
 
     const fail = (reason) => {
-      notify(`${reason} Passe par about:debugging → « Recharger ».`);
+      notify(`${reason} ${RELOAD_HINT}`);
     };
 
     // runtime.reload() n'est pas disponible dans un content script : on passe par le fond,
@@ -2666,14 +2675,18 @@
       return;
     }
 
-    // 2) Firefox garde un manifeste plus ancien que le dossier.
+    // 2) Le navigateur garde un manifeste plus ancien que le dossier (dev).
     if (state.manifestOutdated) {
       ui.banner.hidden = false;
       ui.banner.classList.add('is-stale');
       ui.banner.innerHTML = `
         <span class="kp-banner-text">
-          Le dossier est en v${esc(state.version)} mais Firefox a chargé v${esc(state.manifestVersion ?? '?')}.
-          Retire l'add-on dans <code>about:debugging</code>, puis recharge-le depuis le dossier.
+          Le dossier est en v${esc(state.version)} mais ${esc(BROWSER_NAME)} a chargé v${esc(state.manifestVersion ?? '?')}.
+          ${
+            IS_GECKO
+              ? "Retire l'add-on dans <code>about:debugging</code>, puis recharge-le depuis le dossier."
+              : 'Ouvre <code>chrome://extensions</code>, clique sur « Actualiser » pour Kyareeh+, puis recharge la page.'
+          }
         </span>
         <button class="kp-btn is-primary" type="button" data-act="tab" data-tab="debug">Voir Debug</button>
       `;
@@ -8147,7 +8160,7 @@
         <div class="kp-card-stat"><span>Prix en cache</span><b>${pricedIds}</b><small>${Object.keys(state.prices).length} entrées · TTL ${state.settings.ttlH} h</small></div>
         <div class="kp-card-stat"><span>Bootstrap</span><b>${esc(state.bootKeys.join(', ') || '—')}</b><small>clés renvoyées par /api/me/bootstrap</small></div>
         <div class="kp-card-stat"><span>Version du code</span><b>v${esc(state.version)}</b><small>manifeste du dossier</small></div>
-        <div class="kp-card-stat"><span>Version dans Firefox</span><b>v${esc(state.manifestVersion ?? '—')}</b><small>${
+        <div class="kp-card-stat"><span>Version dans ${esc(BROWSER_NAME)}</span><b>v${esc(state.manifestVersion ?? '—')}</b><small>${
           state.manifestVersion
             ? state.manifestOutdated
               ? 'en retard sur le dossier'

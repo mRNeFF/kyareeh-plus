@@ -179,6 +179,13 @@ if (lintReport) {
 const zip = join(ARTIFACTS, `kyareeh-plus-${target}.zip`);
 console.log(`\n✓ Zip prêt : ${zip}`);
 
+/* --- 3 bis. paquet Chrome ------------------------------------------- */
+
+// Même code, manifeste dérivé (service worker MV3 au lieu de background.scripts).
+// Le paquet Chrome est reconstruit à chaque release pour ne jamais publier une
+// version décalée sur le Chrome Web Store.
+run(process.execPath, ['scripts/build-chrome.mjs']);
+
 if (buildOnly) {
   makeSourceArchive(target);
   console.log(`
