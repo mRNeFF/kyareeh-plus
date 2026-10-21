@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.1.0** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.1.1** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `f39d6d1`
@@ -22,9 +22,9 @@ npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
-npm run verify:chrome       # 16 contrôles dans un Chrome headless réel
+npm run verify:chrome       # 19 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 43 contrôles
-node test/verify-autosell.mjs    # 19 contrôles (sélection pure des doublons)
+node test/verify-autosell.mjs    # 24 contrôles (sélection pure + stratégies)
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
 node test/verify-duel-engine.mjs # règles du moteur de duel
@@ -145,8 +145,8 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | Onglet | Contenu |
 |---|---|
 | **Compte** | Valeur du compte, ressources, top cartes, valeur par rareté, séries complètes, recherche d'un autre joueur (valorisation exacte). |
-| **Vente** | Toutes les cartes, filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h avec compte à rebours, sélection plafonnée aux places d'annonce (10), prix fixe/enchère, 3 stratégies applicables à tout le lot, pastille « N poss. ». **Vente auto** : doublons uniquement, dernière copie conservée, M/L exclues par défaut, aperçu + confirmation, arrêt d'urgence, compteurs annonces/ventes immédiates. |
-| **Marché** | Scan des annonces sous la médiane (tri, pages, seuil de remise), annonces actives, marché global groupé par carte avec dépliant des ventes. |
+| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (doublons uniquement, dernière copie conservée, M/L exclues par défaut, stratégie rapide/équilibrée/max, aperçu + confirmation, arrêt d'urgence, compteurs annonces/ventes immédiates). |
+| **Marché** | Deux vues internes : **Marché global** (recherche serveur, une ligne par carte, prix fixe/enchère le plus bas, achat immédiat, dépliant des ventes) et **Bons plans** (scan sous la médiane, tri, pages, seuil). Mes annonces actives en bas. |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
 | **Stat** | Classement de comptes suivis (recherche manuelle + import auto des amis) sur 10 métriques. Menu déroulant du critère, tableau réduit à ce critère, camembert à droite avec tous les comptes et 50 couleurs max, rangs ex æquo, rang site sous le pseudo, détail par compte. |

@@ -301,6 +301,8 @@ async function visualPass() {
       `(() => {
          window.__kyaraPlus.setOpen(true);
          window.__kyaraPlus.setTab('sell');
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="sell-mode"][data-mode="auto"]')?.click();
          return true;
        })()`
     );
@@ -310,7 +312,27 @@ async function visualPass() {
       sessionId,
       `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view')?.innerText || ''`
     );
-    check('Panneau Vente auto présent', saleText.includes('Vente auto') && saleText.includes('doublons uniquement'));
+    check(
+      'Panneau Vente auto présent',
+      saleText.includes('Vente auto') &&
+        saleText.includes('doublons uniquement') &&
+        saleText.toLowerCase().includes('stratégie'),
+      `V=${saleText.includes('Vente auto')} D=${saleText.includes('doublons uniquement')} S=${saleText
+        .toLowerCase()
+        .includes('stratégie')}`
+    );
+    const strategyValues = await evaluate(
+      cdp,
+      sessionId,
+      `Array.from(document.querySelector('#kyara-plus-root').shadowRoot.querySelectorAll('[data-autosell-strategy] option')).map((o) => o.value)`
+    );
+    check(
+      'Vente auto : trois stratégies',
+      ['quick', 'balanced', 'max'].every((value) => strategyValues.includes(value)),
+      strategyValues.join(',')
+    );
+    const autoShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+    writeFileSync(join(SHOTS, 'chrome-vente-auto.png'), Buffer.from(autoShot.data, 'base64'));
 
     await evaluate(
       cdp,
@@ -382,6 +404,30 @@ async function visualPass() {
       () => evaluate(cdp, sessionId, 'window.__kyaraPlus.state.autoSell.running === false'),
       { label: 'arrêt de la vente auto', timeout: 5000 }
     );
+
+    await evaluate(cdp, sessionId, `window.__kyaraPlus.setTab('market')`);
+    await waitFor(
+      () => evaluate(cdp, sessionId, 'window.__kyaraPlus.state.marketView.items !== null'),
+      { label: 'marché global chargé', timeout: 20000 }
+    );
+    const marketText = await evaluate(
+      cdp,
+      sessionId,
+      `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view')?.innerText || ''`
+    );
+    check(
+      'Marché global intégré à l’onglet Marché',
+      marketText.includes('Marché global') && marketText.includes('Recherche faite par le serveur')
+    );
+    const marketShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+    writeFileSync(join(SHOTS, 'chrome-marche.png'), Buffer.from(marketShot.data, 'base64'));
+    await evaluate(cdp, sessionId, `window.__kyaraPlus.setTab('sell')`);
+    const sellTextAfter = await evaluate(
+      cdp,
+      sessionId,
+      `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view')?.innerText || ''`
+    );
+    check('Vente : plus de sous-onglet Marché global', !sellTextAfter.includes('Marché global'));
 
     check('Aucune exception JS pendant le rendu', cdp.exceptions.length === 0, cdp.exceptions.join(' | '));
   } finally {

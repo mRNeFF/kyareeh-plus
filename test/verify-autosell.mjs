@@ -14,7 +14,7 @@ if (begin < 0 || end < 0) {
 }
 
 const api = new Function(`${source.slice(begin, end)}
-  return { autoSellSpare, autoSellSelect, autoSellBuildPlan };
+  return { autoSellSpare, autoSellSelect, autoSellBuildPlan, autoSellStrategyPrice };
 `)();
 
 let checks = 0;
@@ -82,6 +82,17 @@ check(
   ).length === 2
 );
 check('plan vide sans place', api.autoSellBuildPlan(candidates, { slots: 0, maxPerCycle: 10 }).length === 0);
+
+const rec = {
+  quick: { price: 10 },
+  balanced: { price: 20 },
+  max: { price: 35 }
+};
+check('stratégie rapide', api.autoSellStrategyPrice(rec, 'quick') === 10);
+check('stratégie équilibrée', api.autoSellStrategyPrice(rec, 'balanced') === 20);
+check('stratégie maximale', api.autoSellStrategyPrice(rec, 'max') === 35);
+check('prix estimé refusé', api.autoSellStrategyPrice({ ...rec, estimated: true }, 'max') === null);
+check('prix absurde refusé', api.autoSellStrategyPrice({ max: { price: 0 } }, 'max') === null);
 
 console.log(`${checks - failures}/${checks} contrôles OK`);
 process.exit(failures ? 1 : 0);
