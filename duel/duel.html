@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kyara Duel</title>
+    <link rel="icon" href="../icons/icon-32.png">
+    <link rel="stylesheet" href="duel.css">
+  </head>
+  <body>
+    <!-- Application du duel (chantier C, docs/DUEL-V2.md §3). Rendu par duel-app.js. -->
+    <div class="kd-app" id="kd-app">
+      <header class="kd-top" id="kd-top"></header>
+      <main class="kd-main" id="kd-main">
+        <p class="kd-boot">Chargement du duel…</p>
+      </main>
+      <div class="kd-modal" id="kd-modal" hidden></div>
+      <div class="kd-toast" id="kd-toast" role="status" aria-live="polite" hidden></div>
+    </div>
+
+    <!-- Même ordre que le contrat : données, règles, moteur, réseau, effets, application. -->
+    <script src="../content/duel-data.js"></script>
+    <script src="../content/duel-rules.js"></script>
+    <script src="../content/duel-engine.js"></script>
+    <script src="../content/duel-net.js"></script>
+    <script src="./duel-fx.js"></script>
+    <script src="./duel-app.js"></script>
+  </body>
+</html>

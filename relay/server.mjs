@@ -1,7 +1,10 @@
-// Relais WebSocket autoritatif du duel Kyara (mode +Duel de Kyareeh+).
-// Voir docs/DUEL-SPEC.md §4. Le serveur exécute le moteur (content/duel-engine.js) :
-// les clients n'envoient que des intentions, chaque action est validée ici puis l'état
-// est diffusé aux deux joueurs avec un numéro de séquence (seq) croissant.
+// Relais WebSocket autoritatif du duel Kyara (mode +Duel de Kyareeh+), protocole v2.
+// Voir docs/DUEL-SPEC.md §4 (protocole v1) et docs/DUEL-V2.md §2 (choix simultanés).
+// Le serveur exécute le moteur (content/duel-engine.js) : les clients n'envoient que des
+// intentions. À chaque tour, chaque joueur attendu (E.pendingPlayers) range un choix secret
+// (E.submit) ; l'adversaire n'apprend que « il a choisi » (message `chosen`). Quand tous les
+// choix sont là, le moteur résout le tour et l'état est diffusé aux deux joueurs (toujours
+// via E.viewFor, jamais l'état brut) avec un numéro de séquence (seq) croissant.
 //
 // Lancement depuis la racine du dépôt : `node relay/server.mjs` (voir relay/README.md).
 import http from 'node:http';
@@ -15,15 +18,16 @@ import { WebSocketServer } from 'ws';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
-const PROTOCOL = 1;
+export const PROTOCOL = 2;
 // 5 lettres majuscules, sans I ni O (confusion avec 1 et 0).
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-const ENGINE_API = ['validateDeck', 'createMatch', 'legalActions', 'applyAction', 'currentPlayer', 'chooseAction', 'describeEvent'];
+export const ENGINE_API = ['validateDeck', 'createMatch', 'pendingPlayers', 'legalActions', 'submit', 'viewFor', 'chooseAction', 'describeEvent'];
 
 export const DEFAULTS = {
   port: 8080,
   host: undefined, // interface d'écoute (défaut : toutes)
-  turnMs: 60_000, // délai d'un tour avant `pass` automatique
+  chooseMs: 45_000, // délai de la phase de choix avant `pass` automatique
+  replaceMs: 20_000, // délai de la phase de remplacement avant premier remplaçant vivant automatique
   graceMs: 60_000, // délai de reconnexion avant défaite par abandon
   idleMs: 10 * 60_000, // salon fermé après 10 min sans message de ses joueurs
   sweepMs: 30_000, // fréquence du ménage des salons inactifs
@@ -36,6 +40,7 @@ export const DEFAULTS = {
   origins: [], // liste blanche d'origines (vide = toutes)
   enginePath: path.join(ROOT, 'content', 'duel-engine.js'),
   dataPath: path.join(ROOT, 'content', 'duel-data.js'),
+  rules: undefined, // surcharge partielle de E.RULES passée à createMatch (tests)
   log: true
 };
 
@@ -47,7 +52,9 @@ export function configFromEnv(env = process.env) {
     ...DEFAULTS,
     port: num('PORT', DEFAULTS.port),
     host: env.HOST || undefined,
-    turnMs: num('DUEL_TURN_MS', DEFAULTS.turnMs),
+    // DUEL_TURN_MS (v1) reste accepté comme ancien nom du délai de choix.
+    chooseMs: num('DUEL_CHOOSE_MS', num('DUEL_TURN_MS', DEFAULTS.chooseMs)),
+    replaceMs: num('DUEL_REPLACE_MS', DEFAULTS.replaceMs),
     graceMs: num('DUEL_GRACE_MS', DEFAULTS.graceMs),
     idleMs: num('DUEL_IDLE_MS', DEFAULTS.idleMs),
     sweepMs: num('DUEL_SWEEP_MS', DEFAULTS.sweepMs),
@@ -89,23 +96,35 @@ export function loadData(file = DEFAULTS.dataPath) {
 
 /** Charge le moteur (UMD : module.exports, ou window.KYARA_DUEL_ENGINE dans un bac à sable). */
 export function loadEngine(file = DEFAULTS.enginePath) {
+  file = path.resolve(file);
   if (!fs.existsSync(file)) throw new Error(`Moteur du duel introuvable : ${file}.`);
   let engine = null;
+  let requireError = null;
   try {
     const mod = createRequire(import.meta.url)(file);
     engine = mod && typeof mod.createMatch === 'function' ? mod : mod && mod.default;
-  } catch {
+  } catch (err) {
+    requireError = err;
     engine = null;
   }
   if (!engine || typeof engine.createMatch !== 'function') {
     const sandbox = { window: {}, console };
     sandbox.globalThis = sandbox;
-    vm.runInNewContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file, timeout: 5000 });
+    try {
+      vm.runInNewContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file, timeout: 5000 });
+    } catch (err) {
+      throw new Error(`Moteur du duel illisible (${file}) : ${(requireError || err).message}`);
+    }
     engine = sandbox.window.KYARA_DUEL_ENGINE || sandbox.KYARA_DUEL_ENGINE;
   }
-  const missing = ENGINE_API.filter((name) => !engine || typeof engine[name] !== 'function');
-  if (missing.length) throw new Error(`Moteur incomplet (${file}) : il manque ${missing.join(', ')}.`);
+  const missing = engineMissing(engine);
+  if (missing.length) throw new Error(`Moteur incomplet ou antérieur à la v2 (${file}) : il manque ${missing.join(', ')}.`);
   return engine;
+}
+
+/** Fonctions de l'API v2 absentes d'un moteur (liste vide = moteur utilisable). */
+export function engineMissing(engine) {
+  return ENGINE_API.filter((name) => !engine || typeof engine[name] !== 'function');
 }
 
 // ---------------------------------------------------------------------------
@@ -136,9 +155,13 @@ function cleanDeck(deck) {
 
 /** Forme canonique d'une action : seuls les champs du protocole comptent. */
 function canonical(a) {
-  if (!a || typeof a !== 'object') return '';
-  const t = a.target && typeof a.target === 'object' ? { side: a.target.side, index: a.target.index } : null;
-  return JSON.stringify(a.type === 'move' ? { type: 'move', actor: a.actor, move: a.move, target: t } : { type: a.type });
+  if (!a || typeof a !== 'object' || typeof a.type !== 'string') return '';
+  if (a.type === 'move') {
+    const t = a.target && typeof a.target === 'object' ? { side: a.target.side, index: a.target.index } : null;
+    return JSON.stringify({ type: 'move', actor: a.actor, move: a.move, target: t });
+  }
+  if (a.type === 'switch') return JSON.stringify({ type: 'switch', to: a.to });
+  return JSON.stringify({ type: a.type });
 }
 
 // ---------------------------------------------------------------------------
@@ -183,28 +206,77 @@ export function createRelay(options = {}) {
   function broadcastRoom(room) {
     room.seats.forEach((_, i) => sendRoom(room, i));
   }
+  /** Joueurs qui doivent encore choisir (vide hors duel). */
+  function pendingOf(room) {
+    if (room.status !== 'playing' || !room.match) return [];
+    try {
+      const p = E.pendingPlayers(room.match);
+      return Array.isArray(p) ? p.filter((x) => x === 0 || x === 1) : [];
+    } catch {
+      return [];
+    }
+  }
+  function phaseOf(room) {
+    if (!room.match) return null;
+    if (room.status === 'ended') return 'ended';
+    return typeof room.match.phase === 'string' ? room.match.phase : 'choose';
+  }
+  /** Joueurs attendus dans la phase courante qui ont déjà verrouillé leur choix. */
+  function chosenOf(room, pending = pendingOf(room)) {
+    return room.status === 'playing' ? room.expected.filter((p) => !pending.includes(p)) : [];
+  }
+  function legalFor(room, i, pending) {
+    if (!pending.includes(i)) return [];
+    try {
+      const legal = E.legalActions(room.match, i);
+      return Array.isArray(legal) ? legal : [];
+    } catch {
+      return [];
+    }
+  }
   function sendState(room, i, events, last) {
     const s = room.seats[i];
     if (!s || !room.match) return;
-    let legal = [];
+    // Toujours la vue du destinataire : le choix secret adverse n'en sort jamais.
+    let view;
     try {
-      legal = room.status === 'playing' ? E.legalActions(room.match, i) : [];
-    } catch {
-      legal = [];
+      view = E.viewFor(room.match, i);
+    } catch (err) {
+      log('viewFor a échoué', err);
+      fail(s.ws, 'engine_error', 'Le moteur n’a pas pu produire l’état du duel.');
+      return;
     }
+    const pending = pendingOf(room);
+    const playing = room.status === 'playing';
     send(s.ws, {
       t: 'state',
       seq: room.seq,
       you: i,
-      state: room.match,
+      phase: phaseOf(room),
+      pending,
+      chosen: chosenOf(room, pending),
+      choice: playing ? room.choices[i] : null,
+      state: view,
       events: events || [],
-      deadline: room.status === 'playing' ? Math.max(0, room.deadlineAt - Date.now()) : null,
-      legal,
+      deadline: playing ? Math.max(0, room.deadlineAt - Date.now()) : null,
+      timer: playing ? room.phaseMs : null,
+      legal: playing ? legalFor(room, i, pending) : [],
       last: last || null
     });
   }
   function broadcastState(room, events, last) {
     room.seats.forEach((_, i) => sendState(room, i, events, last));
+  }
+  /** Annonce qu'un joueur a verrouillé son choix ; seul l'auteur reçoit l'action (la sienne). */
+  function broadcastChosen(room, player) {
+    const pending = pendingOf(room);
+    const chosen = chosenOf(room, pending);
+    room.seats.forEach((s, i) => {
+      if (!s) return;
+      const msg = { t: 'chosen', seq: room.seq, player, pending, chosen, auto: room.auto[player] };
+      if (i === player) msg.action = room.choices[player];
+      send(s.ws, msg);
+    });
   }
   function sendEnd(room, i) {
     const s = room.seats[i];
@@ -222,19 +294,26 @@ export function createRelay(options = {}) {
     room.turnTimer = null;
   }
 
-  function scheduleTurn(room) {
+  /** Ouvre une phase (choix ou remplacement) : joueurs attendus, choix vidés, minuteur propre à la phase. */
+  function startPhase(room) {
     clearTurn(room);
+    room.choices = [null, null];
+    room.auto = [false, false];
+    room.held = [];
     if (room.status !== 'playing') return;
-    room.deadlineAt = Date.now() + cfg.turnMs;
+    room.expected = pendingOf(room);
+    room.phaseMs = phaseOf(room) === 'replace' ? cfg.replaceMs : cfg.chooseMs;
+    room.deadlineAt = Date.now() + room.phaseMs;
     const seq = room.seq;
-    room.turnTimer = setTimeout(() => onTurnTimeout(room, seq), cfg.turnMs);
+    room.turnTimer = setTimeout(() => onTurnTimeout(room, seq), room.phaseMs);
+    if (!room.expected.length) log(`salon ${room.code} : aucun joueur attendu en phase ${phaseOf(room)} (moteur ?)`);
   }
 
   function startMatch(room) {
     const players = room.seats.map((s) => ({ id: s.id, name: s.name, deck: s.deck }));
     let match;
     try {
-      match = E.createMatch({ data, seed: crypto.randomInt(0, 2 ** 32), players });
+      match = E.createMatch({ data, seed: crypto.randomInt(0, 2 ** 32), players, ...(cfg.rules ? { rules: cfg.rules } : {}) });
     } catch (err) {
       room.seats.forEach((s) => s && fail(s.ws, 'engine_error', `Impossible de lancer le duel : ${err.message}`));
       return;
@@ -247,8 +326,12 @@ export function createRelay(options = {}) {
     room.rematch = [false, false];
     log(`duel lancé ${room.code} : ${players[0].name} contre ${players[1].name}`);
     broadcastRoom(room);
-    scheduleTurn(room);
+    startPhase(room);
     broadcastState(room, [], null);
+  }
+
+  function isOver(state) {
+    return !state || state.phase === 'ended' || (state.winner !== null && state.winner !== undefined);
   }
 
   function inferReason(state, winner) {
@@ -268,7 +351,7 @@ export function createRelay(options = {}) {
     broadcastRoom(room);
   }
 
-  /** Défaite immédiate du siège `loser` (abandon, déconnexion prolongée). */
+  /** Défaite immédiate du siège `loser` (abandon, déconnexion prolongée, délais répétés). */
   function forfeit(room, loser, reason = 'forfeit') {
     if (room.status !== 'playing') return;
     let events = [];
@@ -279,68 +362,96 @@ export function createRelay(options = {}) {
         room.match = res.state;
         events = res.events || [];
       } catch {
-        room.match = { ...room.match, winner: 1 - loser, endReason: reason };
+        room.match = { ...room.match, winner: 1 - loser, endReason: reason, phase: 'ended' };
       }
     } else {
-      room.match = { ...room.match, winner: 1 - loser, endReason: reason };
+      room.match = { ...room.match, winner: 1 - loser, endReason: reason, phase: 'ended' };
     }
     room.seq += 1;
     clearTurn(room);
     room.status = 'ended';
-    broadcastState(room, events, { player: loser, action: null, auto: true, forfeit: reason });
+    room.choices = [null, null];
+    room.held = [];
+    broadcastState(room, events, { player: loser, actions: [null, null], auto: [false, false], forfeit: reason });
     finish(room, 1 - loser, reason);
   }
 
-  /** Applique une action déjà reconnue légale. Renvoie true, ou l'erreur du moteur s'il la refuse. */
-  function applyMove(room, seat, action, auto) {
+  /**
+   * Range le choix (déjà reconnu légal) du siège `seat`. Si c'était le dernier choix attendu, le
+   * moteur résout le tour : les événements partent aux deux joueurs dans un seul message `state`.
+   * Sinon, seul un `chosen` est diffusé. Renvoie true, ou l'erreur du moteur s'il refuse.
+   */
+  function submitChoice(room, seat, action, auto) {
+    const phase = phaseOf(room);
     let res;
     try {
-      res = E.applyAction(room.match, seat, action);
+      res = E.submit(room.match, seat, action);
     } catch (err) {
       return err;
     }
+    if (!res || !res.state) return new Error('réponse du moteur invalide');
     room.match = res.state;
-    room.seq += 1;
+    room.choices[seat] = action;
+    room.auto[seat] = Boolean(auto);
     if (!auto) room.timeouts[seat] = 0;
-    const last = { player: seat, action, auto: Boolean(auto) };
-    const winner = res.state.winner;
-    const over = (winner !== null && winner !== undefined) || E.currentPlayer(res.state) === null;
-    if (over) {
+    const events = Array.isArray(res.events) ? res.events : [];
+    const resolved = typeof res.resolved === 'boolean' ? res.resolved : isOver(res.state) || pendingOf(room).length === 0;
+    if (!resolved) {
+      // Par prudence, d'éventuels événements d'un choix non résolu attendent la résolution (ils pourraient le trahir).
+      room.held.push(...events);
+      broadcastChosen(room, seat);
+      return true;
+    }
+    const all = [...room.held, ...events];
+    const last = { phase, actions: room.choices.slice(), auto: room.auto.slice() };
+    room.seq += 1;
+    if (isOver(res.state)) {
       clearTurn(room);
       room.status = 'ended';
-      broadcastState(room, res.events, last);
+      broadcastState(room, all, last);
+      const winner = res.state.winner;
       finish(room, winner === null || winner === undefined ? 'draw' : winner, inferReason(res.state, winner));
     } else {
-      scheduleTurn(room);
-      broadcastState(room, res.events, last);
+      startPhase(room);
+      broadcastState(room, all, last);
     }
     return true;
   }
 
+  /** Choix joué par le serveur à l'expiration : `pass`, ou premier remplaçant vivant (plus petit index). */
+  function autoAction(room, p) {
+    const legal = legalFor(room, p, [p]);
+    if (phaseOf(room) === 'replace') {
+      const sw = legal.filter((a) => a.type === 'switch').sort((a, b) => a.to - b.to)[0];
+      if (sw) return sw;
+    }
+    return legal.find((a) => a.type === 'pass') || legal.find((a) => a.type === 'switch') || null;
+  }
+
   function onTurnTimeout(room, seq) {
     if (room.status !== 'playing' || room.seq !== seq) return;
-    const p = E.currentPlayer(room.match);
-    if (p !== 0 && p !== 1) return;
-    room.timeouts[p] += 1;
-    if (room.timeouts[p] >= cfg.maxTimeouts) {
+    room.turnTimer = null;
+    const late = pendingOf(room);
+    for (const p of late) {
+      room.timeouts[p] += 1;
+      if (room.timeouts[p] >= cfg.maxTimeouts) {
+        forfeit(room, p, 'timeout');
+        return;
+      }
+    }
+    for (const p of late) {
+      if (room.status !== 'playing' || room.seq !== seq) return;
+      const choice = autoAction(room, p);
+      if (choice && submitChoice(room, p, choice, true) === true) continue;
+      // Le moteur refuse le choix par défaut (cas imprévu) : on laisse l'IA choisir à sa place.
+      try {
+        if (submitChoice(room, p, E.chooseAction(room.match, p), true) === true) continue;
+      } catch {
+        // ignoré : défaite ci-dessous
+      }
       forfeit(room, p, 'timeout');
       return;
     }
-    let legal = [];
-    try {
-      legal = E.legalActions(room.match, p);
-    } catch {
-      legal = [];
-    }
-    const pass = legal.find((a) => a.type === 'pass') || { type: 'pass' };
-    if (applyMove(room, p, pass, true) === true) return;
-    // Le moteur refuse `pass` (cas imprévu) : on laisse l'IA jouer à sa place.
-    try {
-      if (applyMove(room, p, E.chooseAction(room.match, p), true) === true) return;
-    } catch {
-      // ignoré : défaite ci-dessous
-    }
-    forfeit(room, p, 'timeout');
   }
 
   // --- salons ----------------------------------------------------------------
@@ -383,6 +494,10 @@ export function createRelay(options = {}) {
     room.result = null;
     room.seq = 0;
     room.rematch = [false, false];
+    room.expected = [];
+    room.choices = [null, null];
+    room.auto = [false, false];
+    room.held = [];
     send(rest.ws, { t: 'peer', status: 'left' });
     broadcastRoom(room);
   }
@@ -426,7 +541,7 @@ export function createRelay(options = {}) {
   const handlers = {
     hello(ws, msg) {
       if (msg.v !== PROTOCOL) {
-        fail(ws, 'version', `Version du protocole non prise en charge (attendue : ${PROTOCOL}).`);
+        fail(ws, 'version', `Version du protocole non prise en charge (reçue : ${String(msg.v).slice(0, 8)}, attendue : ${PROTOCOL}). Mettez à jour l’extension.`, { expected: PROTOCOL });
         return;
       }
       let s = ws.session;
@@ -462,7 +577,12 @@ export function createRelay(options = {}) {
         seq: 0,
         result: null,
         deadlineAt: 0,
+        phaseMs: 0,
         turnTimer: null,
+        expected: [], // joueurs attendus dans la phase courante
+        choices: [null, null], // choix verrouillés de la phase courante (chacun ne voit que le sien)
+        auto: [false, false], // choix joués par le serveur (délai expiré)
+        held: [], // événements retenus jusqu'à la résolution du tour
         timeouts: [0, 0],
         rematch: [false, false],
         lastActivity: Date.now()
@@ -522,23 +642,22 @@ export function createRelay(options = {}) {
         sendState(room, s.seat, [], null);
         return;
       }
-      if (E.currentPlayer(room.match) !== s.seat) {
-        fail(ws, 'not_your_turn', 'Ce n’est pas votre tour.');
+      const pending = pendingOf(room);
+      if (!pending.includes(s.seat)) {
+        if (room.expected.includes(s.seat)) fail(ws, 'already_chosen', 'Votre choix est déjà verrouillé pour ce tour.');
+        else if (phaseOf(room) === 'replace') fail(ws, 'not_your_turn', 'L’adversaire choisit son remplaçant : rien à choisir pour vous.');
+        else fail(ws, 'not_your_turn', 'Rien à choisir pour vous dans cette phase.');
         return;
       }
       const wanted = canonical(msg.action);
-      let legal = [];
-      try {
-        legal = E.legalActions(room.match, s.seat);
-      } catch {
-        legal = [];
-      }
-      const action = wanted && legal.find((a) => canonical(a) === wanted);
+      const action = wanted && legalFor(room, s.seat, pending).find((a) => canonical(a) === wanted);
       if (!action) {
-        fail(ws, 'illegal_action', 'Action illégale : elle ne figure pas parmi les actions autorisées.');
+        fail(ws, 'illegal_action', phaseOf(room) === 'replace'
+          ? 'Action illégale : choisissez un remplaçant vivant sur le banc.'
+          : 'Action illégale : elle ne figure pas parmi les actions autorisées.');
         return;
       }
-      const res = applyMove(room, s.seat, action, false);
+      const res = submitChoice(room, s.seat, action, false);
       if (res !== true) fail(ws, 'illegal_action', `Action refusée par le moteur : ${res.message}`);
     },
 
