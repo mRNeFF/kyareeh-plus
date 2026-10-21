@@ -10,6 +10,15 @@
 
   const ext = globalThis.browser ?? globalThis.chrome;
 
+  /* Le même code tourne sous Firefox et sous Chrome/Edge : le paquet Chrome est
+   * dérivé de manifest.json par scripts/build-chrome.mjs. Seuls les libellés qui
+   * nomment le navigateur ou sa page de gestion changent. */
+  const IS_GECKO = /firefox\//i.test(navigator.userAgent);
+  const BROWSER_NAME = IS_GECKO ? 'Firefox' : 'Chrome';
+  const RELOAD_HINT = IS_GECKO
+    ? 'Passe par about:debugging → « Recharger ».'
+    : 'Ouvre chrome://extensions puis clique sur « Actualiser » pour Kyareeh+.';
+
   /** Source unique de vérité : le manifeste. Évite toute désynchronisation au bump. */
   const VERSION = (() => {
     try {
@@ -24,6 +33,8 @@
   const PACK_AVG_KEY = 'kyareeh.packavg.v1';
   const PACK_POOLS_KEY = 'kyareeh.packpools.v1';
   const STATS_KEY = 'kyareeh.statboard.v1';
+  const SALES_KEY = 'kyareeh.sales.v1';
+  const SALES_MAX = 2000;
   // Les comptes suivis sont relus au bout de 12 h (ou à la demande).
   const STAT_CACHE_MS = 12 * 3600 * 1000;
   const STAT_MAX_ACCOUNTS = 20;
@@ -56,7 +67,15 @@
     antiAfk: true,
     autoAllowChakra: true,
     autoRefreshMin: 10,
-    autoStopRare: false
+    autoStopRare: false,
+    // Vente automatique : uniquement les doublons, jamais la dernière copie.
+    autoSellType: 'fixed',
+    autoSellStrategy: 'balanced',
+    autoSellMinPrice: 1,
+    autoSellIntervalSec: 60,
+    autoSellMaxPerCycle: 10,
+    autoSellIncludeML: false,
+    autoSellDryRun: false
   };
 
   // Tris acceptés par /api/market/listings (valeurs validées côté serveur).
@@ -172,7 +191,6 @@
       query: '',
       rarity: 'all',
       series: 'all',
-      type: 'all',
       sort: 'potential_desc',
       onlySellable: false,
       onlyDupes: false,
@@ -182,15 +200,23 @@
       detail: null,
       detailLoading: false,
       detailError: null,
-      marketItems: null,
-      marketExpanded: new Set(),
-      marketTotal: 0,
-      marketMeta: null,
-      marketLoading: false,
-      marketError: null,
-      marketPage: 1,
       refreshing: false,
       lastRefresh: 0
+    },
+    // Onglet Marché : deux vues internes, sans doublon avec l'onglet Vente.
+    marketMode: 'global',
+    marketView: {
+      query: '',
+      rarity: 'all',
+      type: 'all',
+      sort: 'price_desc',
+      items: null,
+      total: 0,
+      meta: null,
+      loading: false,
+      error: null,
+      page: 1,
+      expanded: new Set()
     },
     deals: null,
     dealsMeta: null,
@@ -203,6 +229,9 @@
     query: '',
     selected: new Set(),
     sell: null,
+    // Journal local des annonces créées par Kyareeh+ (pas d'historique côté site).
+    salesLog: [],
+    salesLogLoaded: false,
     debug: [],
     bootKeys: [],
     notice: '',
@@ -253,6 +282,24 @@
       beatAt: 0,
       lastOpenAt: 0,
       restarts: 0,
+      log: []
+    },
+    // Vente auto des doublons : pas de reprise après rechargement, par sécurité.
+    autoSell: {
+      armed: false,
+      running: false,
+      stop: false,
+      gen: 0,
+      cycles: 0,
+      created: 0,
+      matched: 0,
+      errors: 0,
+      status: '',
+      startedAt: 0,
+      beatAt: 0,
+      nextAt: 0,
+      lastError: null,
+      preview: null,
       log: []
     },
     reloadArmed: false,
@@ -420,7 +467,7 @@
     notify('Rechargement de l’extension…');
 
     const fail = (reason) => {
-      notify(`${reason} Passe par about:debugging → « Recharger ».`);
+      notify(`${reason} ${RELOAD_HINT}`);
     };
 
     // runtime.reload() n'est pas disponible dans un content script : on passe par le fond,
@@ -750,6 +797,21 @@
     state.settings.dryRun = Boolean(state.settings.dryRun);
     state.settings.autoPrices = state.settings.autoPrices !== false;
     state.settings.saleType = state.settings.saleType === 'auction' ? 'auction' : 'fixed';
+    state.settings.autoSellType = state.settings.autoSellType === 'auction' ? 'auction' : 'fixed';
+    state.settings.autoSellStrategy = ['quick', 'balanced', 'max'].includes(state.settings.autoSellStrategy)
+      ? state.settings.autoSellStrategy
+      : 'balanced';
+    state.settings.autoSellMinPrice = Math.max(1, Math.round(Number(state.settings.autoSellMinPrice) || 1));
+    state.settings.autoSellIntervalSec = Math.min(
+      3600,
+      Math.max(30, Math.round(Number(state.settings.autoSellIntervalSec) || 60))
+    );
+    state.settings.autoSellMaxPerCycle = Math.min(
+      10,
+      Math.max(1, Math.round(Number(state.settings.autoSellMaxPerCycle) || 10))
+    );
+    state.settings.autoSellIncludeML = Boolean(state.settings.autoSellIncludeML);
+    state.settings.autoSellDryRun = Boolean(state.settings.autoSellDryRun);
     state.settings.dealsRarity = String(state.settings.dealsRarity || 'all');
     state.settings.dupeSort = DUPE_SORTS.some(([value]) => value === state.settings.dupeSort) ? state.settings.dupeSort : 'price_desc';
     state.settings.dealsType = ['all', 'fixed', 'auction'].includes(state.settings.dealsType) ? state.settings.dealsType : 'all';
@@ -798,6 +860,7 @@
     if (cached && typeof cached === 'object') {
       state.prices = cached.prices && typeof cached.prices === 'object' ? cached.prices : cached;
     }
+    await loadSalesLog();
     await mount();
     await loadData();
     await loadAutoLog();
@@ -1284,6 +1347,140 @@
       .filter((r) => r.sellable > 0);
   }
 
+  /* AUTOSELL:BEGIN — sélection pure des doublons, testée par verify-autosell.mjs */
+  /**
+   * Nombre d'exemplaires réellement « en trop » : on garde toujours une copie.
+   * `listable` inclut la dernière copie ; on ne peut donc pas l'utiliser tel quel.
+   */
+  function autoSellSpare(row) {
+    if (!row) return 0;
+    const qty = Math.max(0, Number(row.qty) || 0);
+    if (qty <= 1) return 0;
+    const locked = Math.max(0, Number(row.lockedQty) || 0);
+    const rawListable = row.listable == null ? qty - locked : Number(row.listable);
+    const listable = Number.isFinite(rawListable) ? Math.max(0, rawListable) : qty - locked;
+    return Math.max(0, Math.min(qty - 1, listable));
+  }
+
+  /**
+   * Filtre les lignes de vente pour ne garder que les doublons sûrs.
+   * `price` doit déjà être résolu par l'appelant (null = pas de prix connu).
+   */
+  function autoSellSelect(rows, options = {}) {
+    const includeML = Boolean(options.includeML);
+    const minPrice = Math.max(0, Number(options.minPrice) || 0);
+    return (Array.isArray(rows) ? rows : [])
+      .map((row) => ({ ...row, autoQty: autoSellSpare(row) }))
+      .filter((row) => {
+        if (!row || row.autoQty <= 0) return false;
+        if (row.pinned) return false;
+        if (row.sellBlock || row.block) return false;
+        if (!includeML && ['M', 'L'].includes(String(row.rarity || '').toUpperCase())) return false;
+        if (row.price == null || row.price === '') return false;
+        const price = Number(row.price);
+        if (!Number.isFinite(price) || price < minPrice) return false;
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          Number(b.price) * b.autoQty - Number(a.price) * a.autoQty ||
+          Number(b.price) - Number(a.price) ||
+          String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr')
+      );
+  }
+
+  /** Prix d'une stratégie de vente, sans jamais retomber sur un prix inventé. */
+  function autoSellStrategyPrice(rec, strategy = 'balanced') {
+    if (!rec || rec.estimated) return null;
+    const pick = rec[strategy] ?? rec.balanced;
+    const price = Number(pick?.price);
+    return Number.isFinite(price) && price > 0 ? Math.max(1, Math.round(price)) : null;
+  }
+
+  /** Répartit les places d'annonce disponibles, en commençant par les lots les plus values. */
+  function autoSellBuildPlan(candidates, options = {}) {
+    const slots = Math.max(0, Math.min(10, Math.round(Number(options.slots) || 0)));
+    const maxPerCycle = Math.max(
+      1,
+      Math.min(slots || 10, Math.round(Number(options.maxPerCycle) || slots || 10))
+    );
+    let left = Math.min(slots, maxPerCycle);
+    const plan = [];
+    for (const row of Array.isArray(candidates) ? candidates : []) {
+      if (left <= 0) break;
+      const qty = Math.min(Math.max(0, Number(row.autoQty) || 0), left);
+      if (qty <= 0) continue;
+      plan.push({ ...row, qty });
+      left -= qty;
+    }
+    return plan;
+  }
+  /* AUTOSELL:END */
+
+  /* SALES:BEGIN — cumuls purs du graphique de ventes, testés par verify-sales-chart.mjs */
+  function salesTotals(log) {
+    const totals = { net: 0, count: 0, matched: 0, auto: 0, manual: 0, autoNet: 0, manualNet: 0 };
+    for (const entry of Array.isArray(log) ? log : []) {
+      const net = Math.max(0, Number(entry?.net) || 0);
+      totals.net += net;
+      totals.count += 1;
+      if (entry?.source === 'auto') {
+        totals.auto += 1;
+        totals.autoNet += net;
+      } else {
+        totals.manual += 1;
+        totals.manualNet += net;
+      }
+      if (entry?.matched) totals.matched += 1;
+    }
+    return totals;
+  }
+
+  /** Net cumulé par jour, sur les `days` derniers jours (auto et manuel séparés). */
+  function salesChartSeries(log, now = Date.now(), days = 7) {
+    const count = Math.max(2, Math.min(31, Math.round(Number(days) || 7)));
+    const end = new Date(now);
+    end.setHours(0, 0, 0, 0);
+    const start = new Date(end);
+    start.setDate(start.getDate() - (count - 1));
+
+    const buckets = Array.from({ length: count }, (_, index) => {
+      const date = new Date(start);
+      date.setDate(start.getDate() + index);
+      return { at: date.getTime(), auto: 0, manual: 0 };
+    });
+
+    for (const entry of Array.isArray(log) ? log : []) {
+      const at = Number(entry?.at);
+      if (!Number.isFinite(at) || at < start.getTime() || at > now) continue;
+      const date = new Date(at);
+      date.setHours(0, 0, 0, 0);
+      const index = Math.round((date.getTime() - start.getTime()) / 86400000);
+      if (index < 0 || index >= count) continue;
+      const net = Math.max(0, Number(entry.net) || 0);
+      buckets[index][entry.source === 'auto' ? 'auto' : 'manual'] += net;
+    }
+
+    let auto = 0;
+    let manual = 0;
+    const points = buckets.map((bucket) => {
+      auto += bucket.auto;
+      manual += bucket.manual;
+      return { at: bucket.at, auto, manual };
+    });
+    const max = Math.max(1, ...points.map((point) => Math.max(point.auto, point.manual)));
+    return { points, max };
+  }
+  /* SALES:END */
+
+  /**
+   * Prix auto : on réutilise exactement les trois stratégies de la vente manuelle.
+   * Sans données de marché, on renvoie null : la vente auto n'invente pas de prix.
+   */
+  function autoSellPrice(row, strategy = state.settings.autoSellStrategy) {
+    return autoSellStrategyPrice(rowRecommendation(row, row), strategy);
+  }
+
   function filteredDupes() {
     const all = duplicateRows();
     const query = state.query.trim().toLowerCase();
@@ -1429,26 +1626,19 @@
     return rows.sort(comparators[view.sort] ?? comparators.potential_desc);
   }
 
-  /** Traduction des tris client vers les tris acceptés par /api/market/listings. */
-  function marketSortParam(sort) {
-    if (sort === 'price_asc' || sort === 'change_asc') return 'price_asc';
-    if (sort === 'name_asc') return 'price_asc';
-    return 'price_desc';
-  }
-
   /**
    * Mode « Marché global » : filtrage fait par le serveur (q, rarity, series, type),
    * pagination réelle via `total`. Aucun scan complet de la place de marché.
    */
   async function loadSellMarket(append = false) {
-    const view = state.sellView;
-    if (view.marketLoading) return;
+    const view = state.marketView;
+    if (view.loading) return;
 
-    view.marketLoading = true;
-    view.marketError = null;
+    view.loading = true;
+    view.error = null;
     if (!append) {
-      view.marketPage = 1;
-      view.marketExpanded.clear();
+      view.page = 1;
+      view.expanded.clear();
     }
     render();
 
@@ -1458,21 +1648,21 @@
       if (query) params.set('q', query);
       if (view.rarity !== 'all') params.set('rarity', view.rarity);
       if (view.type !== 'all') params.set('type', view.type);
-      params.set('sort', marketSortParam(view.sort));
+      params.set('sort', view.sort);
       params.set('pageSize', '24');
-      params.set('page', String(view.marketPage));
+      params.set('page', String(view.page));
 
       const data = await api(`/api/market/listings?${params.toString()}`, { timeout: 25000 });
       const items = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
-      view.marketItems = append ? [...(view.marketItems ?? []), ...items] : items;
-      view.marketTotal = toNum(data?.total) ?? view.marketItems.length;
-      view.marketMeta = { at: Date.now(), query, rarity: view.rarity, series: view.series, type: view.type };
-      view.marketPage += 1;
+      view.items = append ? [...(view.items ?? []), ...items] : items;
+      view.total = toNum(data?.total) ?? view.items.length;
+      view.meta = { at: Date.now(), query, rarity: view.rarity, type: view.type };
+      view.page += 1;
     } catch (err) {
-      view.marketError = friendlyError(err);
-      if (!append) view.marketItems = [];
+      view.error = friendlyError(err);
+      if (!append) view.items = [];
     } finally {
-      view.marketLoading = false;
+      view.loading = false;
       render();
     }
   }
@@ -1556,9 +1746,7 @@
     view.refreshing = true;
     render();
     try {
-      if (view.mode === 'market') {
-        await loadSellMarket(false);
-      } else if (view.detailId) {
+      if (view.detailId) {
         await openCardDetail(view.detailId);
       } else {
         const ids = [...new Set(state.collection.map((c) => String(c.characterId ?? c.id)))];
@@ -1569,6 +1757,59 @@
       view.refreshing = false;
       render();
     }
+  }
+
+  let salesSaveTimer = null;
+
+  /** Le site ne fournit aucun historique : on garde seulement ce que Kyareeh+ a créé. */
+  async function loadSalesLog() {
+    try {
+      const saved = await storageGet(SALES_KEY, []);
+      if (Array.isArray(saved)) {
+        state.salesLog = saved
+          .filter((entry) => entry && Number.isFinite(Number(entry.at)) && Number.isFinite(Number(entry.net)))
+          .map((entry) => ({
+            at: Number(entry.at),
+            source: entry.source === 'auto' ? 'auto' : 'manual',
+            name: String(entry.name ?? ''),
+            rarity: String(entry.rarity ?? ''),
+            price: Math.max(0, Math.round(Number(entry.price) || 0)),
+            net: Math.max(0, Math.round(Number(entry.net) || 0)),
+            matched: Boolean(entry.matched)
+          }))
+          .slice(-SALES_MAX);
+      }
+    } catch {
+      /* pas de journal : le graphique reste vide */
+    } finally {
+      state.salesLogLoaded = true;
+    }
+  }
+
+  function saveSalesSoon() {
+    if (salesSaveTimer) clearTimeout(salesSaveTimer);
+    salesSaveTimer = setTimeout(() => {
+      salesSaveTimer = null;
+      storageSet(SALES_KEY, state.salesLog.slice(-SALES_MAX)).catch(() => {});
+    }, 700);
+  }
+
+  /** Enregistre une annonce réellement créée (jamais en simulation). */
+  function recordSale(entry) {
+    const price = Math.max(0, Math.round(Number(entry?.price) || 0));
+    const net = Math.max(0, Math.round(Number(entry?.net) || 0));
+    if (!price && !net) return;
+    state.salesLog.push({
+      at: Number(entry?.at) || Date.now(),
+      source: entry?.source === 'auto' ? 'auto' : 'manual',
+      name: String(entry?.name ?? ''),
+      rarity: String(entry?.rarity ?? ''),
+      price,
+      net,
+      matched: Boolean(entry?.matched)
+    });
+    if (state.salesLog.length > SALES_MAX) state.salesLog.splice(0, state.salesLog.length - SALES_MAX);
+    saveSalesSoon();
   }
 
   function computeStats(rows) {
@@ -2529,47 +2770,43 @@
     return '';
   }
 
-  async function executeSell() {
-    if (!state.sell || state.sell.running) return;
-    const plan = state.sell.plan;
-    const blocker = sellBlocker(plan);
-    if (blocker) {
-      notify(blocker);
-      return;
-    }
+  /**
+   * Exécution commune aux ventes manuelle et automatique.
+   * Ne touche ni au DOM ni à l'état de la boucle : l'appelant fournit `log` et
+   * `shouldStop`. Retourne les compteurs réels (annonces créées, ventes immédiates).
+   */
+  async function runSalePlan(plan, options = {}) {
+    const saleType = options.type === 'auction' ? 'auction' : 'fixed';
+    const duration = Number(options.duration) > 0 ? Number(options.duration) : 12;
+    const buyoutPct = Number(options.buyoutPct) || 0;
+    const dryRun = Boolean(options.dryRun);
+    const gapMs = Math.max(350, Number(options.gapMs) || 1200);
+    const log = typeof options.log === 'function' ? options.log : () => {};
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const source = options.source === 'auto' ? 'auto' : 'manual';
+    const result = { created: 0, matched: 0, errors: 0, simulated: 0, stopped: null };
 
-    state.sell.running = true;
-    state.sell.done = false;
-    state.sell.log = [];
-    render();
-
-    const cfg = getCfg();
-    const duration = cfg.durations.includes(Number(state.settings.durationHours))
-      ? Number(state.settings.durationHours)
-      : cfg.durations[0] ?? 12;
-    const saleType = state.sell.type === 'auction' ? 'auction' : 'fixed';
-    const buyoutPct = Number(state.sell.buyoutPct) || 0;
     let consecutiveErrors = 0;
-
-    const log = (text, kind = 'info') => {
-      state.sell.log.push({ text, kind });
-      render();
-    };
-
     for (const row of plan) {
-      for (let copy = 0; copy < row.qty; copy += 1) {
-        if (!state.sell.running) break;
+      const qty = Math.max(1, Number(row.qty) || 1);
+      for (let copy = 0; copy < qty; copy += 1) {
+        if (shouldStop()) {
+          result.stopped = 'user';
+          return result;
+        }
 
-        if (state.settings.dryRun) {
-          const label = saleType === 'auction' ? `enchère dès ◆ ${fmt(row.price)}` : `prix fixe ◆ ${fmt(row.price)}`;
+        const label =
+          saleType === 'auction' ? `enchère dès ◆ ${fmt(row.price)}` : `prix fixe ◆ ${fmt(row.price)}`;
+        if (dryRun) {
           log(`(simulation) ${row.name} · ${label}`, 'info');
+          result.simulated += 1;
           await sleep(90);
           continue;
         }
 
         try {
           const buyout = saleType === 'auction' ? buyoutPriceFor(row.price, buyoutPct) : null;
-          const result = await api('/api/market/listings', {
+          const posted = await api('/api/market/listings', {
             method: 'POST',
             timeout: 20000,
             body: {
@@ -2580,26 +2817,88 @@
               durationHours: duration
             }
           });
-          const label = saleType === 'auction' ? `enchère dès ◆ ${fmt(row.price)}` : `prix fixe ◆ ${fmt(row.price)}`;
-          log(`✓ ${row.name} · ${label}${result?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
+          result.created += 1;
+          if (posted?.matched) result.matched += 1;
+          recordSale({
+            source,
+            name: row.name,
+            rarity: row.rarity,
+            price: row.price,
+            net: Math.max(0, Number(row.price) - feeOf(row.price) - taxOf(row.price)),
+            matched: Boolean(posted?.matched)
+          });
+          log(`✓ ${row.name} · ${label}${posted?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
           consecutiveErrors = 0;
         } catch (err) {
-          log(`✗ ${row.name} · ${friendlyError(err)}`, 'err');
+          result.errors += 1;
           consecutiveErrors += 1;
+          log(`✗ ${row.name} · ${friendlyError(err)}`, 'err');
+          const status = Number(err?.status);
+          if (status === 401 || status === 403 || status === 429) {
+            result.stopped = 'auth';
+            return result;
+          }
           if (consecutiveErrors >= 3) {
-            log('Arrêt après 3 erreurs consécutives.', 'err');
-            state.sell.running = false;
+            result.stopped = 'errors';
+            return result;
           }
         }
 
-        await sleep(Math.max(350, state.settings.gapMs));
+        await sleep(gapMs);
       }
-      if (!state.sell.running) break;
+    }
+    return result;
+  }
+
+  async function executeSell() {
+    if (!state.sell || state.sell.running) return;
+    const sell = state.sell;
+    const plan = sell.plan;
+    const blocker = sellBlocker(plan);
+    if (blocker) {
+      notify(blocker);
+      return;
     }
 
-    state.sell.running = false;
-    state.sell.done = true;
-    log('Terminé.', 'info');
+    sell.running = true;
+    sell.done = false;
+    sell.log = [];
+    render();
+
+    const cfg = getCfg();
+    const duration = cfg.durations.includes(Number(state.settings.durationHours))
+      ? Number(state.settings.durationHours)
+      : cfg.durations[0] ?? 12;
+    const saleType = sell.type === 'auction' ? 'auction' : 'fixed';
+    const buyoutPct = Number(sell.buyoutPct) || 0;
+
+    const log = (text, kind = 'info') => {
+      sell.log.push({ text, kind });
+      render();
+    };
+
+    const result = await runSalePlan(plan, {
+      type: saleType,
+      duration,
+      buyoutPct,
+      dryRun: state.settings.dryRun,
+      gapMs: state.settings.gapMs,
+      source: 'manual',
+      log,
+      shouldStop: () => !sell.running
+    });
+
+    sell.running = false;
+    sell.done = true;
+    if (result.stopped === 'errors') log('Arrêt après 3 erreurs consécutives.', 'err');
+    else if (result.stopped === 'auth') log('Arrêt : session expirée ou limite API atteinte.', 'err');
+    else if (result.stopped === 'user') log('Arrêt demandé.', 'info');
+    log(
+      `Terminé · ${fmt(result.created)} annonce(s)${result.matched ? ` · ${fmt(result.matched)} vente(s) immédiate(s)` : ''}${
+        state.settings.dryRun ? ' (simulation)' : ''
+      }.`,
+      'info'
+    );
     state.selected.clear();
     // La fiche ouverte n'est plus d'actualité : les copies vendues ont quitté la collection.
     state.sellView.detailId = null;
@@ -2607,6 +2906,296 @@
     state.sellView.lastRefresh = Date.now();
 
     await loadData({ keepPrices: true });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Vente auto des doublons                                             */
+  /* ------------------------------------------------------------------ */
+
+  function autoSellLog(text, kind = 'info') {
+    const a = state.autoSell;
+    a.log.push({ text, kind });
+    if (a.log.length > 180) a.log.shift();
+    render();
+  }
+
+  /** Relit la collection et les annonces actives avant/après un cycle. */
+  async function autoSellRefresh() {
+    const [me, coll, mine] = await Promise.all([
+      api('/api/me', { timeout: 20000 }).catch(() => null),
+      api('/api/me/collection?lean=1', { timeout: 25000 }),
+      api('/api/me/market', { timeout: 20000 }).catch(() => null)
+    ]);
+    const list = Array.isArray(coll) ? coll : Array.isArray(coll?.items) ? coll.items : null;
+    if (!list) throw new Error('Collection illisible');
+    if (me && typeof me === 'object') mergeUser(me);
+    state.collection = list;
+    if (mine && typeof mine === 'object') state.mine = mine;
+    state.lastSync = Date.now();
+    state.sellView.lastRefresh = Date.now();
+  }
+
+  function autoSellDuration() {
+    const cfg = getCfg();
+    return cfg.durations.includes(Number(state.settings.durationHours))
+      ? Number(state.settings.durationHours)
+      : cfg.durations[0] ?? 12;
+  }
+
+  /**
+   * Un cycle : relit la collection, prix uniquement les doublons, respecte les
+   * places d'annonce, puis crée les annonces. `preview` ne poste rien.
+   */
+  async function autoSellCycle({ dryRun = false, preview = false } = {}) {
+    const a = state.autoSell;
+    const s = state.settings;
+    const type = s.autoSellType === 'auction' ? 'auction' : 'fixed';
+
+    a.status = preview ? 'Calcul de l’aperçu…' : 'Lecture de la collection…';
+    render();
+    await autoSellRefresh();
+
+    const slots = listingSlots();
+    const all = sellRows();
+    const duplicateIds = all.filter((row) => autoSellSpare(row) > 0).map((row) => String(row.id));
+    const unscanned = duplicateIds.filter((id) => !state.marketScanned.has(id));
+    if (unscanned.length) {
+      a.status = `Lecture du marché (${Math.min(60, unscanned.length)}/${unscanned.length})…`;
+      render();
+      // Prix par petits lots : les cartes déjà lues restent en cache.
+      await ensureMarketData(unscanned.slice(0, 60));
+    }
+
+    const priced = all.map((row) => ({
+      ...row,
+      characterId: apiId(row.rawId ?? row.id),
+      price: autoSellPrice(row, s.autoSellStrategy),
+      floor: recycleFloor(row.rarity)
+    }));
+    const candidates = autoSellSelect(priced, {
+      includeML: Boolean(s.autoSellIncludeML),
+      minPrice: Number(s.autoSellMinPrice) || 1
+    });
+    const plan = autoSellBuildPlan(candidates, {
+      slots: slots.remaining,
+      maxPerCycle: Number(s.autoSellMaxPerCycle) || 10
+    });
+    const withoutPrice = priced.filter(
+      (row) =>
+        autoSellSpare(row) > 0 &&
+        row.price == null &&
+        (s.autoSellIncludeML || !['M', 'L'].includes(String(row.rarity || '').toUpperCase()))
+    ).length;
+
+    if (preview) {
+      a.preview = { at: Date.now(), plan, slots, candidates: candidates.length, withoutPrice };
+      a.status = plan.length
+        ? `Aperçu · ${fmt(plan.length)} annonce(s) prévue(s)`
+        : slots.remaining <= 0
+          ? 'Aucune place d’annonce libre'
+          : 'Aucun doublon vendable';
+      autoSellLog(
+        `${a.status}${withoutPrice ? ` · ${fmt(withoutPrice)} doublon(s) sans prix ignoré(s)` : ''}`,
+        plan.length ? 'info' : 'err'
+      );
+      render();
+      return { plan, created: 0, matched: 0, errors: 0, simulated: 0, fatal: null, preview: true };
+    }
+
+    if (!plan.length) {
+      a.cycles += 1;
+      a.status =
+        slots.remaining <= 0
+          ? 'Aucune place d’annonce libre'
+          : duplicateIds.length
+            ? 'Aucun doublon avec un prix connu'
+            : 'Aucun doublon';
+      a.lastPlan = [];
+      render();
+      return { plan: [], created: 0, matched: 0, errors: 0, simulated: 0, fatal: null };
+    }
+
+    a.status = dryRun
+      ? `Simulation de ${fmt(plan.length)} annonce(s)…`
+      : `Mise en vente de ${fmt(plan.length)} annonce(s)…`;
+    render();
+
+    const result = await runSalePlan(plan, {
+      type,
+      duration: autoSellDuration(),
+      buyoutPct: state.settings.buyoutPct,
+      dryRun,
+      gapMs: state.settings.gapMs,
+      source: 'auto',
+      log: autoSellLog,
+      shouldStop: () => !a.running || a.stop
+    });
+
+    a.cycles += 1;
+    a.created += result.created;
+    a.matched += result.matched;
+    a.errors += result.errors;
+    a.lastPlan = plan;
+    a.preview = null;
+
+    if (!dryRun) {
+      try {
+        await autoSellRefresh();
+      } catch {
+        return { ...result, plan, fatal: 'Collection illisible après la vente : arrêt de la vente auto.' };
+      }
+    }
+
+    if (result.stopped === 'errors') {
+      return { ...result, plan, fatal: 'Arrêt après 3 erreurs consécutives.' };
+    }
+    if (result.stopped === 'auth') {
+      return { ...result, plan, fatal: 'Session expirée ou limite API : arrêt de la vente auto.' };
+    }
+    return { ...result, plan, fatal: null };
+  }
+
+  function armAutoSell() {
+    const a = state.autoSell;
+    a.armed = true;
+    a.status = 'Confirmation requise';
+    render();
+  }
+
+  function disarmAutoSell() {
+    const a = state.autoSell;
+    a.armed = false;
+    a.status = '';
+    render();
+  }
+
+  async function autoSellPreview() {
+    const a = state.autoSell;
+    if (a.running) return;
+    a.preview = null;
+    a.status = 'Calcul de l’aperçu…';
+    render();
+    try {
+      await autoSellCycle({ preview: true });
+    } catch (err) {
+      a.lastError = friendlyError(err);
+      a.status = 'Aperçu impossible';
+      autoSellLog(`Aperçu impossible · ${a.lastError}`, 'err');
+    }
+  }
+
+  async function startAutoSell() {
+    const a = state.autoSell;
+    if (a.running) return;
+    if (!state.user) {
+      notify('Connecte-toi à Kyara pour lancer la vente auto.');
+      return;
+    }
+    if (state.sell) {
+      notify('Ferme la fenêtre de vente manuelle avant de lancer la vente auto.');
+      return;
+    }
+    a.armed = false;
+    a.running = true;
+    a.stop = false;
+    a.gen += 1;
+    a.cycles = 0;
+    a.created = 0;
+    a.matched = 0;
+    a.errors = 0;
+    a.status = 'Démarrage…';
+    a.startedAt = Date.now();
+    a.beatAt = Date.now();
+    a.nextAt = 0;
+    a.lastError = null;
+    a.preview = null;
+    a.log = [];
+    autoSellLog('Vente auto démarrée · doublons uniquement, dernière copie conservée');
+    persistSettings();
+    render();
+    autoSellLoop().catch((err) => {
+      a.running = false;
+      a.stop = true;
+      a.lastError = friendlyError(err);
+      a.status = 'Erreur inattendue';
+      autoSellLog(`Erreur inattendue · ${a.lastError}`, 'err');
+      render();
+    });
+  }
+
+  function stopAutoSell(reason = 'Vente auto arrêtée') {
+    const a = state.autoSell;
+    if (!a.running && !a.armed) return;
+    a.armed = false;
+    a.running = false;
+    a.stop = true;
+    a.gen += 1;
+    a.nextAt = 0;
+    a.status = reason;
+    autoSellLog(reason);
+    render();
+  }
+
+  async function autoSellWait(ms, alive) {
+    const end = Date.now() + Math.max(0, ms);
+    while (Date.now() < end) {
+      if (!alive()) return;
+      await sleep(Math.min(1000, end - Date.now()));
+    }
+  }
+
+  async function autoSellLoop() {
+    const a = state.autoSell;
+    const gen = ++a.gen;
+    const alive = () => a.running && !a.stop && a.gen === gen;
+    while (alive()) {
+      a.beatAt = Date.now();
+      if (state.sell) {
+        a.status = 'Vente manuelle ouverte · attente';
+        a.nextAt = Date.now() + 15000;
+        render();
+        await autoSellWait(15000, alive);
+        continue;
+      }
+
+      let result;
+      try {
+        result = await autoSellCycle({ dryRun: Boolean(state.settings.autoSellDryRun) });
+      } catch (err) {
+        a.lastError = friendlyError(err);
+        a.running = false;
+        a.stop = true;
+        a.status = 'Erreur de lecture';
+        autoSellLog(`Erreur · ${a.lastError}`, 'err');
+        render();
+        break;
+      }
+      if (!alive()) break;
+      if (result.fatal) {
+        a.running = false;
+        a.stop = true;
+        a.lastError = result.fatal;
+        a.status = 'Arrêté';
+        autoSellLog(result.fatal, 'err');
+        render();
+        break;
+      }
+
+      const interval = Math.min(
+        3600,
+        Math.max(30, Math.round(Number(state.settings.autoSellIntervalSec) || 60))
+      ) * 1000;
+      const idle = Math.max(interval, 5 * 60 * 1000);
+      const wait = result.plan.length ? interval : idle;
+      a.nextAt = Date.now() + wait;
+      a.status = result.plan.length
+        ? `Cycle ${a.cycles} · ${fmt(a.created)} annonce(s) · ${fmt(a.matched)} vente(s) immédiate(s)`
+        : state.settings.autoSellDryRun
+          ? 'Simulation · aucun doublon vendable'
+          : 'Aucun doublon vendable · attente';
+      render();
+      await autoSellWait(wait, alive);
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -2674,14 +3263,18 @@
       return;
     }
 
-    // 2) Firefox garde un manifeste plus ancien que le dossier.
+    // 2) Le navigateur garde un manifeste plus ancien que le dossier (dev).
     if (state.manifestOutdated) {
       ui.banner.hidden = false;
       ui.banner.classList.add('is-stale');
       ui.banner.innerHTML = `
         <span class="kp-banner-text">
-          Le dossier est en v${esc(state.version)} mais Firefox a chargé v${esc(state.manifestVersion ?? '?')}.
-          Retire l'add-on dans <code>about:debugging</code>, puis recharge-le depuis le dossier.
+          Le dossier est en v${esc(state.version)} mais ${esc(BROWSER_NAME)} a chargé v${esc(state.manifestVersion ?? '?')}.
+          ${
+            IS_GECKO
+              ? "Retire l'add-on dans <code>about:debugging</code>, puis recharge-le depuis le dossier."
+              : 'Ouvre <code>chrome://extensions</code>, clique sur « Actualiser » pour Kyareeh+, puis recharge la page.'
+          }
         </span>
         <button class="kp-btn is-primary" type="button" data-act="tab" data-tab="debug">Voir Debug</button>
       `;
@@ -4507,13 +5100,14 @@
   function sellModeSwitch() {
     const view = state.sellView;
     const owned = state.collection.length;
+    const dupes = state.collection.filter((item) => Number(item.qty ?? item.quantity ?? 1) > 1).length;
     return `
-      <div class="kp-seg kp-seg-lg" role="tablist" aria-label="Source de la recherche">
+      <div class="kp-seg kp-seg-lg" role="tablist" aria-label="Vente">
         <button class="kp-seg-btn ${view.mode === 'mine' ? 'is-active' : ''}" type="button" role="tab" aria-selected="${view.mode === 'mine'}" data-act="sell-mode" data-mode="mine">
           Mes cartes <small>${fmt(owned)}</small>
         </button>
-        <button class="kp-seg-btn ${view.mode === 'market' ? 'is-active' : ''}" type="button" role="tab" aria-selected="${view.mode === 'market'}" data-act="sell-mode" data-mode="market">
-          Marché global
+        <button class="kp-seg-btn ${view.mode === 'auto' ? 'is-active' : ''}" type="button" role="tab" aria-selected="${view.mode === 'auto'}" data-act="sell-mode" data-mode="auto">
+          Vente auto <small>${fmt(dupes)} doublon(s)</small>
         </button>
       </div>`;
   }
@@ -4536,21 +5130,14 @@
 
   function sellToolbar() {
     const view = state.sellView;
-    const disabled = view.refreshing || view.marketLoading;
     return `
       <div class="kp-toolbar kp-toolbar-search">
         <input class="kp-input" type="search" data-role="sell-search" autocomplete="off"
-          placeholder="${view.mode === 'market' ? 'Chercher une carte sur le marché…' : 'Filtrer ma collection…'}"
-          value="${esc(view.query)}">
-        <button class="kp-btn ${disabled ? '' : 'is-primary'}" type="button" data-act="sell-refresh" ${disabled ? 'disabled' : ''}>
-          ${view.refreshing || view.marketLoading
-            ? '<span class="kp-spinner"></span> Actualisation…'
-            : view.mode === 'market'
-              ? 'Actualiser le marché'
-              : 'Actualiser les prix'}
+          placeholder="Filtrer ma collection…" value="${esc(view.query)}">
+        <button class="kp-btn ${view.refreshing ? '' : 'is-primary'}" type="button" data-act="sell-refresh" ${view.refreshing ? 'disabled' : ''}>
+          ${view.refreshing ? '<span class="kp-spinner"></span> Actualisation…' : 'Actualiser les prix'}
         </button>
-      </div>
-      ${view.mode === 'market' ? `<div class="kp-hint">Recherche faite par le serveur : nom, rareté et type, avec pagination réelle.</div>` : ''}`;
+      </div>`;
   }
 
   function sellFilters(seriesOptions) {
@@ -4566,48 +5153,27 @@
           </select>
         </label>
         <label class="kp-filter">
-          <span>Type (marché)</span>
-          <select class="kp-select" data-sell-type>
-            ${[
-              ['all', 'Tout'],
-              ['fixed', 'Prix fixe'],
-              ['auction', 'Enchères']
-            ]
-              .map(([value, label]) => `<option value="${value}" ${view.type === value ? 'selected' : ''}>${label}</option>`)
+          <span>Série</span>
+          <select class="kp-select" data-sell-series>
+            <option value="all">Toutes</option>
+            ${seriesOptions
+              .map(
+                (name) => `<option value="${esc(name)}" ${view.series === name ? 'selected' : ''}>${esc(name)}</option>`
+              )
               .join('')}
           </select>
         </label>
-        ${
-          view.mode === 'mine'
-            ? `<label class="kp-filter">
-                 <span>Série</span>
-                 <select class="kp-select" data-sell-series>
-                   <option value="all">Toutes</option>
-                   ${seriesOptions
-                     .map(
-                       (name) =>
-                         `<option value="${esc(name)}" ${view.series === name ? 'selected' : ''}>${esc(name)}</option>`
-                     )
-                     .join('')}
-                 </select>
-               </label>`
-            : ''
-        }
       </div>
-      ${
-        view.mode === 'mine'
-          ? `<div class="kp-sell-toggles">
-               <label class="kp-check">
-                 <input type="checkbox" data-sell-only-sellable ${view.onlySellable ? 'checked' : ''}>
-                 <span>Seulement les cartes vendables</span>
-               </label>
-               <label class="kp-check">
-                 <input type="checkbox" data-sell-only-dupes ${view.onlyDupes ? 'checked' : ''}>
-                 <span>Doublons <small>plus d'un exemplaire</small></span>
-               </label>
-             </div>`
-          : ''
-      }`;
+      <div class="kp-sell-toggles">
+        <label class="kp-check">
+          <input type="checkbox" data-sell-only-sellable ${view.onlySellable ? 'checked' : ''}>
+          <span>Seulement les cartes vendables</span>
+        </label>
+        <label class="kp-check">
+          <input type="checkbox" data-sell-only-dupes ${view.onlyDupes ? 'checked' : ''}>
+          <span>Doublons <small>plus d'un exemplaire</small></span>
+        </label>
+      </div>`;
   }
 
   /** Durée lisible pour un verrou de revente. */
@@ -4773,6 +5339,11 @@
     }
 
     const list = [...groups.values()];
+    if (sort === 'newest' || sort === 'ending') {
+      // Le serveur a déjà renvoyé les annonces dans l'ordre demandé : on conserve
+      // l'ordre d'apparition des cartes au lieu de retrier par prix.
+      return list.sort((a, b) => a.order - b.order);
+    }
     const asc = sort === 'price_asc' || sort === 'change_asc';
     // Le tri du serveur est conservé à l'intérieur de chaque groupe ; entre cartes,
     // on ordonne sur la meilleure offre de façon cohérente avec le tri demandé.
@@ -4835,7 +5406,7 @@
         : changePctOf(id);
 
     const count = group.items.length;
-    const expanded = state.sellView.marketExpanded.has(id);
+    const expanded = state.marketView.expanded.has(id);
     const cheapest = group.best;
     const price = cheapest?.price ?? null;
     const bestType = cheapest ? (marketItemIsAuction(cheapest.item) ? 'enchère' : 'fixe') : '';
@@ -4909,46 +5480,213 @@
       </div>`;
   }
 
+  function autoSellPanel(all, slots) {
+    const a = state.autoSell;
+    const s = state.settings;
+    const dupes = all.filter((row) => row.qty > 1).length;
+    const spare = all.reduce((sum, row) => sum + autoSellSpare(row), 0);
+    const withoutPrice = all.filter(
+      (row) =>
+        autoSellSpare(row) > 0 &&
+        (s.autoSellIncludeML || !['M', 'L'].includes(String(row.rarity || '').toUpperCase())) &&
+        autoSellPrice(row, s.autoSellStrategy) == null
+    ).length;
+    const mlSpare = all
+      .filter((row) => ['M', 'L'].includes(String(row.rarity || '').toUpperCase()))
+      .reduce((sum, row) => sum + autoSellSpare(row), 0);
+    const stateLabel = a.running
+      ? 'en cours'
+      : a.armed
+        ? 'à confirmer'
+        : 'arrêtée';
+    const log = a.log.slice(-8);
+    return `
+      <section class="kp-autosell ${a.running ? 'is-running' : ''} ${a.armed ? 'is-armed' : ''}">
+        <div class="kp-autosell-head">
+          <div class="kp-autosell-title">
+            <span class="kp-autosell-dot"></span>
+            <b>Vente auto</b>
+            <small>doublons uniquement · dernière copie conservée</small>
+          </div>
+          <span class="kp-autosell-state">${stateLabel}</span>
+        </div>
+        <div class="kp-autosell-stats">
+          <span><b>${fmt(dupes)}</b> carte(s) en double</span>
+          <span><b>${fmt(spare)}</b> exemplaire(s) en trop</span>
+          <span><b>${fmt(spare - (s.autoSellIncludeML ? 0 : mlSpare))}</b> éligible(s)</span>
+          <span><b>${slots.remaining}</b> place(s) libre(s)</span>
+        </div>
+        ${
+          a.status
+            ? `<div class="kp-autosell-status">${esc(a.status)}${
+                a.nextAt && a.running ? ` · prochain cycle ${nowTime(a.nextAt)}` : ''
+              }</div>`
+            : ''
+        }
+        <div class="kp-autosell-grid">
+          <label>
+            <span>Type</span>
+            <select class="kp-select" data-autosell-type ${a.running ? 'disabled' : ''}>
+              <option value="fixed" ${s.autoSellType === 'fixed' ? 'selected' : ''}>Prix fixe</option>
+              <option value="auction" ${s.autoSellType === 'auction' ? 'selected' : ''}>Enchère</option>
+            </select>
+          </label>
+          <label>
+            <span>Stratégie</span>
+            <select class="kp-select" data-autosell-strategy ${a.running ? 'disabled' : ''}>
+              <option value="quick" ${s.autoSellStrategy === 'quick' ? 'selected' : ''}>Vente rapide</option>
+              <option value="balanced" ${s.autoSellStrategy === 'balanced' ? 'selected' : ''}>Équilibrée</option>
+              <option value="max" ${s.autoSellStrategy === 'max' ? 'selected' : ''}>Prix maximal</option>
+            </select>
+          </label>
+          <label>
+            <span>Prix min</span>
+            <input class="kp-input" type="number" min="1" step="1" data-autosell-min-price
+              value="${Math.max(1, Number(s.autoSellMinPrice) || 1)}" ${a.running ? 'disabled' : ''}>
+          </label>
+          <label>
+            <span>Intervalle (s)</span>
+            <input class="kp-input" type="number" min="30" max="3600" step="10" data-autosell-interval
+              value="${Math.min(3600, Math.max(30, Number(s.autoSellIntervalSec) || 60))}" ${a.running ? 'disabled' : ''}>
+          </label>
+          <label>
+            <span>Max / cycle</span>
+            <input class="kp-input" type="number" min="1" max="10" step="1" data-autosell-max
+              value="${Math.min(10, Math.max(1, Number(s.autoSellMaxPerCycle) || 10))}" ${a.running ? 'disabled' : ''}>
+          </label>
+        </div>
+        <div class="kp-autosell-opts">
+          <label class="kp-check">
+            <input type="checkbox" data-autosell-include-ml ${s.autoSellIncludeML ? 'checked' : ''} ${a.running ? 'disabled' : ''}>
+            Inclure M/L <em>${s.autoSellIncludeML ? '· dangereux' : '· exclues par défaut'}</em>
+          </label>
+          <label class="kp-check">
+            <input type="checkbox" data-autosell-dryrun ${s.autoSellDryRun ? 'checked' : ''} ${a.running ? 'disabled' : ''}>
+            Simulation
+          </label>
+          <span class="kp-autosell-note">${fmt(withoutPrice)} sans prix · ${fmt(mlSpare)} M/L</span>
+        </div>
+        <div class="kp-autosell-actions">
+          <button class="kp-btn" type="button" data-act="autosell-preview" ${a.running ? 'disabled' : ''}>Aperçu</button>
+          <button class="kp-btn ${a.armed ? 'is-primary' : ''}" type="button" data-act="autosell-start" ${a.running ? 'disabled' : ''}>
+            ${a.armed ? 'Confirmer le démarrage' : 'Démarrer'}
+          </button>
+          <button class="kp-btn" type="button" data-act="autosell-stop" ${a.running ? '' : 'disabled'}>Arrêter</button>
+          ${a.armed ? '<button class="kp-btn" type="button" data-act="autosell-cancel">Annuler</button>' : ''}
+        </div>
+        ${
+          a.armed
+            ? `<div class="kp-autosell-confirm">
+                 <b>Confirmer la vente auto ?</b>
+                 <span>${fmt(spare)} exemplaire(s) en trop · ${slots.remaining} place(s) libre(s) · ${
+                   s.autoSellIncludeML ? 'M/L incluses' : 'M/L exclues'
+                 } · dernière copie conservée.</span>
+               </div>`
+            : ''
+        }
+        ${
+          a.preview
+            ? `<div class="kp-autosell-preview">
+                 <b>Aperçu · ${fmt(a.preview.plan.length)} annonce(s)</b>
+                 ${
+                   a.preview.plan.length
+                     ? a.preview.plan
+                         .slice(0, 10)
+                         .map(
+                           (row) =>
+                             `<div><span>${esc(row.name)} × ${row.qty}</span><b>◆ ${fmt(row.price)}</b></div>`
+                         )
+                         .join('')
+                     : '<div>Aucune annonce à préparer.</div>'
+                 }
+                 ${a.preview.withoutPrice ? `<small>${fmt(a.preview.withoutPrice)} doublon(s) sans prix ignoré(s).</small>` : ''}
+               </div>`
+            : ''
+        }
+        ${
+          log.length
+            ? `<div class="kp-autosell-log">${log
+                .map((entry) => `<div class="${entry.kind === 'err' ? 'is-bad' : entry.kind === 'ok' ? 'is-good' : ''}">${esc(entry.text)}</div>`)
+                .join('')}</div>`
+            : ''
+        }
+      </section>`;
+  }
+
+  function salesChart() {
+    const totals = salesTotals(state.salesLog);
+    const model = salesChartSeries(state.salesLog);
+    const { points, max } = model;
+    const W = 720;
+    const H = 210;
+    const pad = { l: 44, r: 14, t: 14, b: 26 };
+    const x = (index) => pad.l + (index / Math.max(1, points.length - 1)) * (W - pad.l - pad.r);
+    const y = (value) => H - pad.b - (value / max) * (H - pad.t - pad.b);
+    const line = (key) =>
+      points.map((point, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(point[key]).toFixed(1)}`).join(' ');
+    const grid = [0, 0.5, 1]
+      .map((ratio) => {
+        const value = max * ratio;
+        const gy = y(value);
+        const label = Number.isInteger(value) ? fmt(value) : value.toFixed(1).replace('.', ',');
+        return `<line class="kp-sales-grid" x1="${pad.l}" y1="${gy.toFixed(1)}" x2="${W - pad.r}" y2="${gy.toFixed(
+          1
+        )}"></line><text class="kp-sales-axis" x="${pad.l - 7}" y="${(gy + 3).toFixed(1)}" text-anchor="end">◆ ${label}</text>`;
+      })
+      .join('');
+    const xLabels = points
+      .map((point, index) => {
+        const date = new Date(point.at).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+        return `<text class="kp-sales-axis" x="${x(index).toFixed(1)}" y="${H - 7}" text-anchor="middle">${esc(
+          date
+        )}</text>`;
+      })
+      .join('');
+    return `
+      <section class="kp-sales">
+        <div class="kp-sales-head">
+          <b>Ventes</b>
+          <span>7 jours · via Kyareeh+</span>
+        </div>
+        <div class="kp-sales-kpis">
+          <span><b>◆ ${fmt(totals.net)}</b><small>net estimé</small></span>
+          <span><b>${fmt(totals.count)}</b><small>ventes</small></span>
+          <span><b>${fmt(totals.matched)}</b><small>immédiates</small></span>
+        </div>
+        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Net des ventes par jour">
+          ${grid}
+          <path class="kp-sales-line is-auto" d="${line('auto')}"></path>
+          <path class="kp-sales-line is-manual" d="${line('manual')}"></path>
+          <circle class="kp-sales-dot is-auto" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
+            points[points.length - 1].auto
+          ).toFixed(1)}" r="3"></circle>
+          <circle class="kp-sales-dot is-manual" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
+            points[points.length - 1].manual
+          ).toFixed(1)}" r="3"></circle>
+          ${xLabels}
+        </svg>
+        <div class="kp-sales-legend">
+          <span><i class="is-auto"></i>Auto <b>◆ ${fmt(totals.autoNet)}</b></span>
+          <span><i class="is-manual"></i>Manuelle <b>◆ ${fmt(totals.manualNet)}</b></span>
+        </div>
+        <div class="kp-sales-note">Net estimé des annonces créées via Kyareeh+.</div>
+      </section>`;
+  }
+
   function viewSell() {
     if (!state.user) return loginHTML();
     const view = state.sellView;
     const slots = listingSlots();
+    const all = sellRows();
 
-    if (view.mode === 'market') {
-      const items = view.marketItems ?? [];
-      // Index construit une seule fois : évite un scan complet de la collection par ligne.
-      const ownedMap = new Map(sellRows().map((row) => [String(row.id), row]));
-      const groups = groupMarketItems(items, view.sort);
-      const hasQuery = Boolean(view.query.trim()) || view.rarity !== 'all' || view.type !== 'all';
+    if (view.mode === 'auto') {
       return `
         ${sellModeSwitch()}
-        ${sellToolbar()}
-        ${sellFilters([])}
-        ${sellRarityChips(null, false)}
-        ${
-          view.marketLoading && !items.length
-            ? '<div class="kp-empty"><span class="kp-spinner"></span> Recherche sur le marché…</div>'
-            : view.marketError
-              ? `<div class="kp-empty"><b>Recherche impossible</b>${esc(view.marketError)}</div>`
-              : !items.length
-                ? `<div class="kp-empty"><b>Aucun résultat</b>${
-                    hasQuery ? 'Aucune annonce ne correspond à ces filtres.' : 'Lance une recherche pour interroger le marché.'
-                  }</div>`
-                : `<div class="kp-hint">${fmt(items.length)} annonce(s) sur ${fmt(view.marketTotal)} · ${fmt(
-                    groups.length
-                  )} carte(s) distincte(s) · prix le plus bas par carte${
-                    view.marketMeta?.at ? ` · actualisé ${nowTime(view.marketMeta.at)}` : ''
-                  }</div>
-                   <div class="kp-sell-list">${groups.map((group) => sellMarketRow(group, ownedMap)).join('')}</div>
-                   ${
-                     items.length < view.marketTotal
-                       ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="sell-more" ${view.marketLoading ? 'disabled' : ''}>Afficher plus</button></div>`
-                       : ''
-                   }`
-        }`;
+        <div class="kp-hint">Doublons uniquement · une copie conservée.</div>
+        ${autoSellPanel(all, slots)}
+        ${salesChart()}`;
     }
 
-    const all = sellRows();
     const rows = filteredSellRows(all);
     const sellableCopies = all.reduce((sum, row) => sum + row.sellable, 0);
     const priced = rows.filter((row) => row.price != null);
@@ -4956,7 +5694,7 @@
     for (const row of all) counts[row.rarity] = (counts[row.rarity] ?? 0) + 1;
 
     if (!all.length) {
-      return `${sellModeSwitch()}<div class="kp-empty"><b>Collection vide</b>Le site n'a renvoyé aucune carte pour ce compte.</div>`;
+      return `${sellModeSwitch()}${salesChart()}<div class="kp-empty"><b>Collection vide</b>Le site n'a renvoyé aucune carte pour ce compte.</div>`;
     }
 
     // Prix marché des lignes affichées uniquement, par petits lots.
@@ -4990,11 +5728,148 @@
           ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="sell-more-rows">Afficher plus (${fmt(rows.length - visible.length)})</button></div>`
           : ''
       }
+      ${salesChart()}
       ${sellSelectionBar(rows)}`;
   }
 
-  function viewMarket() {
-    if (!state.user) return loginHTML();
+  function marketModeSwitch() {
+    const mode = state.marketMode === 'deals' ? 'deals' : 'global';
+    return `
+      <div class="kp-seg kp-seg-lg" role="tablist" aria-label="Marché">
+        <button class="kp-seg-btn ${mode === 'global' ? 'is-active' : ''}" type="button" role="tab" aria-selected="${mode === 'global'}" data-act="market-mode" data-mode="global">
+          Marché global
+        </button>
+        <button class="kp-seg-btn ${mode === 'deals' ? 'is-active' : ''}" type="button" role="tab" aria-selected="${mode === 'deals'}" data-act="market-mode" data-mode="deals">
+          Bons plans
+        </button>
+      </div>`;
+  }
+
+  function marketGlobalToolbar() {
+    const view = state.marketView;
+    return `
+      <div class="kp-toolbar kp-toolbar-search">
+        <input class="kp-input" type="search" data-role="market-search" autocomplete="off"
+          placeholder="Chercher une carte sur le marché…" value="${esc(view.query)}">
+        <button class="kp-btn ${view.loading ? '' : 'is-primary'}" type="button" data-act="market-refresh" ${view.loading ? 'disabled' : ''}>
+          ${view.loading ? '<span class="kp-spinner"></span> Recherche…' : 'Actualiser le marché'}
+        </button>
+      </div>
+      <div class="kp-hint">Recherche serveur · pagination réelle.</div>`;
+  }
+
+  function marketGlobalFilters() {
+    const view = state.marketView;
+    return `
+      <div class="kp-filters">
+        <label class="kp-filter">
+          <span>Tri</span>
+          <select class="kp-select" data-market-sort>
+            ${DEAL_SORTS.map(
+              ([value, label]) => `<option value="${value}" ${view.sort === value ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </label>
+        <label class="kp-filter">
+          <span>Type</span>
+          <select class="kp-select" data-market-type>
+            ${[
+              ['all', 'Tout'],
+              ['fixed', 'Prix fixe'],
+              ['auction', 'Enchères']
+            ]
+              .map(([value, label]) => `<option value="${value}" ${view.type === value ? 'selected' : ''}>${label}</option>`)
+              .join('')}
+          </select>
+        </label>
+      </div>
+      <div class="kp-rarities ${view.rarity !== 'all' ? 'is-focus' : ''}">
+        <button class="kp-rchip ${view.rarity === 'all' ? 'is-active' : ''}" type="button" data-act="market-rarity" data-rarity="all">Toutes</button>
+        ${RARITY_ORDER.map((code) => {
+          const info = rarityInfo(code);
+          return `<button class="kp-rchip ${view.rarity === code ? 'is-active' : ''}" type="button" data-act="market-rarity" data-rarity="${code}" style="--rc:${info.color}">${esc(
+            info.label
+          )}</button>`;
+        }).join('')}
+      </div>`;
+  }
+
+  function marketGlobalBlock() {
+    const view = state.marketView;
+    const items = view.items ?? [];
+    const ownedMap = new Map(sellRows().map((row) => [String(row.id), row]));
+    const groups = groupMarketItems(items, view.sort);
+    const hasQuery = Boolean(view.query.trim()) || view.rarity !== 'all' || view.type !== 'all';
+    return `
+      ${marketGlobalToolbar()}
+      ${marketGlobalFilters()}
+      ${
+        view.items === null
+          ? '<div class="kp-empty"><span class="kp-spinner"></span> Chargement du marché…</div>'
+          : view.loading && !items.length
+            ? '<div class="kp-empty"><span class="kp-spinner"></span> Recherche sur le marché…</div>'
+            : view.error
+            ? `<div class="kp-empty"><b>Recherche impossible</b>${esc(view.error)}</div>`
+            : !items.length
+              ? `<div class="kp-empty"><b>Aucun résultat</b>${
+                  hasQuery ? 'Aucune annonce ne correspond à ces filtres.' : 'Lance une recherche pour interroger le marché.'
+                }</div>`
+              : `<div class="kp-hint">${fmt(items.length)} annonce(s) sur ${fmt(view.total)} · ${fmt(
+                  groups.length
+                )} carte(s) distincte(s) · prix le plus bas par carte${
+                  view.meta?.at ? ` · actualisé ${nowTime(view.meta.at)}` : ''
+                }</div>
+                 <div class="kp-sell-list">${groups.map((group) => sellMarketRow(group, ownedMap)).join('')}</div>
+                 ${
+                   items.length < view.total
+                     ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="market-more" ${view.loading ? 'disabled' : ''}>Afficher plus</button></div>`
+                     : ''
+                 }`
+      }`;
+  }
+
+  function marketMyListings() {
+    const mineAll = Array.isArray(state.mine?.listings)
+      ? state.mine.listings
+      : Array.isArray(state.mine)
+        ? state.mine
+        : [];
+    const mine = mineAll.filter((l) => !l.status || l.status === 'active');
+    const mineOther = mineAll.length - mine.length;
+    if (!mine.length) return '';
+    return `<div class="kp-section">
+      <div class="kp-section-title">Mes annonces actives (${mine.length})${
+        mineOther > 0 ? `<span>+${mineOther} terminée(s)</span>` : ''
+      }</div>
+      <div class="kp-table">
+        ${mine
+          .slice(0, 20)
+          .map((l) => {
+            const card = l.character ?? state.characters.get(String(l.characterId)) ?? null;
+            const end = l.endsAt ? new Date(l.endsAt) : null;
+            const hoursLeft =
+              end && Number.isFinite(end.getTime()) ? Math.max(0, Math.round((end.getTime() - Date.now()) / 3600000)) : null;
+            return `
+              <div class="kp-row kp-is-clickable" data-act="open-listing" data-listing="${esc(l.id ?? '')}" data-type="${esc(
+                l.type ?? 'fixed'
+              )}" data-name="${esc(card?.name ?? '')}" title="Ouvrir cette vente sur kyara.games ›">
+                <span></span>
+                <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
+                <div class="kp-row-main">
+                  <div class="kp-row-name">${esc(card?.name ?? `Carte #${l.characterId ?? '?'}`)}</div>
+                  <div class="kp-row-meta">${l.type === 'auction' ? 'enchère' : 'prix fixe'}${
+                    l.type === 'auction' && l.bidCount ? ` · ${l.bidCount} mise(s)` : ''
+                  }${hoursLeft != null ? ` · ${hoursLeft} h restantes` : ''}</div>
+                </div>
+                <div class="kp-row-price"><b>◆ ${fmt(l.finalPrice ?? l.currentBid ?? l.price)}</b></div>
+              </div>`;
+          })
+          .join('')}
+      </div>
+    </div>`;
+  }
+
+  function dealsMarketBlock() {
     const deals = state.deals ?? [];
     const filter = String(state.settings.dealsRarity || 'all');
     const typeFilter = String(state.settings.dealsType || 'all');
@@ -5003,15 +5878,6 @@
         (filter === 'all' || String(d.rarity || 'C') === filter) &&
         (typeFilter === 'all' || String(d.type || 'fixed') === typeFilter)
     );
-
-    const mineAll = Array.isArray(state.mine?.listings)
-      ? state.mine.listings
-      : Array.isArray(state.mine)
-        ? state.mine
-        : [];
-    const mine = mineAll.filter((l) => !l.status || l.status === 'active');
-    const mineOther = mineAll.length - mine.length;
-
     const counts = new Map();
     for (const d of deals) {
       const key = String(d.rarity || 'C');
@@ -5027,16 +5893,13 @@
         }>${esc(info.label)} <em>${n}</em></button>`;
       })
     ].join('');
-
     const meta = state.dealsMeta;
-
     return `
       <div class="kp-toolbar">
         <button class="kp-btn is-primary" type="button" data-act="scan-market" ${state.dealsScanning ? 'disabled' : ''}>
           ${state.dealsScanning ? '<span class="kp-spinner"></span> Scan…' : 'Scanner les bons plans'}
         </button>
       </div>
-
       <div class="kp-filters">
         <label class="kp-filter">
           <span>Tri</span>
@@ -5055,7 +5918,6 @@
           <input class="kp-input" type="number" min="0" max="90" step="1" data-setting="dealsMinPct" value="${state.settings.dealsMinPct}">
         </label>
       </div>
-
       <div class="kp-rarities ${typeFilter !== 'all' ? 'is-focus' : ''}">
         ${[
           ['all', 'Tout'],
@@ -5068,7 +5930,6 @@
           )
           .join('')}
       </div>
-
       <div class="kp-hint">
         ${
           meta
@@ -5077,9 +5938,7 @@
         }
         ${state.dealsError ? ` · <span style="color:var(--kp-bad)">${esc(state.dealsError)}</span>` : ''}
       </div>
-
       ${deals.length ? `<div class="kp-rarities ${filter !== 'all' ? 'is-focus' : ''}">${rarityBar}</div>` : ''}
-
       ${
         state.deals === null
           ? `<div class="kp-empty"><b>Aucun scan</b>Lance un scan pour voir les annonces sous la médiane.</div>`
@@ -5111,41 +5970,20 @@
             : `<div class="kp-empty"><b>${
                 deals.length ? 'Aucune annonce dans cette rareté' : 'Rien sous la médiane'
               }</b>${deals.length ? 'Change de filtre ou relance un scan.' : 'Les annonces actuelles sont au prix du marché (ou au-dessus).'}</div>`
-      }
+      }`;
+  }
 
-      ${
-        mine.length
-          ? `<div class="kp-section">
-               <div class="kp-section-title">Mes annonces actives (${mine.length})${
-                 mineOther > 0 ? `<span>+${mineOther} terminée(s)</span>` : ''
-               }</div>
-               <div class="kp-table">
-                 ${mine
-                   .slice(0, 20)
-                   .map((l) => {
-                     const card = l.character ?? state.characters.get(String(l.characterId)) ?? null;
-                     const end = l.endsAt ? new Date(l.endsAt) : null;
-                     const hoursLeft =
-                       end && Number.isFinite(end.getTime()) ? Math.max(0, Math.round((end.getTime() - Date.now()) / 3600000)) : null;
-                     return `
-                   <div class="kp-row kp-is-clickable" data-act="open-listing" data-listing="${esc(l.id ?? '')}" data-type="${esc(l.type ?? 'fixed')}" data-name="${esc(card?.name ?? '')}" title="Ouvrir cette vente sur kyara.games ›">
-                     <span></span>
-                     <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
-                     <div class="kp-row-main">
-                       <div class="kp-row-name">${esc(card?.name ?? `Carte #${l.characterId ?? '?'}`)}</div>
-                       <div class="kp-row-meta">${l.type === 'auction' ? 'enchère' : 'prix fixe'}${
-                         l.type === 'auction' && l.bidCount ? ` · ${l.bidCount} mise(s)` : ''
-                       }${hoursLeft != null ? ` · ${hoursLeft} h restantes` : ''}</div>
-                     </div>
-                     <div class="kp-row-price"><b>◆ ${fmt(l.finalPrice ?? l.currentBid ?? l.price)}</b></div>
-                   </div>`;
-                   })
-                   .join('')}
-               </div>
-             </div>`
-          : ''
-      }
-    `;
+  function viewMarket() {
+    if (!state.user) return loginHTML();
+    const mode = state.marketMode === 'deals' ? 'deals' : 'global';
+    if (mode === 'global' && state.marketView.items === null && !state.marketView.loading) {
+      setTimeout(() => {
+        if (state.tab === 'market' && state.marketMode === 'global' && !state.marketView.loading) {
+          loadSellMarket(false);
+        }
+      }, 0);
+    }
+    return `${marketModeSwitch()}${mode === 'global' ? marketGlobalBlock() : dealsMarketBlock()}${marketMyListings()}`;
   }
 
   /* ------------------------------------------------------------------ */
@@ -7143,7 +7981,7 @@
         <div class="kp-card-stat"><span>Prix en cache</span><b>${pricedIds}</b><small>${Object.keys(state.prices).length} entrées · TTL ${state.settings.ttlH} h</small></div>
         <div class="kp-card-stat"><span>Bootstrap</span><b>${esc(state.bootKeys.join(', ') || '—')}</b><small>clés renvoyées par /api/me/bootstrap</small></div>
         <div class="kp-card-stat"><span>Version du code</span><b>v${esc(state.version)}</b><small>manifeste du dossier</small></div>
-        <div class="kp-card-stat"><span>Version dans Firefox</span><b>v${esc(state.manifestVersion ?? '—')}</b><small>${
+        <div class="kp-card-stat"><span>Version dans ${esc(BROWSER_NAME)}</span><b>v${esc(state.manifestVersion ?? '—')}</b><small>${
           state.manifestVersion
             ? state.manifestOutdated
               ? 'en retard sur le dossier'
@@ -7987,7 +8825,7 @@
    * Recommandation d'une carte du plan : fiche ouverte en priorité, sinon cache
    * des prix, sinon repli sur le prix estimé (aucune donnée de marché).
    */
-  function rowRecommendation(row) {
+  function rowRecommendation(row, mineRow = null) {
     const key = String(row.id);
     const cached = state.prices[key];
     const detail = state.sellView.detail;
@@ -8024,7 +8862,7 @@
           lastAt: cached.lastAt
         },
         card: { id: key, name: row.name, rarity: row.rarity, floor: row.floor },
-        mine: sellRowOf(key),
+        mine: mineRow ?? sellRowOf(key),
         listings: marketItems.length ? { items: marketItems } : null,
         book: state.buyOrders[key] ? { bids: [{ price: state.buyOrders[key].price }] } : null
       });
@@ -8368,8 +9206,14 @@
         }
         if (state.tab === 'sell') {
           state.sellView.query = '';
-          // Première ouverture : on charge le marché global en arrière-plan si besoin.
-          if (state.sellView.mode === 'market' && !state.sellView.marketItems) loadSellMarket(false);
+        }
+        if (
+          state.tab === 'market' &&
+          state.marketMode === 'global' &&
+          state.marketView.items === null &&
+          !state.marketView.loading
+        ) {
+          loadSellMarket(false);
         }
         render();
         break;
@@ -8401,26 +9245,37 @@
         break;
       }
       case 'sell-mode': {
-        const mode = el.getAttribute('data-mode') === 'market' ? 'market' : 'mine';
+        const mode = el.getAttribute('data-mode') === 'auto' ? 'auto' : 'mine';
         if (state.sellView.mode === mode) break;
         state.sellView.mode = mode;
         state.sellView.limit = 40;
         render();
-        if (mode === 'market' && !state.sellView.marketItems) loadSellMarket(false);
         break;
       }
       case 'sell-rarity': {
         state.sellView.rarity = el.getAttribute('data-rarity') || 'all';
         state.sellView.limit = 40;
         render();
-        if (state.sellView.mode === 'market') loadSellMarket(false);
         break;
       }
       case 'sell-refresh':
-        refreshSellData();
+        if (state.tab === 'market' && state.marketMode === 'global') loadSellMarket(false);
+        else refreshSellData();
         break;
-      case 'sell-more':
+      case 'market-mode':
+        state.marketMode = el.getAttribute('data-mode') === 'deals' ? 'deals' : 'global';
+        render();
+        if (state.marketMode === 'global' && state.marketView.items === null) loadSellMarket(false);
+        break;
+      case 'market-refresh':
+        loadSellMarket(false);
+        break;
+      case 'market-more':
         loadSellMarket(true);
+        break;
+      case 'market-rarity':
+        state.marketView.rarity = el.getAttribute('data-rarity') || 'all';
+        loadSellMarket(false);
         break;
       case 'sell-more-rows':
         state.sellView.limit += 40;
@@ -8434,7 +9289,7 @@
       case 'market-expand': {
         const id = el.getAttribute('data-id');
         if (!id) break;
-        const set = state.sellView.marketExpanded;
+        const set = state.marketView.expanded;
         if (set.has(id)) set.delete(id);
         else set.add(id);
         render();
@@ -8530,6 +9385,19 @@
           state.sell.log.push({ text: 'Arrêt demandé…', kind: 'info' });
           render();
         }
+        break;
+      case 'autosell-preview':
+        autoSellPreview();
+        break;
+      case 'autosell-start':
+        if (state.autoSell.armed) startAutoSell();
+        else armAutoSell();
+        break;
+      case 'autosell-cancel':
+        disarmAutoSell();
+        break;
+      case 'autosell-stop':
+        stopAutoSell();
         break;
       case 'scan-market':
         scanMarket();
@@ -8817,15 +9685,21 @@
       state.sellView.sort = String(sellSort.value);
       state.sellView.limit = 40;
       render();
-      if (state.sellView.mode === 'market') loadSellMarket(false);
       return;
     }
 
-    const sellType = target.closest('[data-sell-type]');
-    if (sellType) {
-      state.sellView.type = String(sellType.value) || 'all';
-      render();
-      if (state.sellView.mode === 'market') loadSellMarket(false);
+    // --- Onglet Marché : recherche globale ---
+    const marketSort = target.closest('[data-market-sort]');
+    if (marketSort) {
+      state.marketView.sort = String(marketSort.value) || 'price_desc';
+      loadSellMarket(false);
+      return;
+    }
+
+    const marketType = target.closest('[data-market-type]');
+    if (marketType) {
+      state.marketView.type = String(marketType.value) || 'all';
+      loadSellMarket(false);
       return;
     }
 
@@ -8856,6 +9730,43 @@
     const confirmLastCopy = target.closest('[data-sell-confirm-lastcopy]');
     if (confirmLastCopy && state.sell) {
       state.sell.confirmLastCopy = Boolean(confirmLastCopy.checked);
+      render();
+      return;
+    }
+
+    // --- Vente auto : réglages (jamais modifiables pendant la boucle) ---
+    const autoType = target.closest('[data-autosell-type]');
+    const autoStrategy = target.closest('[data-autosell-strategy]');
+    const autoMin = target.closest('[data-autosell-min-price]');
+    const autoInterval = target.closest('[data-autosell-interval]');
+    const autoMax = target.closest('[data-autosell-max]');
+    const autoIncludeML = target.closest('[data-autosell-include-ml]');
+    const autoDryRun = target.closest('[data-autosell-dryrun]');
+    if (autoType || autoStrategy || autoMin || autoInterval || autoMax || autoIncludeML || autoDryRun) {
+      if (state.autoSell.running) return;
+      state.autoSell.armed = false;
+      if (autoType) state.settings.autoSellType = autoType.value === 'auction' ? 'auction' : 'fixed';
+      if (autoStrategy) {
+        state.settings.autoSellStrategy = ['quick', 'balanced', 'max'].includes(autoStrategy.value)
+          ? autoStrategy.value
+          : 'balanced';
+      }
+      if (autoMin) state.settings.autoSellMinPrice = Math.max(1, Math.round(Number(autoMin.value) || 1));
+      if (autoInterval) {
+        state.settings.autoSellIntervalSec = Math.min(
+          3600,
+          Math.max(30, Math.round(Number(autoInterval.value) || 60))
+        );
+      }
+      if (autoMax) {
+        state.settings.autoSellMaxPerCycle = Math.min(
+          10,
+          Math.max(1, Math.round(Number(autoMax.value) || 10))
+        );
+      }
+      if (autoIncludeML) state.settings.autoSellIncludeML = Boolean(autoIncludeML.checked);
+      if (autoDryRun) state.settings.autoSellDryRun = Boolean(autoDryRun.checked);
+      persistSettings();
       render();
       return;
     }
@@ -9017,6 +9928,28 @@
       return;
     }
 
+    const marketSearch = target.closest('[data-role="market-search"]');
+    if (marketSearch) {
+      state.marketView.query = marketSearch.value;
+      render();
+      const again = qs('[data-role="market-search"]');
+      if (again) {
+        again.focus();
+        try {
+          again.setSelectionRange(again.value.length, again.value.length);
+        } catch {
+          /* type=search may not support it */
+        }
+      }
+      // Requête serveur différée : on ne tape pas l'API à chaque lettre.
+      if (sellSearchTimer) clearTimeout(sellSearchTimer);
+      sellSearchTimer = setTimeout(() => {
+        sellSearchTimer = null;
+        loadSellMarket(false);
+      }, 400);
+      return;
+    }
+
     const search = target.closest('[data-role="sell-search"]');
     if (!search) return;
     state.sellView.query = search.value;
@@ -9033,18 +9966,6 @@
         /* type=search may not support it */
       }
     };
-
-    if (state.sellView.mode === 'market') {
-      render();
-      restoreFocus();
-      // Requête serveur différée : on ne tape pas l'API à chaque lettre.
-      if (sellSearchTimer) clearTimeout(sellSearchTimer);
-      sellSearchTimer = setTimeout(() => {
-        sellSearchTimer = null;
-        loadSellMarket(false);
-      }, 400);
-      return;
-    }
 
     // Collection : filtrage local différé, pour rester fluide sur une grosse collection.
     if (sellRenderTimer) clearTimeout(sellRenderTimer);
@@ -9123,6 +10044,13 @@
       stopAutoOpen,
       ensureAutoAlive,
       autoLog,
+      autoSellPreview,
+      autoSellCycle,
+      startAutoSell,
+      stopAutoSell,
+      armAutoSell,
+      disarmAutoSell,
+      autoSellPanel,
       loadAutoLog,
       trackBestCards,
       recordAutoResults,

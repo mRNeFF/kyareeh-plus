@@ -1514,6 +1514,374 @@ img.kp-avatar {
   margin: 2px 0 10px;
 }
 
+/* Vente auto des doublons */
+.kp-autosell {
+  margin: 10px 0 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--kp-line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 77, 46, 0.055), rgba(255, 255, 255, 0.012));
+}
+
+.kp-autosell.is-running {
+  border-color: rgba(74, 222, 128, 0.36);
+  box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.06);
+}
+
+.kp-autosell.is-armed {
+  border-color: rgba(251, 191, 36, 0.42);
+}
+
+.kp-autosell-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kp-autosell-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kp-autosell-title b {
+  font-size: 12px;
+}
+
+.kp-autosell-title small {
+  color: var(--kp-muted);
+  font-size: 9px;
+}
+
+.kp-autosell-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--kp-muted);
+  flex: none;
+}
+
+.kp-autosell.is-running .kp-autosell-dot {
+  background: var(--kp-good);
+  box-shadow: 0 0 7px rgba(74, 222, 128, 0.65);
+}
+
+.kp-autosell.is-armed .kp-autosell-dot {
+  background: var(--kp-warn);
+  box-shadow: 0 0 7px rgba(251, 191, 36, 0.55);
+}
+
+.kp-autosell-state {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--kp-line);
+  border-radius: 999px;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.kp-autosell.is-running .kp-autosell-state {
+  border-color: rgba(74, 222, 128, 0.35);
+  color: var(--kp-good);
+}
+
+.kp-autosell.is-armed .kp-autosell-state {
+  border-color: rgba(251, 191, 36, 0.35);
+  color: var(--kp-warn);
+}
+
+.kp-autosell-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 7px;
+  color: var(--kp-muted);
+  font-size: 9px;
+}
+
+.kp-autosell-stats b {
+  color: var(--kp-text);
+  font-size: 10.5px;
+}
+
+.kp-autosell-status {
+  margin-top: 6px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #c7ccd6;
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+
+.kp-autosell-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.kp-autosell-grid label {
+  display: grid;
+  gap: 2px;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.kp-autosell-grid .kp-input,
+.kp-autosell-grid .kp-select {
+  min-width: 0;
+  padding: 5px 6px;
+  font-size: 10px;
+}
+
+.kp-autosell-opts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin-top: 6px;
+}
+
+.kp-autosell-opts .kp-check {
+  margin-top: 0;
+  font-size: 9.5px;
+}
+
+.kp-autosell-opts .kp-check em {
+  color: var(--kp-warn);
+  font-size: 8.5px;
+  font-style: normal;
+}
+
+.kp-autosell-note {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-autosell-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.kp-autosell-actions .kp-btn {
+  padding: 6px 10px;
+  font-size: 10px;
+}
+
+.kp-autosell-confirm {
+  display: grid;
+  gap: 2px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.07);
+  font-size: 9.5px;
+}
+
+.kp-autosell-confirm b {
+  color: var(--kp-warn);
+  font-size: 10px;
+}
+
+.kp-autosell-confirm span {
+  color: #d6c9ad;
+  line-height: 1.35;
+}
+
+.kp-autosell-preview {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--kp-line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.12);
+  font-size: 9px;
+}
+
+.kp-autosell-preview > b {
+  margin-bottom: 2px;
+  color: var(--kp-text);
+  font-size: 9.5px;
+}
+
+.kp-autosell-preview > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--kp-muted);
+}
+
+.kp-autosell-preview > div b {
+  color: var(--kp-good);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.kp-autosell-preview small {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-autosell-log {
+  max-height: 92px;
+  margin-top: 8px;
+  padding: 5px 7px;
+  overflow: auto;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--kp-muted);
+  font: 9px/1.45 "JetBrains Mono", ui-monospace, monospace;
+}
+
+.kp-autosell-log .is-good {
+  color: var(--kp-good);
+}
+
+.kp-autosell-log .is-bad {
+  color: var(--kp-bad);
+}
+
+/* Graphique de ventes */
+.kp-sales {
+  margin: 14px 0 4px;
+  padding: 11px 12px 9px;
+  border: 1px solid var(--kp-line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(0, 0, 0, 0.08));
+}
+
+.kp-sales-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kp-sales-head b {
+  font-size: 12px;
+}
+
+.kp-sales-head span {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-sales-kpis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 6px 0 2px;
+}
+
+.kp-sales-kpis span {
+  display: grid;
+  gap: 0;
+}
+
+.kp-sales-kpis b {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kp-sales-kpis small {
+  color: var(--kp-muted);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kp-sales-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 2px;
+}
+
+.kp-sales-grid {
+  stroke: rgba(255, 255, 255, 0.075);
+  stroke-width: 1;
+}
+
+.kp-sales-axis {
+  fill: var(--kp-muted);
+  font-size: 8px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.kp-sales-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.kp-sales-line.is-auto,
+.kp-sales-dot.is-auto {
+  stroke: var(--kp-accent);
+}
+
+.kp-sales-line.is-manual,
+.kp-sales-dot.is-manual {
+  stroke: #60a5fa;
+}
+
+.kp-sales-dot {
+  fill: var(--kp-bg);
+  stroke-width: 2;
+}
+
+.kp-sales-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-sales-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.kp-sales-legend i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--kp-accent);
+}
+
+.kp-sales-legend i.is-manual {
+  background: #60a5fa;
+}
+
+.kp-sales-legend b {
+  color: var(--kp-text);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.kp-sales-note {
+  margin-top: 4px;
+  color: var(--kp-muted);
+  font-size: 8px;
+}
+
 /* Liste de l'onglet Vente */
 .kp-sell-list {
   display: grid;
