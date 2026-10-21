@@ -10,10 +10,10 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.0.1** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.1.0** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
-- Dernier commit de référence : `4ca978a`
+- Dernier commit de référence : `f39d6d1`
 
 ## 2. Démarrage rapide
 
@@ -22,8 +22,9 @@ npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
-npm run verify:chrome       # 11 contrôles dans un Chrome headless réel
+npm run verify:chrome       # 16 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 43 contrôles
+node test/verify-autosell.mjs    # 19 contrôles (sélection pure des doublons)
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
 node test/verify-duel-engine.mjs # règles du moteur de duel
@@ -49,8 +50,8 @@ l'extension depuis la console ou un navigateur automatisé.
 
 | Fichier | Rôle |
 |---|---|
-| `content/ui.js` (~9 200 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
-| `content/ui.css` (~3 300 lignes) | Styles injectés dans un Shadow DOM (préfixe `kp-`). |
+| `content/ui.js` (~11 000 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
+| `content/ui.css` (~3 800 lignes) | Styles injectés dans un Shadow DOM (préfixe `kp-`). |
 | `content/duel-data.js` | Champions du duel (données + `passiveFx` générés par `scripts/duel-passives.mjs`). |
 | `content/duel-engine.js` | Moteur du duel, **pur** (aucun DOM/réseau/aléa hors graine), partagé par l’extension et le relais. |
 | `content/duel-rules.js` | Livre de règles affiché dans l’onglet Règles (copie : `docs/REGLES-DUEL.md`). |
@@ -144,7 +145,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | Onglet | Contenu |
 |---|---|
 | **Compte** | Valeur du compte, ressources, top cartes, valeur par rareté, séries complètes, recherche d'un autre joueur (valorisation exacte). |
-| **Vente** | Toutes les cartes, filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h avec compte à rebours, sélection plafonnée aux places d'annonce (10), prix fixe/enchère, 3 stratégies applicables à tout le lot, pastille « N poss. ». |
+| **Vente** | Toutes les cartes, filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h avec compte à rebours, sélection plafonnée aux places d'annonce (10), prix fixe/enchère, 3 stratégies applicables à tout le lot, pastille « N poss. ». **Vente auto** : doublons uniquement, dernière copie conservée, M/L exclues par défaut, aperçu + confirmation, arrêt d'urgence, compteurs annonces/ventes immédiates. |
 | **Marché** | Scan des annonces sous la médiane (tri, pages, seuil de remise), annonces actives, marché global groupé par carte avec dépliant des ventes. |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
@@ -154,9 +155,9 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 
 ## 8. Limites connues / dette
 
-- `content/ui.js` est un monolithe (~9 200 lignes). Toute nouvelle vue l'agrandit : extraire un
+- `content/ui.js` est un monolithe (~11 000 lignes). Toute nouvelle vue l'agrandit : extraire un
   module serait utile mais risqué sans tests de non-régression UI.
-- 12 avertissements `web-ext lint` (`UNSAFE_VAR_ASSIGNMENT` sur `innerHTML`) : inhérents au rendu
+- 16 avertissements `web-ext lint` (`UNSAFE_VAR_ASSIGNMENT` sur `innerHTML`) : inhérents au rendu
   par chaînes ; à traiter seulement si on migre vers du DOM construit.
 - L'onglet Stat dépend de `trades/owned` + `fair-play/prices` : si le site change ces endpoints,
   la valeur et les séries resteront vides (« — »), par choix assumé.

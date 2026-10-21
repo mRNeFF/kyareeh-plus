@@ -65,7 +65,14 @@
     antiAfk: true,
     autoAllowChakra: true,
     autoRefreshMin: 10,
-    autoStopRare: false
+    autoStopRare: false,
+    // Vente automatique : uniquement les doublons, jamais la dernière copie.
+    autoSellType: 'fixed',
+    autoSellMinPrice: 1,
+    autoSellIntervalSec: 60,
+    autoSellMaxPerCycle: 10,
+    autoSellIncludeML: false,
+    autoSellDryRun: false
   };
 
   // Tris acceptés par /api/market/listings (valeurs validées côté serveur).
@@ -262,6 +269,24 @@
       beatAt: 0,
       lastOpenAt: 0,
       restarts: 0,
+      log: []
+    },
+    // Vente auto des doublons : pas de reprise après rechargement, par sécurité.
+    autoSell: {
+      armed: false,
+      running: false,
+      stop: false,
+      gen: 0,
+      cycles: 0,
+      created: 0,
+      matched: 0,
+      errors: 0,
+      status: '',
+      startedAt: 0,
+      beatAt: 0,
+      nextAt: 0,
+      lastError: null,
+      preview: null,
       log: []
     },
     reloadArmed: false,
@@ -757,6 +782,18 @@
     state.settings.dryRun = Boolean(state.settings.dryRun);
     state.settings.autoPrices = state.settings.autoPrices !== false;
     state.settings.saleType = state.settings.saleType === 'auction' ? 'auction' : 'fixed';
+    state.settings.autoSellType = state.settings.autoSellType === 'auction' ? 'auction' : 'fixed';
+    state.settings.autoSellMinPrice = Math.max(1, Math.round(Number(state.settings.autoSellMinPrice) || 1));
+    state.settings.autoSellIntervalSec = Math.min(
+      3600,
+      Math.max(30, Math.round(Number(state.settings.autoSellIntervalSec) || 60))
+    );
+    state.settings.autoSellMaxPerCycle = Math.min(
+      10,
+      Math.max(1, Math.round(Number(state.settings.autoSellMaxPerCycle) || 10))
+    );
+    state.settings.autoSellIncludeML = Boolean(state.settings.autoSellIncludeML);
+    state.settings.autoSellDryRun = Boolean(state.settings.autoSellDryRun);
     state.settings.dealsRarity = String(state.settings.dealsRarity || 'all');
     state.settings.dupeSort = DUPE_SORTS.some(([value]) => value === state.settings.dupeSort) ? state.settings.dupeSort : 'price_desc';
     state.settings.dealsType = ['all', 'fixed', 'auction'].includes(state.settings.dealsType) ? state.settings.dealsType : 'all';
@@ -1285,6 +1322,83 @@
     return ownedRows()
       .map((r) => ({ ...r, sellable: sellableOf(r) }))
       .filter((r) => r.sellable > 0);
+  }
+
+  /* AUTOSELL:BEGIN — sélection pure des doublons, testée par verify-autosell.mjs */
+  /**
+   * Nombre d'exemplaires réellement « en trop » : on garde toujours une copie.
+   * `listable` inclut la dernière copie ; on ne peut donc pas l'utiliser tel quel.
+   */
+  function autoSellSpare(row) {
+    if (!row) return 0;
+    const qty = Math.max(0, Number(row.qty) || 0);
+    if (qty <= 1) return 0;
+    const locked = Math.max(0, Number(row.lockedQty) || 0);
+    const rawListable = row.listable == null ? qty - locked : Number(row.listable);
+    const listable = Number.isFinite(rawListable) ? Math.max(0, rawListable) : qty - locked;
+    return Math.max(0, Math.min(qty - 1, listable));
+  }
+
+  /**
+   * Filtre les lignes de vente pour ne garder que les doublons sûrs.
+   * `price` doit déjà être résolu par l'appelant (null = pas de prix connu).
+   */
+  function autoSellSelect(rows, options = {}) {
+    const includeML = Boolean(options.includeML);
+    const minPrice = Math.max(0, Number(options.minPrice) || 0);
+    return (Array.isArray(rows) ? rows : [])
+      .map((row) => ({ ...row, autoQty: autoSellSpare(row) }))
+      .filter((row) => {
+        if (!row || row.autoQty <= 0) return false;
+        if (row.pinned) return false;
+        if (row.sellBlock || row.block) return false;
+        if (!includeML && ['M', 'L'].includes(String(row.rarity || '').toUpperCase())) return false;
+        if (row.price == null || row.price === '') return false;
+        const price = Number(row.price);
+        if (!Number.isFinite(price) || price < minPrice) return false;
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          Number(b.price) * b.autoQty - Number(a.price) * a.autoQty ||
+          Number(b.price) - Number(a.price) ||
+          String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr')
+      );
+  }
+
+  /** Répartit les places d'annonce disponibles, en commençant par les lots les plus values. */
+  function autoSellBuildPlan(candidates, options = {}) {
+    const slots = Math.max(0, Math.min(10, Math.round(Number(options.slots) || 0)));
+    const maxPerCycle = Math.max(
+      1,
+      Math.min(slots || 10, Math.round(Number(options.maxPerCycle) || slots || 10))
+    );
+    let left = Math.min(slots, maxPerCycle);
+    const plan = [];
+    for (const row of Array.isArray(candidates) ? candidates : []) {
+      if (left <= 0) break;
+      const qty = Math.min(Math.max(0, Number(row.autoQty) || 0), left);
+      if (qty <= 0) continue;
+      plan.push({ ...row, qty });
+      left -= qty;
+    }
+    return plan;
+  }
+  /* AUTOSELL:END */
+
+  /** Choisit un prix de référence uniquement s'il existe une donnée de marché. */
+  function autoSellPrice(row, type) {
+    const key = String(row.id);
+    const hasMarket =
+      row.price != null ||
+      state.lowest[key] != null ||
+      state.buyOrders[key]?.price != null ||
+      state.prices[key]?.m7 != null ||
+      state.prices[key]?.m30 != null;
+    if (!hasMarket) return null;
+    return type === 'auction'
+      ? auctionStartPrice(key, row.rarity, state.settings.auctionPct)
+      : suggestPrice(key, row.rarity);
   }
 
   function filteredDupes() {
@@ -2532,47 +2646,42 @@
     return '';
   }
 
-  async function executeSell() {
-    if (!state.sell || state.sell.running) return;
-    const plan = state.sell.plan;
-    const blocker = sellBlocker(plan);
-    if (blocker) {
-      notify(blocker);
-      return;
-    }
+  /**
+   * Exécution commune aux ventes manuelle et automatique.
+   * Ne touche ni au DOM ni à l'état de la boucle : l'appelant fournit `log` et
+   * `shouldStop`. Retourne les compteurs réels (annonces créées, ventes immédiates).
+   */
+  async function runSalePlan(plan, options = {}) {
+    const saleType = options.type === 'auction' ? 'auction' : 'fixed';
+    const duration = Number(options.duration) > 0 ? Number(options.duration) : 12;
+    const buyoutPct = Number(options.buyoutPct) || 0;
+    const dryRun = Boolean(options.dryRun);
+    const gapMs = Math.max(350, Number(options.gapMs) || 1200);
+    const log = typeof options.log === 'function' ? options.log : () => {};
+    const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const result = { created: 0, matched: 0, errors: 0, simulated: 0, stopped: null };
 
-    state.sell.running = true;
-    state.sell.done = false;
-    state.sell.log = [];
-    render();
-
-    const cfg = getCfg();
-    const duration = cfg.durations.includes(Number(state.settings.durationHours))
-      ? Number(state.settings.durationHours)
-      : cfg.durations[0] ?? 12;
-    const saleType = state.sell.type === 'auction' ? 'auction' : 'fixed';
-    const buyoutPct = Number(state.sell.buyoutPct) || 0;
     let consecutiveErrors = 0;
-
-    const log = (text, kind = 'info') => {
-      state.sell.log.push({ text, kind });
-      render();
-    };
-
     for (const row of plan) {
-      for (let copy = 0; copy < row.qty; copy += 1) {
-        if (!state.sell.running) break;
+      const qty = Math.max(1, Number(row.qty) || 1);
+      for (let copy = 0; copy < qty; copy += 1) {
+        if (shouldStop()) {
+          result.stopped = 'user';
+          return result;
+        }
 
-        if (state.settings.dryRun) {
-          const label = saleType === 'auction' ? `enchère dès ◆ ${fmt(row.price)}` : `prix fixe ◆ ${fmt(row.price)}`;
+        const label =
+          saleType === 'auction' ? `enchère dès ◆ ${fmt(row.price)}` : `prix fixe ◆ ${fmt(row.price)}`;
+        if (dryRun) {
           log(`(simulation) ${row.name} · ${label}`, 'info');
+          result.simulated += 1;
           await sleep(90);
           continue;
         }
 
         try {
           const buyout = saleType === 'auction' ? buyoutPriceFor(row.price, buyoutPct) : null;
-          const result = await api('/api/market/listings', {
+          const posted = await api('/api/market/listings', {
             method: 'POST',
             timeout: 20000,
             body: {
@@ -2583,26 +2692,79 @@
               durationHours: duration
             }
           });
-          const label = saleType === 'auction' ? `enchère dès ◆ ${fmt(row.price)}` : `prix fixe ◆ ${fmt(row.price)}`;
-          log(`✓ ${row.name} · ${label}${result?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
+          result.created += 1;
+          if (posted?.matched) result.matched += 1;
+          log(`✓ ${row.name} · ${label}${posted?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
           consecutiveErrors = 0;
         } catch (err) {
-          log(`✗ ${row.name} · ${friendlyError(err)}`, 'err');
+          result.errors += 1;
           consecutiveErrors += 1;
+          log(`✗ ${row.name} · ${friendlyError(err)}`, 'err');
+          const status = Number(err?.status);
+          if (status === 401 || status === 403 || status === 429) {
+            result.stopped = 'auth';
+            return result;
+          }
           if (consecutiveErrors >= 3) {
-            log('Arrêt après 3 erreurs consécutives.', 'err');
-            state.sell.running = false;
+            result.stopped = 'errors';
+            return result;
           }
         }
 
-        await sleep(Math.max(350, state.settings.gapMs));
+        await sleep(gapMs);
       }
-      if (!state.sell.running) break;
+    }
+    return result;
+  }
+
+  async function executeSell() {
+    if (!state.sell || state.sell.running) return;
+    const sell = state.sell;
+    const plan = sell.plan;
+    const blocker = sellBlocker(plan);
+    if (blocker) {
+      notify(blocker);
+      return;
     }
 
-    state.sell.running = false;
-    state.sell.done = true;
-    log('Terminé.', 'info');
+    sell.running = true;
+    sell.done = false;
+    sell.log = [];
+    render();
+
+    const cfg = getCfg();
+    const duration = cfg.durations.includes(Number(state.settings.durationHours))
+      ? Number(state.settings.durationHours)
+      : cfg.durations[0] ?? 12;
+    const saleType = sell.type === 'auction' ? 'auction' : 'fixed';
+    const buyoutPct = Number(sell.buyoutPct) || 0;
+
+    const log = (text, kind = 'info') => {
+      sell.log.push({ text, kind });
+      render();
+    };
+
+    const result = await runSalePlan(plan, {
+      type: saleType,
+      duration,
+      buyoutPct,
+      dryRun: state.settings.dryRun,
+      gapMs: state.settings.gapMs,
+      log,
+      shouldStop: () => !sell.running
+    });
+
+    sell.running = false;
+    sell.done = true;
+    if (result.stopped === 'errors') log('Arrêt après 3 erreurs consécutives.', 'err');
+    else if (result.stopped === 'auth') log('Arrêt : session expirée ou limite API atteinte.', 'err');
+    else if (result.stopped === 'user') log('Arrêt demandé.', 'info');
+    log(
+      `Terminé · ${fmt(result.created)} annonce(s)${result.matched ? ` · ${fmt(result.matched)} vente(s) immédiate(s)` : ''}${
+        state.settings.dryRun ? ' (simulation)' : ''
+      }.`,
+      'info'
+    );
     state.selected.clear();
     // La fiche ouverte n'est plus d'actualité : les copies vendues ont quitté la collection.
     state.sellView.detailId = null;
@@ -2610,6 +2772,295 @@
     state.sellView.lastRefresh = Date.now();
 
     await loadData({ keepPrices: true });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Vente auto des doublons                                             */
+  /* ------------------------------------------------------------------ */
+
+  function autoSellLog(text, kind = 'info') {
+    const a = state.autoSell;
+    a.log.push({ text, kind });
+    if (a.log.length > 180) a.log.shift();
+    render();
+  }
+
+  /** Relit la collection et les annonces actives avant/après un cycle. */
+  async function autoSellRefresh() {
+    const [me, coll, mine] = await Promise.all([
+      api('/api/me', { timeout: 20000 }).catch(() => null),
+      api('/api/me/collection?lean=1', { timeout: 25000 }),
+      api('/api/me/market', { timeout: 20000 }).catch(() => null)
+    ]);
+    const list = Array.isArray(coll) ? coll : Array.isArray(coll?.items) ? coll.items : null;
+    if (!list) throw new Error('Collection illisible');
+    if (me && typeof me === 'object') mergeUser(me);
+    state.collection = list;
+    if (mine && typeof mine === 'object') state.mine = mine;
+    state.lastSync = Date.now();
+    state.sellView.lastRefresh = Date.now();
+  }
+
+  function autoSellDuration() {
+    const cfg = getCfg();
+    return cfg.durations.includes(Number(state.settings.durationHours))
+      ? Number(state.settings.durationHours)
+      : cfg.durations[0] ?? 12;
+  }
+
+  /**
+   * Un cycle : relit la collection, prix uniquement les doublons, respecte les
+   * places d'annonce, puis crée les annonces. `preview` ne poste rien.
+   */
+  async function autoSellCycle({ dryRun = false, preview = false } = {}) {
+    const a = state.autoSell;
+    const s = state.settings;
+    const type = s.autoSellType === 'auction' ? 'auction' : 'fixed';
+
+    a.status = preview ? 'Calcul de l’aperçu…' : 'Lecture de la collection…';
+    render();
+    await autoSellRefresh();
+
+    const slots = listingSlots();
+    const all = sellRows();
+    const duplicateIds = all.filter((row) => autoSellSpare(row) > 0).map((row) => String(row.id));
+    const unscanned = duplicateIds.filter((id) => !state.marketScanned.has(id));
+    if (unscanned.length) {
+      a.status = `Lecture du marché (${Math.min(60, unscanned.length)}/${unscanned.length})…`;
+      render();
+      // Prix par petits lots : les cartes déjà lues restent en cache.
+      await ensureMarketData(unscanned.slice(0, 60));
+    }
+
+    const priced = all.map((row) => ({
+      ...row,
+      characterId: apiId(row.rawId ?? row.id),
+      price: autoSellPrice(row, type),
+      floor: recycleFloor(row.rarity)
+    }));
+    const candidates = autoSellSelect(priced, {
+      includeML: Boolean(s.autoSellIncludeML),
+      minPrice: Number(s.autoSellMinPrice) || 1
+    });
+    const plan = autoSellBuildPlan(candidates, {
+      slots: slots.remaining,
+      maxPerCycle: Number(s.autoSellMaxPerCycle) || 10
+    });
+    const withoutPrice = priced.filter(
+      (row) =>
+        autoSellSpare(row) > 0 &&
+        row.price == null &&
+        (s.autoSellIncludeML || !['M', 'L'].includes(String(row.rarity || '').toUpperCase()))
+    ).length;
+
+    if (preview) {
+      a.preview = { at: Date.now(), plan, slots, candidates: candidates.length, withoutPrice };
+      a.status = plan.length
+        ? `Aperçu · ${fmt(plan.length)} annonce(s) prévue(s)`
+        : slots.remaining <= 0
+          ? 'Aucune place d’annonce libre'
+          : 'Aucun doublon vendable';
+      autoSellLog(
+        `${a.status}${withoutPrice ? ` · ${fmt(withoutPrice)} doublon(s) sans prix ignoré(s)` : ''}`,
+        plan.length ? 'info' : 'err'
+      );
+      render();
+      return { plan, created: 0, matched: 0, errors: 0, simulated: 0, fatal: null, preview: true };
+    }
+
+    if (!plan.length) {
+      a.cycles += 1;
+      a.status =
+        slots.remaining <= 0
+          ? 'Aucune place d’annonce libre'
+          : duplicateIds.length
+            ? 'Aucun doublon avec un prix connu'
+            : 'Aucun doublon';
+      a.lastPlan = [];
+      render();
+      return { plan: [], created: 0, matched: 0, errors: 0, simulated: 0, fatal: null };
+    }
+
+    a.status = dryRun
+      ? `Simulation de ${fmt(plan.length)} annonce(s)…`
+      : `Mise en vente de ${fmt(plan.length)} annonce(s)…`;
+    render();
+
+    const result = await runSalePlan(plan, {
+      type,
+      duration: autoSellDuration(),
+      buyoutPct: state.settings.buyoutPct,
+      dryRun,
+      gapMs: state.settings.gapMs,
+      log: autoSellLog,
+      shouldStop: () => !a.running || a.stop
+    });
+
+    a.cycles += 1;
+    a.created += result.created;
+    a.matched += result.matched;
+    a.errors += result.errors;
+    a.lastPlan = plan;
+    a.preview = null;
+
+    if (!dryRun) {
+      try {
+        await autoSellRefresh();
+      } catch {
+        return { ...result, plan, fatal: 'Collection illisible après la vente : arrêt de la vente auto.' };
+      }
+    }
+
+    if (result.stopped === 'errors') {
+      return { ...result, plan, fatal: 'Arrêt après 3 erreurs consécutives.' };
+    }
+    if (result.stopped === 'auth') {
+      return { ...result, plan, fatal: 'Session expirée ou limite API : arrêt de la vente auto.' };
+    }
+    return { ...result, plan, fatal: null };
+  }
+
+  function armAutoSell() {
+    const a = state.autoSell;
+    a.armed = true;
+    a.status = 'Confirmation requise';
+    render();
+  }
+
+  function disarmAutoSell() {
+    const a = state.autoSell;
+    a.armed = false;
+    a.status = '';
+    render();
+  }
+
+  async function autoSellPreview() {
+    const a = state.autoSell;
+    if (a.running) return;
+    a.preview = null;
+    a.status = 'Calcul de l’aperçu…';
+    render();
+    try {
+      await autoSellCycle({ preview: true });
+    } catch (err) {
+      a.lastError = friendlyError(err);
+      a.status = 'Aperçu impossible';
+      autoSellLog(`Aperçu impossible · ${a.lastError}`, 'err');
+    }
+  }
+
+  async function startAutoSell() {
+    const a = state.autoSell;
+    if (a.running) return;
+    if (!state.user) {
+      notify('Connecte-toi à Kyara pour lancer la vente auto.');
+      return;
+    }
+    if (state.sell) {
+      notify('Ferme la fenêtre de vente manuelle avant de lancer la vente auto.');
+      return;
+    }
+    a.armed = false;
+    a.running = true;
+    a.stop = false;
+    a.gen += 1;
+    a.cycles = 0;
+    a.created = 0;
+    a.matched = 0;
+    a.errors = 0;
+    a.status = 'Démarrage…';
+    a.startedAt = Date.now();
+    a.beatAt = Date.now();
+    a.nextAt = 0;
+    a.lastError = null;
+    a.preview = null;
+    a.log = [];
+    autoSellLog('Vente auto démarrée · doublons uniquement, dernière copie conservée');
+    persistSettings();
+    render();
+    autoSellLoop().catch((err) => {
+      a.running = false;
+      a.stop = true;
+      a.lastError = friendlyError(err);
+      a.status = 'Erreur inattendue';
+      autoSellLog(`Erreur inattendue · ${a.lastError}`, 'err');
+      render();
+    });
+  }
+
+  function stopAutoSell(reason = 'Vente auto arrêtée') {
+    const a = state.autoSell;
+    if (!a.running && !a.armed) return;
+    a.armed = false;
+    a.running = false;
+    a.stop = true;
+    a.gen += 1;
+    a.nextAt = 0;
+    a.status = reason;
+    autoSellLog(reason);
+    render();
+  }
+
+  async function autoSellWait(ms, alive) {
+    const end = Date.now() + Math.max(0, ms);
+    while (Date.now() < end) {
+      if (!alive()) return;
+      await sleep(Math.min(1000, end - Date.now()));
+    }
+  }
+
+  async function autoSellLoop() {
+    const a = state.autoSell;
+    const gen = ++a.gen;
+    const alive = () => a.running && !a.stop && a.gen === gen;
+    while (alive()) {
+      a.beatAt = Date.now();
+      if (state.sell) {
+        a.status = 'Vente manuelle ouverte · attente';
+        a.nextAt = Date.now() + 15000;
+        render();
+        await autoSellWait(15000, alive);
+        continue;
+      }
+
+      let result;
+      try {
+        result = await autoSellCycle({ dryRun: Boolean(state.settings.autoSellDryRun) });
+      } catch (err) {
+        a.lastError = friendlyError(err);
+        a.running = false;
+        a.stop = true;
+        a.status = 'Erreur de lecture';
+        autoSellLog(`Erreur · ${a.lastError}`, 'err');
+        render();
+        break;
+      }
+      if (!alive()) break;
+      if (result.fatal) {
+        a.running = false;
+        a.stop = true;
+        a.lastError = result.fatal;
+        a.status = 'Arrêté';
+        autoSellLog(result.fatal, 'err');
+        render();
+        break;
+      }
+
+      const interval = Math.min(
+        3600,
+        Math.max(30, Math.round(Number(state.settings.autoSellIntervalSec) || 60))
+      ) * 1000;
+      const idle = Math.max(interval, 5 * 60 * 1000);
+      const wait = result.plan.length ? interval : idle;
+      a.nextAt = Date.now() + wait;
+      a.status = result.plan.length
+        ? `Cycle ${a.cycles} · ${fmt(a.created)} annonce(s) · ${fmt(a.matched)} vente(s) immédiate(s)`
+        : state.settings.autoSellDryRun
+          ? 'Simulation · aucun doublon vendable'
+          : 'Aucun doublon vendable · attente';
+      render();
+      await autoSellWait(wait, alive);
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -5926,6 +6377,136 @@
       </div>`;
   }
 
+  function autoSellPanel(all, slots) {
+    const a = state.autoSell;
+    const s = state.settings;
+    const dupes = all.filter((row) => row.qty > 1).length;
+    const spare = all.reduce((sum, row) => sum + autoSellSpare(row), 0);
+    const withoutPrice = all.filter(
+      (row) =>
+        autoSellSpare(row) > 0 &&
+        (s.autoSellIncludeML || !['M', 'L'].includes(String(row.rarity || '').toUpperCase())) &&
+        autoSellPrice(row, s.autoSellType) == null
+    ).length;
+    const mlSpare = all
+      .filter((row) => ['M', 'L'].includes(String(row.rarity || '').toUpperCase()))
+      .reduce((sum, row) => sum + autoSellSpare(row), 0);
+    const stateLabel = a.running
+      ? 'en cours'
+      : a.armed
+        ? 'à confirmer'
+        : 'arrêtée';
+    const log = a.log.slice(-8);
+    return `
+      <section class="kp-autosell ${a.running ? 'is-running' : ''} ${a.armed ? 'is-armed' : ''}">
+        <div class="kp-autosell-head">
+          <div class="kp-autosell-title">
+            <span class="kp-autosell-dot"></span>
+            <b>Vente auto</b>
+            <small>doublons uniquement · dernière copie conservée</small>
+          </div>
+          <span class="kp-autosell-state">${stateLabel}</span>
+        </div>
+        <div class="kp-autosell-stats">
+          <span><b>${fmt(dupes)}</b> carte(s) en double</span>
+          <span><b>${fmt(spare)}</b> exemplaire(s) en trop</span>
+          <span><b>${fmt(spare - (s.autoSellIncludeML ? 0 : mlSpare))}</b> éligible(s)</span>
+          <span><b>${slots.remaining}</b> place(s) libre(s)</span>
+          <span><b>${fmt(a.created)}</b> annonce(s) créée(s)</span>
+          <span><b>${fmt(a.matched)}</b> vente(s) immédiate(s)</span>
+        </div>
+        ${
+          a.status
+            ? `<div class="kp-autosell-status">${esc(a.status)}${
+                a.nextAt && a.running ? ` · prochain cycle ${nowTime(a.nextAt)}` : ''
+              }</div>`
+            : ''
+        }
+        <div class="kp-autosell-note">
+          Une annonce créée n’est pas une vente : seules les ventes immédiates sont confirmées par l’API.
+        </div>
+        <div class="kp-autosell-grid">
+          <label>
+            <span>Type</span>
+            <select class="kp-select" data-autosell-type ${a.running ? 'disabled' : ''}>
+              <option value="fixed" ${s.autoSellType === 'fixed' ? 'selected' : ''}>Prix fixe</option>
+              <option value="auction" ${s.autoSellType === 'auction' ? 'selected' : ''}>Enchère</option>
+            </select>
+          </label>
+          <label>
+            <span>Prix min</span>
+            <input class="kp-input" type="number" min="1" step="1" data-autosell-min-price
+              value="${Math.max(1, Number(s.autoSellMinPrice) || 1)}" ${a.running ? 'disabled' : ''}>
+          </label>
+          <label>
+            <span>Intervalle (s)</span>
+            <input class="kp-input" type="number" min="30" max="3600" step="10" data-autosell-interval
+              value="${Math.min(3600, Math.max(30, Number(s.autoSellIntervalSec) || 60))}" ${a.running ? 'disabled' : ''}>
+          </label>
+          <label>
+            <span>Max / cycle</span>
+            <input class="kp-input" type="number" min="1" max="10" step="1" data-autosell-max
+              value="${Math.min(10, Math.max(1, Number(s.autoSellMaxPerCycle) || 10))}" ${a.running ? 'disabled' : ''}>
+          </label>
+        </div>
+        <div class="kp-autosell-opts">
+          <label class="kp-check">
+            <input type="checkbox" data-autosell-include-ml ${s.autoSellIncludeML ? 'checked' : ''} ${a.running ? 'disabled' : ''}>
+            Inclure M/L <em>${s.autoSellIncludeML ? '· dangereux' : '· exclues par défaut'}</em>
+          </label>
+          <label class="kp-check">
+            <input type="checkbox" data-autosell-dryrun ${s.autoSellDryRun ? 'checked' : ''} ${a.running ? 'disabled' : ''}>
+            Simulation
+          </label>
+          <span class="kp-autosell-note">${fmt(withoutPrice)} doublon(s) sans prix connu · ${fmt(mlSpare)} M/L en double</span>
+        </div>
+        <div class="kp-autosell-actions">
+          <button class="kp-btn" type="button" data-act="autosell-preview" ${a.running ? 'disabled' : ''}>Aperçu</button>
+          <button class="kp-btn ${a.armed ? 'is-primary' : ''}" type="button" data-act="autosell-start" ${a.running ? 'disabled' : ''}>
+            ${a.armed ? 'Confirmer le démarrage' : 'Démarrer'}
+          </button>
+          <button class="kp-btn" type="button" data-act="autosell-stop" ${a.running ? '' : 'disabled'}>Arrêter</button>
+          ${a.armed ? '<button class="kp-btn" type="button" data-act="autosell-cancel">Annuler</button>' : ''}
+        </div>
+        ${
+          a.armed
+            ? `<div class="kp-autosell-confirm">
+                 <b>Confirmer la vente auto ?</b>
+                 <span>${fmt(spare)} exemplaire(s) en trop · ${slots.remaining} place(s) libre(s) · ${
+                   s.autoSellIncludeML ? 'M/L incluses' : 'M/L exclues'
+                 } · dernière copie conservée.</span>
+               </div>`
+            : ''
+        }
+        ${
+          a.preview
+            ? `<div class="kp-autosell-preview">
+                 <b>Aperçu · ${fmt(a.preview.plan.length)} annonce(s)</b>
+                 ${
+                   a.preview.plan.length
+                     ? a.preview.plan
+                         .slice(0, 10)
+                         .map(
+                           (row) =>
+                             `<div><span>${esc(row.name)} × ${row.qty}</span><b>◆ ${fmt(row.price)}</b></div>`
+                         )
+                         .join('')
+                     : '<div>Aucune annonce à préparer.</div>'
+                 }
+                 ${a.preview.withoutPrice ? `<small>${fmt(a.preview.withoutPrice)} doublon(s) sans prix ignoré(s).</small>` : ''}
+               </div>`
+            : ''
+        }
+        ${
+          log.length
+            ? `<div class="kp-autosell-log">${log
+                .map((entry) => `<div class="${entry.kind === 'err' ? 'is-bad' : entry.kind === 'ok' ? 'is-good' : ''}">${esc(entry.text)}</div>`)
+                .join('')}</div>`
+            : ''
+        }
+      </section>`;
+  }
+
   function viewSell() {
     if (!state.user) return loginHTML();
     const view = state.sellView;
@@ -5986,6 +6567,7 @@
 
     return `
       ${sellModeSwitch()}
+      ${autoSellPanel(all, slots)}
       ${sellToolbar()}
       ${sellFilters(sellSeriesOptions())}
       ${sellRarityChips(counts)}
@@ -9739,6 +10321,19 @@
           render();
         }
         break;
+      case 'autosell-preview':
+        autoSellPreview();
+        break;
+      case 'autosell-start':
+        if (state.autoSell.armed) startAutoSell();
+        else armAutoSell();
+        break;
+      case 'autosell-cancel':
+        disarmAutoSell();
+        break;
+      case 'autosell-stop':
+        stopAutoSell();
+        break;
       case 'scan-market':
         scanMarket();
         break;
@@ -10085,6 +10680,37 @@
       return;
     }
 
+    // --- Vente auto : réglages (jamais modifiables pendant la boucle) ---
+    const autoType = target.closest('[data-autosell-type]');
+    const autoMin = target.closest('[data-autosell-min-price]');
+    const autoInterval = target.closest('[data-autosell-interval]');
+    const autoMax = target.closest('[data-autosell-max]');
+    const autoIncludeML = target.closest('[data-autosell-include-ml]');
+    const autoDryRun = target.closest('[data-autosell-dryrun]');
+    if (autoType || autoMin || autoInterval || autoMax || autoIncludeML || autoDryRun) {
+      if (state.autoSell.running) return;
+      state.autoSell.armed = false;
+      if (autoType) state.settings.autoSellType = autoType.value === 'auction' ? 'auction' : 'fixed';
+      if (autoMin) state.settings.autoSellMinPrice = Math.max(1, Math.round(Number(autoMin.value) || 1));
+      if (autoInterval) {
+        state.settings.autoSellIntervalSec = Math.min(
+          3600,
+          Math.max(30, Math.round(Number(autoInterval.value) || 60))
+        );
+      }
+      if (autoMax) {
+        state.settings.autoSellMaxPerCycle = Math.min(
+          10,
+          Math.max(1, Math.round(Number(autoMax.value) || 10))
+        );
+      }
+      if (autoIncludeML) state.settings.autoSellIncludeML = Boolean(autoIncludeML.checked);
+      if (autoDryRun) state.settings.autoSellDryRun = Boolean(autoDryRun.checked);
+      persistSettings();
+      render();
+      return;
+    }
+
     const setting = target.closest('[data-setting]');
     if (setting) {
       const key = setting.getAttribute('data-setting');
@@ -10382,6 +11008,13 @@
       stopAutoOpen,
       ensureAutoAlive,
       autoLog,
+      autoSellPreview,
+      autoSellCycle,
+      startAutoSell,
+      stopAutoSell,
+      armAutoSell,
+      disarmAutoSell,
+      autoSellPanel,
       loadAutoLog,
       trackBestCards,
       recordAutoResults,

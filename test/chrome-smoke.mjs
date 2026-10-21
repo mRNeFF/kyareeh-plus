@@ -294,6 +294,95 @@ async function visualPass() {
       check(`Onglet ${tab} rendu`, rect.width > 300 && rect.height > 400, `${file}`);
     }
 
+    console.log('\n— Vente auto (harness) —');
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         window.__kyaraPlus.setOpen(true);
+         window.__kyaraPlus.setTab('sell');
+         return true;
+       })()`
+    );
+    await sleep(350);
+    const saleText = await evaluate(
+      cdp,
+      sessionId,
+      `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view')?.innerText || ''`
+    );
+    check('Panneau Vente auto présent', saleText.includes('Vente auto') && saleText.includes('doublons uniquement'));
+
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="autosell-preview"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () => evaluate(cdp, sessionId, 'Boolean(window.__kyaraPlus.state.autoSell.preview)'),
+      { label: 'aperçu vente auto', timeout: 20000 }
+    );
+    const preview = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const a = window.__kyaraPlus.state.autoSell;
+         return { plan: a.preview?.plan?.length ?? 0, status: a.status };
+       })()`
+    );
+    check('Aperçu vente auto sans POST', preview.plan > 0, `${preview.plan} annonce(s) · ${preview.status}`);
+
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="autosell-start"]')?.click();
+         return true;
+       })()`
+    );
+    const armed = await evaluate(cdp, sessionId, 'window.__kyaraPlus.state.autoSell.armed');
+    check('Vente auto : confirmation demandée', armed === true);
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="autosell-start"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () => evaluate(cdp, sessionId, 'window.__kyaraPlus.state.autoSell.cycles >= 1'),
+      { label: 'premier cycle de vente auto', timeout: 20000 }
+    );
+    const auto = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const a = window.__kyaraPlus.state.autoSell;
+         const out = {
+           running: a.running,
+           created: a.created,
+           cycles: a.cycles,
+           log: a.log.length,
+           characterId: a.lastPlan?.[0]?.characterId
+         };
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="autosell-stop"]')?.click();
+         return out;
+       })()`
+    );
+    check('Vente auto : annonces créées', auto.created > 0, `${auto.created} annonce(s) · ${auto.cycles} cycle(s)`);
+    check('Vente auto : identifiant API présent', Number.isFinite(Number(auto.characterId)), String(auto.characterId));
+    await waitFor(
+      () => evaluate(cdp, sessionId, 'window.__kyaraPlus.state.autoSell.running === false'),
+      { label: 'arrêt de la vente auto', timeout: 5000 }
+    );
+
     check('Aucune exception JS pendant le rendu', cdp.exceptions.length === 0, cdp.exceptions.join(' | '));
   } finally {
     cdp?.ws.close();
