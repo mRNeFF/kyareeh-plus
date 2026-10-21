@@ -1,0 +1,17 @@
+{
+  "name": "kyara-duel-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Relais WebSocket autoritatif du duel Kyara (mode +Duel de Kyareeh+)",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
