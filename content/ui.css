@@ -3366,3 +3366,16 @@ img.kp-avatar {
 .kp-head { flex-wrap: wrap; }
 .kp-modes { flex-basis: 100%; }
 
+
+/* ---- +Duel : corrections collection (image, deck, recherche) ---- */
+.kp-duel-detail { align-items: flex-start; }
+.kp-duel-detail img { width: 112px; height: auto; aspect-ratio: 3 / 4; object-fit: cover; align-self: flex-start; flex: 0 0 auto; border-radius: 8px; }
+.kp-deck-bar { gap: 8px; padding: 2px 12px 10px; align-items: stretch; }
+.kp-deck-slot { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 64px; padding: 4px; border-radius: 10px; border: 1px dashed #2d303a; color: #9aa0ae; }
+.kp-deck-slot img { width: 56px; height: 74px; object-fit: cover; border-radius: 6px; }
+.kp-deck-slot span { font-size: 8px; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kp-deck-slot.is-full { border-style: solid; border-color: #ffb020; color: #ffd27a; }
+.kp-duel-search { display: flex; gap: 6px; padding: 0 12px 6px; }
+.kp-duel-search input { flex: 1; padding: 7px 9px; border-radius: 8px; border: 1px solid #2d303a; background: #121318; color: #f3f4f7; font-size: 11px; }
+.kp-duel-search select { padding: 7px 9px; border-radius: 8px; border: 1px solid #2d303a; background: #121318; color: #f3f4f7; font-size: 11px; max-width: 45%; }
+.kp-duel-count { padding: 0 12px 6px; font-size: 9px; color: #9aa0ae; }

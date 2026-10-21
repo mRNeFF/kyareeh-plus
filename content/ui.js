@@ -2730,7 +2730,7 @@
 
   function duelState() {
     if (!state.__duel) {
-      state.__duel = { mode: 'tools', tab: 'collection', deck: [], detail: null, relay: '' };
+      state.__duel = { mode: 'tools', tab: 'collection', deck: [], detail: null, relay: '', query: '', series: 'all' };
     }
     return state.__duel;
   }
@@ -2791,7 +2791,9 @@
     const detail = duel.detail ? duelCardById(duel.detail) : null;
     const slots = Array.from({ length: 5 }, (_, index) => {
       const card = deck[index] ? duelCardById(deck[index]) : null;
-      return `<span class="kp-deck-slot ${card ? 'is-full' : ''}">${card ? esc(card.name) : '—'}</span>`;
+      return card
+        ? `<span class="kp-deck-slot is-full"><img src="${esc(card.image)}" alt=""><span>${esc(card.name)}</span></span>`
+        : `<span class="kp-deck-slot"><span>—</span></span>`;
     }).join('');
 
     const detailHtml = detail
@@ -2812,7 +2814,16 @@
         </div>`
       : '';
 
-    const grid = cards
+    const query = String(duel.query ?? '').trim().toLowerCase();
+    const series = String(duel.series ?? 'all');
+    const seriesList = [...new Set(cards.map((card) => card.series).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const filtered = cards.filter((card) => {
+      if (series !== 'all' && card.series !== series) return false;
+      if (query && !String(card.name).toLowerCase().includes(query)) return false;
+      return true;
+    });
+
+    const grid = filtered
       .map((card) => {
         const mine = owned.has(String(card.id));
         const picked = deck.includes(String(card.id));
@@ -2832,6 +2843,14 @@
 
     return `<div class="kp-duel-head"><b>Collection</b><span>${cards.length} cartes · ${deck.length}/5 dans le deck</span></div>
       <div class="kp-deck-bar">${slots}<button class="kp-btn" type="button" data-act="duel-clear">Vider</button></div>
+      <div class="kp-duel-search">
+        <input data-role="duel-query" placeholder="Rechercher une carte" value="${esc(duel.query ?? '')}">
+        <select data-role="duel-series">
+          <option value="all">Toutes les séries</option>
+          ${seriesList.map((name) => `<option value="${esc(name)}" ${series === name ? 'selected' : ''}>${esc(name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="kp-duel-count">${filtered.length} carte(s) affichée(s)</div>
       ${detailHtml}
       <div class="kp-duel-grid">${grid}</div>`;
   }
@@ -8705,6 +8724,12 @@
   function onChange(event) {
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
+    const duelSeries = target.closest('[data-role="duel-series"]');
+    if (duelSeries) {
+      duelState().series = duelSeries.value;
+      render();
+      return;
+    }
     const checkbox = target.closest('input[data-sel]');
     if (checkbox) {
       const id = checkbox.getAttribute('data-sel');
@@ -8928,6 +8953,22 @@
   function onInput(event) {
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
+
+    const duelQuery = target.closest('[data-role="duel-query"]');
+    if (duelQuery) {
+      duelState().query = duelQuery.value;
+      render();
+      const again = qs('[data-role="duel-query"]');
+      if (again) {
+        again.focus();
+        try {
+          again.setSelectionRange(again.value.length, again.value.length);
+        } catch {
+          /* champ remplacé */
+        }
+      }
+      return;
+    }
 
     const packSearch = target.closest('[data-role="pack-search"]');
     if (packSearch) {
