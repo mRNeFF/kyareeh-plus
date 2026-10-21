@@ -51,6 +51,12 @@ l'extension depuis la console ou un navigateur automatisé.
 |---|---|
 | `content/ui.js` (~9 200 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
 | `content/ui.css` (~3 300 lignes) | Styles injectés dans un Shadow DOM (préfixe `kp-`). |
+| `content/duel-data.js` | Champions du duel (données + `passiveFx` générés par `scripts/duel-passives.mjs`). |
+| `content/duel-engine.js` | Moteur du duel, **pur** (aucun DOM/réseau/aléa hors graine), partagé par l’extension et le relais. |
+| `content/duel-rules.js` | Livre de règles affiché dans l’onglet Règles (copie : `docs/REGLES-DUEL.md`). |
+| `content/duel-net.js` | Client WebSocket du relais (reconnexion par jeton). |
+| `relay/` | Serveur Node autoritatif des salons en ligne (Railway). Exclu du zip AMO. |
+| `docs/DUEL-SPEC.md` | Contrat moteur / protocole / interface du duel. |
 | `background/background.js` | Service worker minimal (messages popup ↔ onglet). |
 | `popup/` | Popup de la barre d'outils (recharger l'extension). |
 | `test/harness.html` | Faux site + fausse API (comptes, marché, packs, amis, classements). |
