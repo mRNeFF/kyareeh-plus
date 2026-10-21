@@ -33,10 +33,6 @@
         "https://kyara.games/*"
       ],
       "js": [
-        "content/duel-data.js",
-        "content/duel-rules.js",
-        "content/duel-engine.js",
-        "content/duel-net.js",
         "content/ui.js"
       ],
       "run_at": "document_idle"
@@ -47,7 +43,12 @@
       "resources": [
         "content/ui.css",
         "icons/*",
-        "manifest.json"
+        "manifest.json",
+        "duel/*",
+        "content/duel-data.js",
+        "content/duel-rules.js",
+        "content/duel-engine.js",
+        "content/duel-net.js"
       ],
       "matches": [
         "https://kyara.games/*"

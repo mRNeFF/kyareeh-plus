@@ -23,24 +23,126 @@
       window.addEventListener('unhandledrejection', (e) => log('REJECTION: ' + (e.reason?.message || e.reason)));
 
       // Stockage persistant (localStorage) pour pouvoir tester la reprise après rechargement.
-      const store = JSON.parse(localStorage.getItem('kp-harness-store') || '{}');
-      const saveStore = () => localStorage.setItem('kp-harness-store', JSON.stringify(store));
+      // Même clé que duel/duel-app.js hors extension : la page du duel (iframe ou fenêtre ouverte
+      // par « Détacher ») partage ce stockage ; on relit donc toujours la valeur la plus récente.
+      const STORE_KEY = 'kp-harness-store';
+      const readStore = () => {
+        try {
+          return JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {};
+        } catch {
+          return {};
+        }
+      };
+      const store = readStore();
+      // Clé de fenêtre périmée d'une session précédente : aucune fenêtre n'est ouverte au chargement.
+      if (store['kyareeh.duel.window']) {
+        delete store['kyareeh.duel.window'];
+        localStorage.setItem(STORE_KEY, JSON.stringify(store));
+      }
       window.__harnessStore = store;
+      const changeListeners = [];
+      const emitChanges = (changes) => {
+        if (!Object.keys(changes).length) return;
+        for (const fn of changeListeners) {
+          try {
+            fn(changes, 'local');
+          } catch (e) {
+            log('onChanged: ' + e.message);
+          }
+        }
+      };
+      // Changements faits par une autre page (iframe du duel, fenêtre détachée).
+      window.addEventListener('storage', (event) => {
+        if (event.key !== STORE_KEY) return;
+        let before = {};
+        const after = readStore();
+        try {
+          before = JSON.parse(event.oldValue || '{}') || {};
+        } catch {
+          before = {};
+        }
+        for (const k of Object.keys(store)) delete store[k];
+        Object.assign(store, after);
+        const changes = {};
+        for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+          if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) changes[k] = { oldValue: before[k], newValue: after[k] };
+        }
+        emitChanges(changes);
+      });
+      // Fenêtre détachée du duel (équivalent harness du script de fond : windows.create).
+      let duelWin = null;
+      const duelWinWatch = () => {
+        clearInterval(duelWinWatch.t);
+        duelWinWatch.t = setInterval(() => {
+          if (duelWin && !duelWin.closed) return;
+          clearInterval(duelWinWatch.t);
+          duelWin = null;
+          const cur = readStore();
+          if (cur['kyareeh.duel.window']) {
+            delete cur['kyareeh.duel.window'];
+            localStorage.setItem(STORE_KEY, JSON.stringify(cur));
+            const old = store['kyareeh.duel.window'];
+            delete store['kyareeh.duel.window'];
+            emitChanges({ 'kyareeh.duel.window': { oldValue: old, newValue: undefined } });
+          }
+        }, 500);
+      };
+      const setWindowKey = (value) => {
+        const cur = readStore();
+        const old = cur['kyareeh.duel.window'];
+        if (value) cur['kyareeh.duel.window'] = value;
+        else delete cur['kyareeh.duel.window'];
+        localStorage.setItem(STORE_KEY, JSON.stringify(cur));
+        Object.keys(store).forEach((k) => delete store[k]);
+        Object.assign(store, cur);
+        emitChanges({ 'kyareeh.duel.window': { oldValue: old, newValue: value || undefined } });
+      };
       // Régénération simulée : minutes restantes avant le prochain booster.
       window.__nextFreeMin = window.__nextFreeMin ?? 10;
       window.browser = {
         storage: {
           local: {
-            get: async (key) => ({ [key]: store[key] }),
+            get: async (key) => ({ [key]: readStore()[key] }),
             set: async (obj) => {
+              const cur = readStore();
+              const changes = {};
+              for (const [k, v] of Object.entries(obj)) changes[k] = { oldValue: cur[k], newValue: v };
+              Object.assign(cur, obj);
+              localStorage.setItem(STORE_KEY, JSON.stringify(cur));
               Object.assign(store, obj);
-              saveStore();
+              emitChanges(changes);
             }
-          }
+          },
+          onChanged: { addListener: (fn) => changeListeners.push(fn) }
         },
         runtime: {
           getURL: (path) => '/' + path,
-          onMessage: { addListener: () => {} }
+          onMessage: { addListener: () => {} },
+          // Réponses du script de fond pour le duel (background/background.js).
+          sendMessage: async (msg) => {
+            if (msg && msg.type === 'kp-duel-detach') {
+              if (duelWin && !duelWin.closed) {
+                duelWin.focus();
+                return { ok: true, reused: true };
+              }
+              duelWin = window.open('/duel/duel.html', 'kp-duel', 'popup,width=1100,height=760');
+              if (!duelWin) return { ok: false, error: 'fenêtre bloquée' };
+              setWindowKey({ id: 'harness', at: Date.now() });
+              duelWinWatch();
+              return { ok: true, id: 'harness' };
+            }
+            if (msg && msg.type === 'kp-duel-attach') {
+              try {
+                if (duelWin) duelWin.close();
+              } catch (e) {
+                /* ignore */
+              }
+              duelWin = null;
+              setWindowKey(null);
+              return { ok: true };
+            }
+            return undefined;
+          }
         },
         tabs: {}
       };
@@ -494,11 +596,10 @@
       };
     </script>
 
-    <!-- Même ordre que manifest.json (content_scripts). -->
+    <!-- Même contenu que manifest.json (content_scripts : seul ui.js). Le duel est la page
+         /duel/duel.html (iframe du panneau). duel-data.js n'est chargé ici que comme jeu de
+         données : ?duel=1 donne au compte simulé les 8 premières Mythiques. -->
     <script src="/content/duel-data.js"></script>
-    <script src="/content/duel-rules.js"></script>
-    <script src="/content/duel-engine.js"></script>
-    <script src="/content/duel-net.js"></script>
     <script src="/content/ui.js"></script>
     <script>
       setTimeout(() => {
