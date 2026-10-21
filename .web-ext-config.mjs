@@ -3,6 +3,8 @@ export default {
   ignoreFiles: [
     'README.md',
     'AGENTS.md',
+    'AGENTS.local.md',
+    'REPRISE-DSH.md',
     'BUILD.md',
     'PRIVACY.md',
     'affiche-sondage-kyara.png',
