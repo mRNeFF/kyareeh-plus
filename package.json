@@ -12,7 +12,8 @@
     "source": "node scripts/release.mjs --build-only",
     "verify:odds": "node test/verify-odds.mjs",
     "verify:analysis": "node test/verify-analysis.mjs",
-    "verify:statglobal": "node test/verify-statglobal.mjs"
+    "verify:statglobal": "node test/verify-statglobal.mjs",
+    "verify:duel": "node test/verify-duel-data.mjs"
   },
   "devDependencies": {
     "web-ext": "^8.3.0"

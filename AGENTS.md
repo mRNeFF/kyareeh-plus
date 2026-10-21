@@ -22,6 +22,7 @@ npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 node test/verify-analysis.mjs    # 43 contrôles
 node test/verify-statglobal.mjs  # 55 contrôles
+node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
 node test/verify-odds.mjs        # ~97 comparaisons (1 écart "season-2026-fall R" PRÉEXISTANT, ne pas s'alarmer)
 ```
 
