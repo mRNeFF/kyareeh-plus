@@ -13,7 +13,11 @@
     "verify:odds": "node test/verify-odds.mjs",
     "verify:analysis": "node test/verify-analysis.mjs",
     "verify:statglobal": "node test/verify-statglobal.mjs",
-    "verify:duel": "node test/verify-duel-data.mjs"
+    "verify:duel": "node test/verify-duel-data.mjs",
+    "verify:duel-engine": "node test/verify-duel-engine.mjs",
+    "verify:duel-relay": "node test/verify-duel-relay.mjs",
+    "sim:duel": "node test/sim-duel.mjs 2000",
+    "relay": "node relay/server.mjs"
   },
   "devDependencies": {
     "web-ext": "^8.3.0"

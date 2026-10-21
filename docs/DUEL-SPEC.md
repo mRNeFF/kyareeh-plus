@@ -229,3 +229,20 @@ Livrables C : intégration UI, styles, `manifest.json` (ordre des scripts :
 Les chantiers B et C codent contre les API des §3 et §4 avant que A ait fini ; si un fichier
 d'un autre chantier n'existe pas encore, ils utilisent un bouchon **dans leurs propres fichiers
 de test** et le signalent dans leur compte rendu.
+
+---
+
+## 7. Ajouts faits pendant la réalisation
+
+- **Moteur** : `E.forfeit(state, player, 'forfeit'|'timeout')`, `E.targetMode(move)`,
+  `E.STATUS_LABELS`, `E.KIND_LABELS`, `E.version` ; `createMatch` accepte `rules` (surcharge
+  partielle de `E.RULES`, recopiée dans `state.rules`). Chaque capacité de l'état porte `cost`
+  et `targeting` (`'enemy'|'ally'|'none'`). Passifs : `passiveFx = { rules: [{ when, effects, … }] }`
+  (schéma documenté en tête de `scripts/duel-passives.mjs`). L'IA (`chooseAction`) ne fait
+  jamais avancer `state.rng`. Le détail des décisions de règles est dans `content/duel-rules.js`.
+- **Protocole** : message `rematch` ; `create`/`join`/`rematch` peuvent porter `name`/`deck` ;
+  `state` porte `legal` (actions légales du destinataire) et `last` ; `room` porte `you` et
+  `players[].seat/online` ; `end` porte `you`. Trois délais de tour consécutifs → défaite
+  (`timeout`). Codes d'erreur listés dans `relay/README.md`.
+- **Client** : `net.rematch()`, `net.setProfile()`, `net.timeLeft()`, évènement local
+  `{ t: 'net', status }`, erreur locale `session_taken` (duel repris dans un autre onglet).
