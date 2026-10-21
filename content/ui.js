@@ -5568,7 +5568,7 @@
         </div>
         <div class="kp-autosell-actions">
           <button class="kp-btn" type="button" data-act="autosell-preview" ${a.running ? 'disabled' : ''}>Aperçu</button>
-          <button class="kp-btn ${a.armed ? 'is-primary' : ''}" type="button" data-act="autosell-start" ${a.running ? 'disabled' : ''}>
+          <button class="kp-btn is-primary" type="button" data-act="autosell-start" ${a.running ? 'disabled' : ''}>
             ${a.armed ? 'Confirmer le démarrage' : 'Démarrer'}
           </button>
           <button class="kp-btn" type="button" data-act="autosell-stop" ${a.running ? '' : 'disabled'}>Arrêter</button>

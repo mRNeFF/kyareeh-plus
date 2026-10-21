@@ -314,10 +314,10 @@ async function visualPass() {
     );
     check(
       'Panneau Vente auto présent',
-      saleText.includes('Vente auto') &&
+      saleText.toLowerCase().includes('vente auto') &&
         saleText.includes('doublons uniquement') &&
         saleText.toLowerCase().includes('stratégie'),
-      `V=${saleText.includes('Vente auto')} D=${saleText.includes('doublons uniquement')} S=${saleText
+      `V=${saleText.toLowerCase().includes('vente auto')} D=${saleText.includes('doublons uniquement')} S=${saleText
         .toLowerCase()
         .includes('stratégie')}`
     );
@@ -428,7 +428,7 @@ async function visualPass() {
          return {
            count: window.__kyaraPlus.state.salesLog.length,
            auto: window.__kyaraPlus.state.salesLog.filter((e) => e.source === 'auto').length,
-           chart: text.includes('Ventes') && text.toLowerCase().includes('net estimé')
+           chart: text.toLowerCase().includes('ventes') && text.toLowerCase().includes('net estimé')
          };
        })()`
     );
@@ -462,7 +462,8 @@ async function visualPass() {
     );
     check(
       'Marché global intégré à l’onglet Marché',
-      marketText.includes('Marché global') && marketText.includes('Recherche serveur')
+      marketText.toLowerCase().includes('marché global') &&
+        marketText.toLowerCase().includes('recherche serveur')
     );
     const marketShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
     writeFileSync(join(SHOTS, 'chrome-marche.png'), Buffer.from(marketShot.data, 'base64'));

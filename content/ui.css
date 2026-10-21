@@ -3817,3 +3817,176 @@ img.kp-avatar {
 .kp-duel-away-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 14px; background: linear-gradient(135deg, #ff4d2e, #ffb020); color: #0e0d12; font-size: 26px; font-weight: 800; }
 .kp-duel-away-card b { font-size: 16px; }
 .kp-duel-away-card p { margin: 0 0 6px; color: #9aa0ae; font-size: 12.5px; }
+
+/* ------------------------------------------------------------------ */
+/* DA unifiée : Tools+ reprend le langage visuel de +Duel              */
+/* ------------------------------------------------------------------ */
+
+:host {
+  --kp-display: "Bahnschrift", "Arial Narrow", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --kp-bg-4: #242835;
+  --kp-line-2: #3a3f4e;
+}
+
+.kp-panel {
+  background:
+    radial-gradient(1200px 600px at 70% -10%, rgba(29, 22, 32, 0.9), transparent 60%),
+    radial-gradient(900px 500px at 0% 110%, rgba(20, 32, 42, 0.85), transparent 60%),
+    radial-gradient(120% 150% at 0% 0%, rgba(255, 77, 46, 0.1), transparent 52%),
+    linear-gradient(180deg, #16181f 0%, #101116 100%);
+}
+
+.kp-brand b {
+  font: 800 14px/1 var(--kp-display);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.kp-brand small {
+  font-family: var(--kp-display);
+  letter-spacing: 0.08em;
+}
+
+.kp-logo {
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--kp-accent), var(--kp-accent-2));
+  color: #16110c;
+  box-shadow: 0 0 12px rgba(255, 77, 46, 0.55);
+}
+
+.kp-tab {
+  font: 700 11.5px/1 var(--kp-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.kp-tab.is-active {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--kp-accent), var(--kp-accent-2));
+  color: #16110c;
+  box-shadow: 0 4px 14px rgba(255, 77, 46, 0.3);
+}
+
+.kp-tab.is-active:hover {
+  color: #16110c;
+}
+
+.kp-tab.is-active small {
+  background: rgba(0, 0, 0, 0.16);
+  color: #2a1c0e;
+}
+
+.kp-seg-btn {
+  font-family: var(--kp-display);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.kp-seg-btn.is-active {
+  background: linear-gradient(135deg, var(--kp-accent), var(--kp-accent-2));
+  color: #16110c;
+  box-shadow: 0 4px 12px rgba(255, 77, 46, 0.24);
+}
+
+.kp-seg-btn.is-active small {
+  background: rgba(0, 0, 0, 0.16);
+  color: #2a1c0e;
+}
+
+.kp-icon-btn {
+  border-color: var(--kp-line);
+  background: var(--kp-bg-3);
+}
+
+.kp-icon-btn:hover {
+  border-color: var(--kp-line-2);
+  background: var(--kp-bg-4);
+  color: var(--kp-text);
+}
+
+.kp-btn {
+  border-color: #3a3f4e;
+  border-radius: 10px;
+}
+
+.kp-btn.is-primary {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--kp-accent), #ff7a2b 55%, var(--kp-accent-2));
+  color: #16110c;
+  box-shadow: 0 6px 18px rgba(255, 77, 46, 0.28);
+}
+
+.kp-btn.is-primary:hover {
+  background: linear-gradient(135deg, #ff6a4e, #ff8a3d 55%, #ffc24a);
+  box-shadow: 0 8px 24px rgba(255, 77, 46, 0.4);
+}
+
+.kp-btn.is-ghost {
+  border-color: var(--kp-line);
+}
+
+.kp-section-title,
+.kp-listed-head b,
+.kp-sales-head b,
+.kp-autosell-title b {
+  font-family: var(--kp-display);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.kp-section-title {
+  padding-left: 8px;
+  border-left: 3px solid var(--kp-accent);
+  letter-spacing: 0.08em;
+}
+
+.kp-card-stat,
+.kp-autosell,
+.kp-sales {
+  border-color: var(--kp-line);
+  border-radius: 16px;
+  background: linear-gradient(180deg, var(--kp-bg-3), var(--kp-bg-2));
+}
+
+.kp-listed-card {
+  border-color: #3a3f4e;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent), var(--kp-bg-2);
+}
+
+.kp-listed-card:hover {
+  border-color: var(--kp-accent);
+  box-shadow: 0 0 14px rgba(255, 77, 46, 0.16);
+}
+
+.kp-input,
+.kp-select {
+  border-color: var(--kp-line);
+}
+
+.kp-input:focus,
+.kp-select:focus {
+  border-color: var(--kp-accent);
+  box-shadow: 0 0 0 3px rgba(255, 77, 46, 0.18);
+}
+
+.kp-modal-card {
+  border-color: var(--kp-line);
+  background: linear-gradient(180deg, var(--kp-bg-3), var(--kp-bg-2));
+}
+
+.kp-fab {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--kp-accent), #ff7a2b 55%, var(--kp-accent-2));
+  color: #16110c;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 0 0 4px rgba(255, 77, 46, 0.12);
+}
+
+.kp-fab:hover {
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5), 0 0 0 5px rgba(255, 77, 46, 0.18);
+}
+
+.kp-fab.is-open {
+  border-color: var(--kp-line);
+  background: #20232c;
+  color: var(--kp-text);
+}

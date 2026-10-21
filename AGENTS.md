@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.2.1** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.2.2** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `f39d6d1`
@@ -159,7 +159,8 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 
 - `content/ui.js` est un monolithe (~11 000 lignes). Toute nouvelle vue l'agrandit : extraire un
   module serait utile mais risqué sans tests de non-régression UI.
-- 16 avertissements `web-ext lint` (`UNSAFE_VAR_ASSIGNMENT` sur `innerHTML`) : inhérents au rendu
+- 24 avertissements `web-ext lint` : `UNSAFE_VAR_ASSIGNMENT` sur `innerHTML` dans `content/ui.js`
+  et `duel/duel-app.js`, plus un `INLINE_SCRIPT` dans `duel/fx-demo.html` ; inhérents au rendu
   par chaînes ; à traiter seulement si on migre vers du DOM construit.
 - L'onglet Stat dépend de `trades/owned` + `fair-play/prices` : si le site change ces endpoints,
   la valeur et les séries resteront vides (« — »), par choix assumé.
