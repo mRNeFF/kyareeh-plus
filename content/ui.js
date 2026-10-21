@@ -2759,13 +2759,23 @@
   function duelEffectText(move) {
     const parts = [];
     if (move.damage) parts.push(`${move.damage} dégâts`);
+    if (move.randomDamage) parts.push(`${move.randomDamage[0]}–${move.randomDamage[1]} dégâts aléatoires`);
     if (move.heal) parts.push(`soin ${move.heal}`);
     if (move.guard) parts.push(`garde ${move.guard}`);
     if (move.buff) parts.push(`+${move.buff} dégâts préparés`);
     if (move.teamAtk) parts.push(`+${move.teamAtk} ATQ équipe`);
     if (move.healTeam) parts.push(`soin équipe ${move.healTeam}`);
+    if (move.healTeamFull) parts.push('soins équipe complets');
+    if (move.teamHp) parts.push(`−${move.teamHp} PV équipe`);
     if (move.recoil) parts.push(`−${move.recoil} PV`);
     if (move.skipFoe) parts.push('sonne la cible');
+    if (move.attackBlock) parts.push('annule la prochaine attaque subie');
+    if (move.invincible) parts.push(`invulnérable ${move.invincible} tours`);
+    if (move.disableTurns) parts.push(`ne peut plus attaquer ${move.disableTurns} tours`);
+    if (move.saveLethal) parts.push('survit une fois à un coup létal');
+    if (move.instakill) parts.push(`abat ${move.instakill.join(' / ')}`);
+    if (move.reviveAlly) parts.push('ressuscite un allié tombé, puis succombe');
+    if (move.extraTurn) parts.push('rejoue immédiatement');
     return parts.join(' · ');
   }
 
