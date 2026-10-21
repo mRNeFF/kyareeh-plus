@@ -2769,6 +2769,27 @@
     return parts.join(' · ');
   }
 
+  function duelCardModal(card) {
+    const attacks = (card.attacks ?? [])
+      .map(
+        (move) =>
+          `<li><b>${esc(move.name)}</b> <i>${esc(move.kind === 'support' ? 'soutien' : move.kind === 'ultimate' ? 'ultime' : 'attaque')}</i><br><small>${esc(move.desc ?? '')}</small><br><span>${esc(duelEffectText(move))}</span></li>`
+      )
+      .join('');
+    return `<div class="kp-modal-head"><b>${esc(card.name)}</b><button class="kp-icon-btn" type="button" data-act="duel-close-modal">✕</button></div>
+      <div class="kp-modal-body">
+        <div class="kp-duel-modal">
+          <img src="${esc(card.image)}" alt="">
+          <div>
+            <div class="kp-duel-modal-tags">${esc(card.rarityLabel ?? '')} · ${esc(card.role ?? '')} · ${esc(card.series ?? '')}</div>
+            <div class="kp-duel-modal-stats"><b>${card.hp} PV</b><b>ATQ ${card.atk}</b></div>
+            <ul>${attacks}</ul>
+            <div class="kp-duel-passive"><b>${esc(card.passive?.name ?? 'Passif')}</b> — ${esc(card.passive?.desc ?? '')}</div>
+          </div>
+        </div>
+      </div>`;
+  }
+
   function renderModes() {
     if (!ui?.modes) return;
     const duel = duelState();
@@ -8034,6 +8055,19 @@
   function renderModal() {
     if (!ui) return;
 
+    const duelModal = duelState();
+    if (duelModal.detailModal) {
+      const card = duelCardById(duelModal.detailModal);
+      if (card) {
+        ui.modal.hidden = false;
+        ui.modalCard.classList.add('is-wide');
+        ui.modalCard.dataset.kind = `duel:${duelModal.detailModal}`;
+        ui.modalCard.innerHTML = duelCardModal(card);
+        return;
+      }
+      duelModal.detailModal = null;
+    }
+
     const kind = !state.sell && state.sellView.detailId ? 'detail' : state.sell ? 'sell' : 'closed';
     const kindKey = kind === 'detail' ? `detail:${state.sellView.detailId ?? ''}` : kind;
     // Même modale = on garde la position de lecture. Sinon (ouverture d'une
@@ -8258,8 +8292,12 @@
       }
       case 'duel-card': {
         const duel = duelState();
-        const id = String(el.getAttribute('data-id') ?? '');
-        duel.detail = duel.detail === id ? null : id;
+        duel.detailModal = String(el.getAttribute('data-id') ?? '');
+        render();
+        break;
+      }
+      case 'duel-close-modal': {
+        duelState().detailModal = null;
         render();
         break;
       }
