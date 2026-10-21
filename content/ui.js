@@ -2725,18 +2725,100 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* +Duel : collection, deck et salons                                  */
+  /* +Duel : collection, deck, salons, combat et règles                  */
   /* ------------------------------------------------------------------ */
+  // Le moteur (KYARA_DUEL_ENGINE), le livre de règles (KYARA_DUEL_RULES) et le
+  // client réseau (KYARA_DUEL_NET) sont chargés avant ce fichier par le manifeste.
+  // L'interface ne recalcule aucune règle : les coups jouables viennent
+  // uniquement de `legalActions`, le déroulé de `applyAction` (ou du relais).
+
+  const DUEL_KEY = 'kyareeh.duel.v1';
+  // Délai avant que l'IA d'entraînement ne joue (lisibilité du tour).
+  const DUEL_AI_DELAY = 600;
+  const DUEL_LOG_MAX = 400;
+  const DUEL_DECK_SIZE = 5;
+  const DUEL_STATUS_LABELS = {
+    poison: 'Poison',
+    curse: 'Malédiction',
+    weakness: 'Faiblesse',
+    rage: 'Rage',
+    regen: 'Régénération',
+    haste: 'Hâte'
+  };
+  const DUEL_END_REASONS = {
+    ko: 'tous les champions adverses sont KO',
+    rounds: 'limite de manches atteinte : victoire aux PV restants',
+    forfeit: 'abandon',
+    timeout: 'délai dépassé ou déconnexion prolongée'
+  };
+  const DUEL_NET_STATUS = {
+    connecting: 'connexion…',
+    open: 'connecté',
+    reconnecting: 'reconnexion…',
+    closed: 'déconnecté'
+  };
+
+  let duelAiTimer = null;
+  let duelPersistTimer = null;
+  let duelCardsCache = null;
 
   function duelState() {
     if (!state.__duel) {
-      state.__duel = { mode: 'tools', tab: 'collection', deck: [], detail: null, relay: '', query: '', series: 'all' };
+      state.__duel = {
+        mode: 'tools',
+        tab: 'collection',
+        deck: [],
+        detail: null,
+        relay: '',
+        query: '',
+        series: 'all',
+        ownedOnly: false,
+        code: '',
+        match: null,
+        net: null
+      };
     }
     return state.__duel;
   }
 
+  function duelData() {
+    return (typeof window !== 'undefined' && window.KYARA_DUEL_DATA) || null;
+  }
+
+  function duelEngine() {
+    const E = typeof window !== 'undefined' ? window.KYARA_DUEL_ENGINE : null;
+    return E && typeof E.createMatch === 'function' && typeof E.legalActions === 'function' ? E : null;
+  }
+
+  function duelNetApi() {
+    const N = typeof window !== 'undefined' ? window.KYARA_DUEL_NET : null;
+    return N && typeof N.connect === 'function' ? N : null;
+  }
+
+  /** Index des cartes : liste des Mythiques jouables + accès par id (toutes raretés). */
+  function duelCardIndex() {
+    const data = duelData();
+    const src = data?.champions;
+    if (!Array.isArray(src)) return { src: null, list: [], byId: new Map() };
+    if (duelCardsCache?.src === src) return duelCardsCache;
+    let list = null;
+    const E = duelEngine();
+    if (E && typeof E.mythics === 'function') {
+      try {
+        const ids = new Set((E.mythics(data) ?? []).map((card) => String(card?.id)));
+        if (ids.size) list = src.filter((card) => ids.has(String(card.id)));
+      } catch {
+        list = null;
+      }
+    }
+    if (!list) list = src.filter((card) => String(card?.rarity ?? '').toUpperCase() === 'M');
+    duelCardsCache = { src, list, byId: new Map(src.map((card) => [String(card.id), card])) };
+    return duelCardsCache;
+  }
+
+  /** Cartes jouables du duel v1 : les Mythiques uniquement. */
   function duelCards() {
-    return (typeof window !== 'undefined' && window.KYARA_DUEL_DATA?.champions) || [];
+    return duelCardIndex().list;
   }
 
   function duelOwnedIds() {
@@ -2753,25 +2835,58 @@
   }
 
   function duelCardById(id) {
-    return duelCards().find((card) => String(card.id) === String(id)) ?? null;
+    return duelCardIndex().byId.get(String(id)) ?? null;
+  }
+
+  function duelIsMythic(id) {
+    return duelCards().some((card) => String(card.id) === String(id));
+  }
+
+  /** Identifiants du deck au type d'origine des données (le moteur compare des ids de carte). */
+  function duelDeckIds(ids) {
+    return ids.map((id) => duelCardById(id)?.id ?? id);
+  }
+
+  function duelPlayerName() {
+    const user = state.user ?? {};
+    return String(user.pseudo ?? user.username ?? user.name ?? '').trim() || 'Joueur';
+  }
+
+  function duelKindLabel(kind) {
+    return kind === 'support' ? 'soutien' : kind === 'ultimate' ? 'ultime' : 'attaque';
+  }
+
+  function duelStatusText(apply) {
+    return Object.entries(apply ?? {})
+      .map(([key, turns]) => {
+        const label = DUEL_STATUS_LABELS[key] ?? key;
+        return key === 'haste' || turns === true ? label.toLowerCase() : `${label.toLowerCase()} ${turns}`;
+      })
+      .join(', ');
   }
 
   function duelEffectText(move) {
     const parts = [];
     if (move.damage) parts.push(`${move.damage} dégâts`);
     if (move.randomDamage) parts.push(`${move.randomDamage[0]}–${move.randomDamage[1]} dégâts aléatoires`);
+    if (move.bonusIfLow) parts.push(`+${move.bonusIfLow} dégâts sous 50 % PV`);
     if (move.heal) parts.push(`soin ${move.heal}`);
     if (move.guard) parts.push(`garde ${move.guard}`);
     if (move.buff) parts.push(`+${move.buff} dégâts préparés`);
+    if (move.selfAtk) parts.push(`+${move.selfAtk} ATQ (lanceur)`);
     if (move.teamAtk) parts.push(`+${move.teamAtk} ATQ équipe`);
     if (move.healTeam) parts.push(`soin équipe ${move.healTeam}`);
     if (move.healTeamFull) parts.push('soins équipe complets');
-    if (move.teamHp) parts.push(`−${move.teamHp} PV équipe`);
-    if (move.recoil) parts.push(`−${move.recoil} PV`);
-    if (move.skipFoe) parts.push('sonne la cible');
+    if (move.teamHp) parts.push(`−${move.teamHp} PV aux autres alliés`);
+    if (move.recoil) parts.push(`−${move.recoil} PV (lanceur)`);
+    if (move.apply) parts.push(`cible : ${duelStatusText(move.apply)}`);
+    if (move.selfApply) parts.push(`lanceur : ${duelStatusText(move.selfApply)}`);
+    if (move.cleanse) parts.push('dissipe poison, faiblesse et malédiction');
+    if (move.sacrifice) parts.push('sacrifie l’allié le plus faible');
+    if (move.skipFoe) parts.push('l’adversaire saute son prochain tour');
     if (move.attackBlock) parts.push('annule la prochaine attaque subie');
-    if (move.invincible) parts.push(`invulnérable ${move.invincible} tours`);
-    if (move.disableTurns) parts.push(`ne peut plus attaquer ${move.disableTurns} tours`);
+    if (move.invincible) parts.push(`invulnérable ${move.invincible} manche(s)`);
+    if (move.disableTurns) parts.push(`ne peut plus attaquer ${move.disableTurns} tour(s)`);
     if (move.saveLethal) parts.push('survit une fois à un coup létal');
     if (move.instakill) parts.push(`abat ${move.instakill.join(' / ')}`);
     if (move.reviveAlly) parts.push('ressuscite un allié tombé, puis succombe');
@@ -2779,11 +2894,40 @@
     return parts.join(' · ');
   }
 
+  /**
+   * Règles en vigueur : celles copiées dans l'état du duel en cours (`state.rules`),
+   * sinon les constantes du moteur (`RULES`).
+   */
+  function duelRulesNow() {
+    return state.__duel?.match?.state?.rules ?? duelEngine()?.RULES ?? {};
+  }
+
+  function duelRuleValue(key, fallback) {
+    const value = duelRulesNow()[key];
+    return value != null && Number.isFinite(Number(value)) ? Number(value) : fallback;
+  }
+
+  /**
+   * Coût en chakra d'une capacité : celui porté par la capacité du moteur (`move.cost`),
+   * sinon `RULES.attackCost / supportCost / ultimateCost`, sinon les valeurs de la spécification.
+   */
+  function duelMoveCost(move) {
+    if (move?.cost != null && Number.isFinite(Number(move.cost))) return Number(move.cost);
+    const kind = move?.kind === 'support' || move?.kind === 'ultimate' ? move.kind : 'attack';
+    return duelRuleValue(`${kind}Cost`, { attack: 0, support: 1, ultimate: 3 }[kind]);
+  }
+
+  function duelMovesOf(champ) {
+    if (Array.isArray(champ?.attacks) && champ.attacks.length) return champ.attacks;
+    if (Array.isArray(champ?.moves) && champ.moves.length) return champ.moves;
+    return duelCardById(champ?.id)?.attacks ?? [];
+  }
+
   function duelCardModal(card) {
     const attacks = (card.attacks ?? [])
       .map(
         (move) =>
-          `<li><b>${esc(move.name)}</b> <i>${esc(move.kind === 'support' ? 'soutien' : move.kind === 'ultimate' ? 'ultime' : 'attaque')}</i><br><small>${esc(move.desc ?? '')}</small><br><span>${esc(duelEffectText(move))}</span></li>`
+          `<li><b>${esc(move.name)}</b> <i>${esc(duelKindLabel(move.kind))} · ${fmt(duelMoveCost(move))} chakra</i><br><small>${esc(move.desc ?? '')}</small><br><span>${esc(duelEffectText(move))}</span></li>`
       )
       .join('');
     return `<div class="kp-modal-head"><b>${esc(card.name)}</b><button class="kp-icon-btn" type="button" data-act="duel-close-modal">✕</button></div>
@@ -2792,7 +2936,7 @@
           <img src="${esc(card.image)}" alt="">
           <div>
             <div class="kp-duel-modal-tags">${esc(card.rarityLabel ?? '')} · ${esc(card.role ?? '')} · ${esc(card.series ?? '')}</div>
-            <div class="kp-duel-modal-stats"><b>${card.hp} PV</b><b>ATQ ${card.atk}</b></div>
+            <div class="kp-duel-modal-stats"><b>${fmt(card.hp)} PV</b><b>ATQ ${fmt(card.atk)}</b>${card.speed != null ? `<b>Vitesse ${fmt(card.speed)}</b>` : ''}</div>
             <ul>${attacks}</ul>
             <div class="kp-duel-passive"><b>${esc(card.passive?.name ?? 'Passif')}</b> — ${esc(card.passive?.desc ?? '')}</div>
           </div>
@@ -2814,41 +2958,538 @@
       .join('');
   }
 
+  /* --- Préférences (relais, deck) ------------------------------------ */
+
+  async function loadDuelPrefs() {
+    const saved = await storageGet(DUEL_KEY, null);
+    if (!saved || typeof saved !== 'object') return;
+    const duel = duelState();
+    if (typeof saved.relay === 'string' && !duel.relay) duel.relay = saved.relay;
+    if (Array.isArray(saved.deck) && !duel.deck.length) {
+      duel.deck = [...new Set(saved.deck.map(String))].filter((id) => duelIsMythic(id)).slice(0, DUEL_DECK_SIZE);
+    }
+    render();
+  }
+
+  function persistDuelPrefs() {
+    if (duelPersistTimer) clearTimeout(duelPersistTimer);
+    duelPersistTimer = setTimeout(() => {
+      duelPersistTimer = null;
+      const duel = duelState();
+      storageSet(DUEL_KEY, { relay: duel.relay, deck: duel.deck });
+    }, 400);
+  }
+
+  /** Complète un deck au hasard (cartes possédées d'abord si `preferOwned`). */
+  function duelFillDeck(deck, { preferOwned = false } = {}) {
+    const out = deck.filter((id) => duelIsMythic(id)).slice(0, DUEL_DECK_SIZE);
+    const pool = duelCards().map((card) => String(card.id));
+    const owned = preferOwned ? duelOwnedIds() : new Set();
+    const shuffle = (list) => {
+      const copy = [...list];
+      for (let i = copy.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+      }
+      return copy;
+    };
+    const candidates = [
+      ...shuffle(pool.filter((id) => owned.has(id))),
+      ...shuffle(pool.filter((id) => !owned.has(id)))
+    ];
+    for (const id of candidates) {
+      if (out.length >= DUEL_DECK_SIZE) break;
+      if (!out.includes(id)) out.push(id);
+    }
+    return out;
+  }
+
+  /** Raison pour laquelle le deck ne peut pas partir en ligne ('' si prêt). */
+  function duelOnlineDeckIssue() {
+    const duel = duelState();
+    if (!state.user) return 'Connecte-toi à kyara.games : en ligne, le deck vient de ta collection.';
+    if (duel.deck.length !== DUEL_DECK_SIZE) {
+      return `Le deck en ligne doit contenir ${DUEL_DECK_SIZE} Mythiques possédées (actuellement ${duel.deck.length}/${DUEL_DECK_SIZE}).`;
+    }
+    const owned = duelOwnedIds();
+    const missing = duel.deck.filter((id) => !owned.has(id));
+    if (missing.length) {
+      const names = missing.map((id) => duelCardById(id)?.name ?? `#${id}`).join(', ');
+      return `Non possédée(s) : ${names}. Ces cartes ne servent qu’à l’entraînement.`;
+    }
+    const E = duelEngine();
+    if (E && typeof E.validateDeck === 'function') {
+      try {
+        const check = E.validateDeck(duelData(), duelDeckIds(duel.deck));
+        if (check && check.ok === false) return String(check.error || 'Deck refusé par le moteur.');
+      } catch (err) {
+        return String(err?.message || err);
+      }
+    }
+    return '';
+  }
+
+  /* --- Déroulé d'un duel --------------------------------------------- */
+
+  function duelSafe(fn, fallback) {
+    try {
+      return fn();
+    } catch {
+      return fallback;
+    }
+  }
+
+  function duelMatchOver(match) {
+    if (!match) return true;
+    if (match.ended) return true;
+    if (match.state?.winner != null) return true;
+    const E = duelEngine();
+    if (E && match.state) return duelSafe(() => E.currentPlayer(match.state), null) === null;
+    return false;
+  }
+
+  function duelWinner(match) {
+    if (match?.ended && match.ended.winner !== undefined && match.ended.winner !== null) return match.ended.winner;
+    return match?.state?.winner ?? null;
+  }
+
+  function duelDescribe(event) {
+    if (event == null) return '';
+    if (typeof event === 'string') return event;
+    const E = duelEngine();
+    if (E && typeof E.describeEvent === 'function') {
+      const text = duelSafe(() => E.describeEvent(event), '');
+      if (text) return String(text);
+    }
+    return String(event.text ?? event.message ?? '');
+  }
+
+  function duelAppendEvents(match, events) {
+    if (!Array.isArray(events)) return;
+    for (const event of events) {
+      const text = duelDescribe(event);
+      if (!text) continue;
+      // Lignes déjà rédigées (journal porté par l'état) : seules les manches sont reconnues.
+      const type =
+        typeof event === 'string'
+          ? text.startsWith('— Manche') ? 'round' : ''
+          : String(event?.type ?? '').replace(/[^a-z]/gi, '').toLowerCase();
+      match.log.push({ text, type });
+      if (event?.type === 'end' && !match.ended && event.reason) {
+        match.endReason = String(event.reason);
+      }
+    }
+    if (match.log.length > DUEL_LOG_MAX) match.log.splice(0, match.log.length - DUEL_LOG_MAX);
+  }
+
+  /** Premier état reçu sans événements : on reprend le journal porté par l'état. */
+  function duelSeedLog(match) {
+    if (match.log.length || !Array.isArray(match.state?.log)) return;
+    duelAppendEvents(match, match.state.log.slice(-DUEL_LOG_MAX));
+  }
+
+  function duelStopAi() {
+    if (duelAiTimer) clearTimeout(duelAiTimer);
+    duelAiTimer = null;
+  }
+
+  function duelStartPractice() {
+    const E = duelEngine();
+    const duel = duelState();
+    if (!E) {
+      notify('Moteur du duel indisponible : content/duel-engine.js n’est pas chargé.');
+      return;
+    }
+    if (duel.match?.kind === 'online' && !duelMatchOver(duel.match)) {
+      notify('Un duel en ligne est en cours : termine-le ou abandonne-le d’abord.');
+      return;
+    }
+    if (!duelCards().length) {
+      notify('Données du duel indisponibles : content/duel-data.js n’est pas chargé.');
+      return;
+    }
+    duelStopAi();
+    const mine = duelFillDeck(duel.deck);
+    const foe = duelFillDeck([]);
+    const seed = Math.floor(Math.random() * 0xffffffff) >>> 0;
+    let created;
+    try {
+      created = E.createMatch({
+        data: duelData(),
+        seed,
+        players: [
+          { id: 'joueur', name: duelPlayerName(), deck: duelDeckIds(mine) },
+          { id: 'ia', name: 'IA', deck: duelDeckIds(foe) }
+        ]
+      });
+    } catch (err) {
+      notify(`Impossible de lancer l’entraînement : ${String(err?.message || err)}`);
+      return;
+    }
+    duel.match = {
+      kind: 'practice',
+      state: created,
+      you: 0,
+      log: [],
+      sel: { actor: null, move: null },
+      ended: null,
+      endReason: '',
+      error: '',
+      pending: false,
+      filled: duel.deck.length < DUEL_DECK_SIZE
+    };
+    duelSeedLog(duel.match);
+    duel.tab = 'combat';
+    render();
+    duelScheduleAi();
+  }
+
+  function duelApplyLocal(match, player, action) {
+    const E = duelEngine();
+    const result = E.applyAction(match.state, player, action);
+    match.state = result?.state ?? match.state;
+    duelAppendEvents(match, result?.events);
+    match.sel = { actor: null, move: null };
+    match.error = '';
+  }
+
+  function duelScheduleAi() {
+    duelStopAi();
+    const match = duelState().match;
+    const E = duelEngine();
+    if (!E || !match || match.kind !== 'practice' || duelMatchOver(match)) return;
+    const turn = duelSafe(() => E.currentPlayer(match.state), null);
+    if (turn == null || turn === match.you) return;
+    duelAiTimer = setTimeout(() => {
+      duelAiTimer = null;
+      if (duelState().match !== match || duelMatchOver(match)) return;
+      try {
+        duelApplyLocal(match, turn, E.chooseAction(match.state, turn));
+      } catch (err) {
+        // L'IA ne doit jamais bloquer la partie : elle passe son tour.
+        try {
+          duelApplyLocal(match, turn, { type: 'pass' });
+          match.error = `L’IA a passé son tour (${String(err?.message || err)}).`;
+        } catch (err2) {
+          match.error = `L’IA ne peut pas jouer : ${String(err2?.message || err2)}`;
+          render();
+          return;
+        }
+      }
+      render();
+      duelScheduleAi();
+    }, DUEL_AI_DELAY);
+  }
+
+  /** Joue une action du joueur local (entraînement : moteur local ; en ligne : relais). */
+  function duelPlay(action) {
+    const duel = duelState();
+    const match = duel.match;
+    if (!match || duelMatchOver(match) || match.pending) return;
+    if (match.kind === 'practice') {
+      try {
+        duelApplyLocal(match, match.you, action);
+      } catch (err) {
+        match.error = String(err?.message || err);
+      }
+      render();
+      duelScheduleAi();
+      return;
+    }
+    const client = duel.net?.client;
+    if (!client) {
+      match.error = 'Connexion au relais perdue.';
+      render();
+      return;
+    }
+    try {
+      client.act(action);
+      match.pending = true;
+      match.sel = { actor: null, move: null };
+      match.error = '';
+    } catch (err) {
+      match.error = `Envoi impossible : ${String(err?.message || err)}`;
+    }
+    render();
+  }
+
+  function duelForfeit() {
+    const duel = duelState();
+    const match = duel.match;
+    if (!match || duelMatchOver(match)) return;
+    if (match.kind === 'online') {
+      // Quitter le salon pendant le duel = abandon côté relais ; plus de revanche possible ici.
+      if (duel.net) duel.net.left = true;
+      try {
+        duel.net?.client?.leave();
+      } catch {
+        /* connexion déjà fermée */
+      }
+    }
+    duelStopAi();
+    // Entraînement : le moteur sait clore le duel par abandon (sinon fin locale).
+    const E = duelEngine();
+    if (match.kind === 'practice' && E && typeof E.forfeit === 'function') {
+      try {
+        const result = E.forfeit(match.state, match.you, 'forfeit');
+        match.state = result?.state ?? match.state;
+        duelAppendEvents(match, result?.events);
+      } catch {
+        /* repli : fin locale ci-dessous */
+      }
+    }
+    match.ended = { winner: 1 - match.you, reason: 'forfeit' };
+    match.deadlineAt = null;
+    match.pending = false;
+    if (match.kind !== 'practice' || !E?.forfeit) {
+      match.log.push({ text: `${duelPlayerName()} abandonne le duel.`, type: 'end' });
+    }
+    render();
+  }
+
+  /** Revanche en ligne dans le même salon (si le relais le permet), sinon nouveau salon. */
+  function duelRematch() {
+    const duel = duelState();
+    const net = duel.net;
+    const client = net?.client;
+    if (
+      client &&
+      typeof client.rematch === 'function' &&
+      !net.left &&
+      (net.room?.players?.length ?? 0) >= 2 &&
+      net.room?.status === 'ended' &&
+      duelNetStatus(net) !== 'closed'
+    ) {
+      try {
+        client.rematch();
+        net.rematchAsked = true;
+        net.error = '';
+        if (duel.match) duel.match.rematchAsked = true;
+        render();
+        return;
+      } catch {
+        /* repli : nouveau salon */
+      }
+    }
+    duel.match = null;
+    duel.tab = 'duel';
+    duelConnect({ type: 'create' });
+    render();
+  }
+
+  /* --- Réseau (relais WebSocket) ------------------------------------- */
+
+  function duelCloseNet() {
+    const duel = duelState();
+    const net = duel.net;
+    duel.net = null;
+    if (!net?.client) return;
+    try {
+      net.client.close();
+    } catch {
+      /* déjà fermé */
+    }
+  }
+
+  function duelNetStatus(net) {
+    if (!net) return 'closed';
+    const status = String(net.client?.status ?? net.status ?? 'closed');
+    return DUEL_NET_STATUS[status] ? status : 'closed';
+  }
+
+  function duelConnect(intent) {
+    const duel = duelState();
+    const N = duelNetApi();
+    if (!N) {
+      notify('Client réseau indisponible : content/duel-net.js n’est pas chargé.');
+      return;
+    }
+    const relayInput = qs('[data-role="duel-relay"]');
+    if (relayInput) duel.relay = String(relayInput.value ?? '').trim();
+    const relay = String(duel.relay ?? '').trim();
+    persistDuelPrefs();
+    if (!/^wss?:\/\/\S+$/i.test(relay)) {
+      notify('Adresse du relais invalide : elle doit commencer par wss:// (ou ws:// en local).');
+      return;
+    }
+    if (intent.type === 'join' && !/^[A-Z]{5}$/.test(intent.code)) {
+      notify('Le code du salon fait 5 lettres.');
+      return;
+    }
+    const issue = duelOnlineDeckIssue();
+    if (issue) {
+      notify(issue);
+      return;
+    }
+    if (duel.match && !duelMatchOver(duel.match)) {
+      notify('Un duel est en cours : termine-le ou abandonne-le d’abord.');
+      return;
+    }
+    duelStopAi();
+    duelCloseNet();
+    const net = { client: null, status: 'connecting', relay, room: null, error: '', peer: '', intent, intentSent: false };
+    duel.net = net;
+    try {
+      net.client = N.connect(relay, {
+        name: duelPlayerName(),
+        deck: duelDeckIds(duel.deck),
+        onEvent: (msg) => duelOnNet(net, msg)
+      });
+    } catch (err) {
+      net.status = 'closed';
+      net.error = `Connexion impossible : ${String(err?.message || err)}`;
+    }
+    // Le client met les messages en file jusqu'à l'ouverture (après son « hello »).
+    duelSendIntent(net);
+    render();
+  }
+
+  function duelSendIntent(net) {
+    if (!net?.client || !net.intent || net.intentSent) return;
+    net.intentSent = true;
+    try {
+      if (net.intent.type === 'join') net.client.join(net.intent.code);
+      else net.client.create();
+    } catch (err) {
+      net.error = `Envoi impossible : ${String(err?.message || err)}`;
+    }
+  }
+
+  function duelOnNet(net, msg) {
+    const duel = duelState();
+    if (duel.net !== net || !msg || typeof msg !== 'object') return;
+    switch (msg.t) {
+      case 'welcome':
+        net.error = '';
+        duelSendIntent(net);
+        break;
+      case 'net': {
+        // Changement d'état de la connexion (événement local du client).
+        if (msg.status === 'open' && net.error && !net.room) net.error = '';
+        if (msg.status !== 'closed') {
+          duelTick();
+          return;
+        }
+        if (!net.error) net.error = 'Connexion au relais perdue.';
+        break;
+      }
+      case 'room':
+        net.room = {
+          code: String(msg.code ?? ''),
+          players: Array.isArray(msg.players) ? msg.players : [],
+          status: String(msg.status ?? 'waiting')
+        };
+        if (net.room.status !== 'ended') net.rematchAsked = false;
+        break;
+      case 'state':
+        duelOnNetState(net, msg);
+        break;
+      case 'end': {
+        const match = duel.match;
+        if (match?.kind === 'online' && match.net === net) {
+          match.ended = { winner: msg.winner ?? null, reason: String(msg.reason ?? '') };
+          match.deadlineAt = null;
+          match.pending = false;
+        }
+        if (net.room) net.room.status = 'ended';
+        break;
+      }
+      case 'error': {
+        net.error = String(msg.message || msg.code || 'Erreur du relais.');
+        const match = duel.match;
+        if (match?.kind === 'online' && match.net === net) {
+          match.pending = false;
+          match.error = net.error;
+        }
+        break;
+      }
+      case 'peer':
+        net.peer = msg.status === 'left' ? 'left' : 'back';
+        break;
+      case 'pong':
+        return;
+      default:
+        return;
+    }
+    render();
+  }
+
+  function duelOnNetState(net, msg) {
+    const duel = duelState();
+    let match = duel.match;
+    // Nouveau duel (premier état, ou revanche après un duel terminé).
+    const fresh = msg.state && (msg.state.winner === null || msg.state.winner === undefined);
+    if (!match || match.kind !== 'online' || match.net !== net || (fresh && duelMatchOver(match))) {
+      duelStopAi();
+      match = {
+        kind: 'online',
+        net,
+        state: msg.state,
+        you: 0,
+        log: [],
+        sel: { actor: null, move: null },
+        ended: null,
+        endReason: '',
+        error: '',
+        pending: false
+      };
+      duel.match = match;
+      duel.tab = 'combat';
+      if (!Array.isArray(msg.events) || !msg.events.length) duelSeedLog(match);
+    }
+    match.state = msg.state ?? match.state;
+    match.you = msg.you === 1 ? 1 : 0;
+    match.seq = msg.seq;
+    match.pending = false;
+    match.sel = { actor: null, move: null };
+    const left = Number(msg.deadline);
+    match.deadlineAt = Number.isFinite(left) && left > 0 ? Date.now() + left : null;
+    duelAppendEvents(match, msg.events);
+    if (net.peer === 'back') net.peer = '';
+  }
+
+  /** Mise à jour légère, sans re-rendu : minuteur et statut de connexion. */
+  function duelTick() {
+    const duel = state.__duel;
+    if (!duel || !state.open || duel.mode !== 'duel' || !shadow) return;
+    const timer = qs('[data-role="duel-timer"]');
+    if (timer && duel.match?.deadlineAt) {
+      const left = Math.max(0, Math.ceil((duel.match.deadlineAt - Date.now()) / 1000));
+      timer.textContent = `${left} s`;
+      timer.classList.toggle('is-urgent', left <= 10);
+    }
+    const status = qs('[data-role="duel-net-status"]');
+    if (status && duel.net) {
+      const key = duelNetStatus(duel.net);
+      status.textContent = DUEL_NET_STATUS[key];
+      status.dataset.status = key;
+    }
+  }
+
+  /* --- Vues ----------------------------------------------------------- */
+
+  function duelDeckSlots(deck, { markUnowned = false } = {}) {
+    const owned = markUnowned ? duelOwnedIds() : null;
+    return Array.from({ length: DUEL_DECK_SIZE }, (_, index) => {
+      const card = deck[index] ? duelCardById(deck[index]) : null;
+      if (!card) return '<span class="kp-deck-slot"><span>—</span></span>';
+      const unowned = owned && !owned.has(String(card.id));
+      return `<span class="kp-deck-slot is-full ${unowned ? 'is-unowned' : ''}" title="${unowned ? 'Non possédée : entraînement uniquement' : ''}"><img src="${esc(card.image)}" alt=""><span>${esc(card.name)}</span></span>`;
+    }).join('');
+  }
+
   function viewDuelCollection() {
     const duel = duelState();
     const cards = duelCards();
     const owned = duelOwnedIds();
     const deck = duel.deck;
-    const detail = duel.detail ? duelCardById(duel.detail) : null;
-    const slots = Array.from({ length: 5 }, (_, index) => {
-      const card = deck[index] ? duelCardById(deck[index]) : null;
-      return card
-        ? `<span class="kp-deck-slot is-full"><img src="${esc(card.image)}" alt=""><span>${esc(card.name)}</span></span>`
-        : `<span class="kp-deck-slot"><span>—</span></span>`;
-    }).join('');
-
-    const detailHtml = detail
-      ? `<div class="kp-duel-detail">
-          <img src="${esc(detail.image)}" alt="">
-          <div>
-            <b>${esc(detail.name)}</b>
-            <small>${esc(detail.rarityLabel ?? '')} · ${esc(detail.role ?? '')} · ${esc(detail.series ?? '')}</small>
-            <div class="kp-duel-stats">${detail.hp} PV · ATQ ${detail.atk}</div>
-            <ul>${(detail.attacks ?? [])
-              .map(
-                (move) =>
-                  `<li><b>${esc(move.name)}</b> <i>${esc(move.kind === 'support' ? 'soutien' : move.kind === 'ultimate' ? 'ultime' : 'attaque')}</i><br><small>${esc(move.desc ?? '')}</small><br><span>${esc(duelEffectText(move))}</span></li>`
-              )
-              .join('')}</ul>
-            <div class="kp-duel-passive"><b>${esc(detail.passive?.name ?? 'Passif')}</b> — ${esc(detail.passive?.desc ?? '')}</div>
-          </div>
-        </div>`
-      : '';
+    const ownedCount = cards.filter((card) => owned.has(String(card.id))).length;
 
     const query = String(duel.query ?? '').trim().toLowerCase();
     const series = String(duel.series ?? 'all');
     const seriesList = [...new Set(cards.map((card) => card.series).filter(Boolean))].sort((a, b) => a.localeCompare(b));
     const filtered = cards.filter((card) => {
+      if (duel.ownedOnly && !owned.has(String(card.id))) return false;
       if (series !== 'all' && card.series !== series) return false;
       if (query && !String(card.name).toLowerCase().includes(query)) return false;
       return true;
@@ -2858,62 +3499,457 @@
       .map((card) => {
         const mine = owned.has(String(card.id));
         const picked = deck.includes(String(card.id));
-        return `<div class="kp-duel-card ${mine ? '' : 'is-locked'} ${picked ? 'is-picked' : ''}" data-act="duel-card" data-id="${esc(String(card.id))}">
+        return `<div class="kp-duel-card ${mine ? '' : 'is-unowned'} ${picked ? 'is-picked' : ''}" data-act="duel-card" data-id="${esc(String(card.id))}">
           <img src="${esc(card.image)}" alt="" loading="lazy">
           <b>${esc(card.name)}</b>
           <small>${esc(card.rarityLabel ?? '')} · ${esc(card.role ?? '')}</small>
-          <small>${card.hp} PV · ATQ ${card.atk}</small>
-          ${
-            mine
-              ? `<button class="kp-deck-add" type="button" data-act="duel-pick" data-id="${esc(String(card.id))}">${picked ? '✓' : '+'}</button>`
-              : '<span class="kp-duel-lock">non possédée</span>'
-          }
+          <small>${fmt(card.hp)} PV · ATQ ${fmt(card.atk)}</small>
+          <button class="kp-deck-add" type="button" data-act="duel-pick" data-id="${esc(String(card.id))}" title="${picked ? 'Retirer du deck' : 'Ajouter au deck'}">${picked ? '✓' : '+'}</button>
+          ${mine ? '' : '<span class="kp-duel-lock">non possédée · entraînement</span>'}
         </div>`;
       })
       .join('');
 
-    return `<div class="kp-duel-head"><b>Collection</b><span>${cards.length} cartes · ${deck.length}/5 dans le deck</span></div>
-      <div class="kp-deck-bar">${slots}<button class="kp-btn" type="button" data-act="duel-clear">Vider</button></div>
+    const unownedInDeck = deck.filter((id) => !owned.has(id)).length;
+    const deckNote = unownedInDeck
+      ? `<div class="kp-duel-note is-warn">${fmt(unownedInDeck)} carte(s) non possédée(s) : ce deck ne sert qu’à l’entraînement. En ligne, seules tes Mythiques possédées sont acceptées.</div>`
+      : '';
+
+    return `<div class="kp-duel-head"><b>Collection</b><span>${fmt(cards.length)} Mythiques · ${fmt(ownedCount)} possédée(s) · ${fmt(deck.length)}/${DUEL_DECK_SIZE} dans le deck</span></div>
+      <div class="kp-deck-bar">${duelDeckSlots(deck, { markUnowned: true })}
+        <div class="kp-deck-actions">
+          <button class="kp-btn" type="button" data-act="duel-fill" ${deck.length >= DUEL_DECK_SIZE || !cards.length ? 'disabled' : ''} title="Complète avec tes Mythiques possédées en priorité">Compléter au hasard</button>
+          <button class="kp-btn is-ghost" type="button" data-act="duel-clear" ${deck.length ? '' : 'disabled'}>Vider</button>
+        </div>
+      </div>
+      ${deckNote}
       <div class="kp-duel-search">
-        <input data-role="duel-query" placeholder="Rechercher une carte" value="${esc(duel.query ?? '')}">
+        <input data-role="duel-query" placeholder="Rechercher une Mythique" value="${esc(duel.query ?? '')}">
         <select data-role="duel-series">
           <option value="all">Toutes les séries</option>
           ${seriesList.map((name) => `<option value="${esc(name)}" ${series === name ? 'selected' : ''}>${esc(name)}</option>`).join('')}
         </select>
+        <label class="kp-duel-check"><input type="checkbox" data-role="duel-owned" ${duel.ownedOnly ? 'checked' : ''}> Possédées</label>
       </div>
-      <div class="kp-duel-count">${filtered.length} carte(s) affichée(s)</div>
-      ${detailHtml}
+      <div class="kp-duel-count">${fmt(filtered.length)} carte(s) affichée(s)${cards.length ? '' : ' — données du duel indisponibles (content/duel-data.js)'}</div>
       <div class="kp-duel-grid">${grid}</div>`;
   }
 
   function viewDuelRooms() {
     const duel = duelState();
-    return `<div class="kp-duel-head"><b>Duel</b><span>crée ou rejoins un salon</span></div>
-      <div class="kp-duel-room">
-        <label class="kp-duel-field">Adresse du relais
-          <input data-role="duel-relay" placeholder="wss://…" value="${esc(duel.relay)}">
-        </label>
-        <div class="kp-duel-row">
-          <button class="kp-btn is-primary" type="button" data-act="duel-create">Créer un salon</button>
-          <input data-role="duel-code" placeholder="Code (5 lettres)" maxlength="5">
-          <button class="kp-btn" type="button" data-act="duel-join">Rejoindre</button>
-        </div>
-        <p class="kp-duel-note">Le relais WebSocket n'est pas encore configuré : renseigne l'adresse Railway dès qu'elle est disponible.</p>
+    const E = duelEngine();
+    const N = duelNetApi();
+    const match = duel.match;
+    const live = match && !duelMatchOver(match);
+    const issue = duelOnlineDeckIssue();
+    const net = duel.net;
+
+    const resume = live
+      ? `<div class="kp-duel-live-banner"><span>Un duel ${match.kind === 'practice' ? 'd’entraînement' : 'en ligne'} est en cours.</span><button class="kp-btn is-primary" type="button" data-act="duel-tab" data-tab="combat">Reprendre le combat</button></div>`
+      : '';
+
+    const practiceNote = !E
+      ? '<p class="kp-duel-note is-bad">Moteur du duel non chargé (content/duel-engine.js) : entraînement indisponible.</p>'
+      : duel.deck.length < DUEL_DECK_SIZE
+        ? `<p class="kp-duel-note">Ton deck compte ${fmt(duel.deck.length)}/${DUEL_DECK_SIZE} cartes : il sera complété au hasard pour cette partie.</p>`
+        : '<p class="kp-duel-note">N’importe quelles Mythiques, possédées ou non. Tout se joue sur ton navigateur, sans relais.</p>';
+
+    let room = '';
+    if (net) {
+      const status = duelNetStatus(net);
+      const players = (net.room?.players ?? [])
+        .map(
+          (player) =>
+            `<li><b>${esc(player?.name ?? '—')}</b><span class="${player?.ready ? 'is-ok' : ''}">${player?.ready ? 'prêt' : 'en attente'}</span></li>`
+        )
+        .join('');
+      const roomStatus = { waiting: 'en attente d’un adversaire', playing: 'duel en cours', ended: 'terminé' }[net.room?.status] ?? '';
+      room = `<div class="kp-duel-roombox">
+          <div class="kp-duel-roomline">
+            <span>Relais : <b class="kp-duel-netstatus" data-role="duel-net-status" data-status="${esc(status)}">${esc(DUEL_NET_STATUS[status])}</b></span>
+            <button class="kp-btn is-ghost" type="button" data-act="duel-leave-room">Quitter</button>
+          </div>
+          ${
+            net.room?.code
+              ? `<div class="kp-duel-code"><span>Code du salon</span><b>${esc(net.room.code)}</b><button class="kp-btn" type="button" data-act="duel-copy-code">Copier</button></div>
+                 <div class="kp-duel-roomline"><span>Salon : ${esc(roomStatus)}</span></div>
+                 <ul class="kp-duel-players">${players}</ul>`
+              : net.error
+                ? ''
+                : `<div class="kp-duel-note">${net.intent?.type === 'join' ? `Connexion au salon ${esc(net.intent.code)}…` : 'Création du salon…'}</div>`
+          }
+          ${net.peer === 'left' ? '<div class="kp-duel-note is-warn">Ton adversaire s’est déconnecté : il a 60 s pour revenir.</div>' : ''}
+          ${net.error ? `<div class="kp-duel-note is-bad">${esc(net.error)}</div>` : ''}
+        </div>`;
+    }
+
+    return `<div class="kp-duel-head"><b>Duel</b><span>arène 5 contre 5 · Mythiques</span></div>
+      ${resume}
+      <div class="kp-duel-lobby">
+        <section class="kp-duel-panel">
+          <h4>Ton deck</h4>
+          <div class="kp-deck-bar">${duelDeckSlots(duel.deck, { markUnowned: true })}</div>
+          <div class="kp-duel-row">
+            <button class="kp-btn" type="button" data-act="duel-tab" data-tab="collection">Modifier le deck</button>
+            ${duel.deck.length < DUEL_DECK_SIZE ? '<button class="kp-btn is-ghost" type="button" data-act="duel-fill">Compléter au hasard</button>' : ''}
+          </div>
+          <p class="kp-duel-note ${issue ? 'is-warn' : 'is-ok'}">${issue ? `En ligne : ${esc(issue)}` : 'Deck prêt pour le duel en ligne.'}</p>
+        </section>
+        <section class="kp-duel-panel is-practice">
+          <h4>Entraînement</h4>
+          ${practiceNote}
+          <button class="kp-btn is-primary" type="button" data-act="duel-practice" ${E && !live ? '' : 'disabled'}>Entraînement contre l’IA</button>
+        </section>
+        <section class="kp-duel-panel is-online">
+          <h4>En ligne</h4>
+          ${room}
+          <label class="kp-duel-field">Adresse du relais
+            <input data-role="duel-relay" placeholder="wss://…" value="${esc(duel.relay)}" spellcheck="false" autocomplete="off">
+          </label>
+          <div class="kp-duel-row">
+            <button class="kp-btn is-primary" type="button" data-act="duel-create" ${N && !live ? '' : 'disabled'}>Créer un salon</button>
+            <input data-role="duel-code" placeholder="CODE" maxlength="5" value="${esc(duel.code)}" spellcheck="false" autocomplete="off">
+            <button class="kp-btn" type="button" data-act="duel-join" ${N && !live ? '' : 'disabled'}>Rejoindre</button>
+          </div>
+          ${N ? '<p class="kp-duel-note">Crée un salon et partage son code de 5 lettres, ou saisis celui d’un ami. Tour limité à 60 s.</p>' : '<p class="kp-duel-note is-bad">Client réseau non chargé (content/duel-net.js) : duel en ligne indisponible.</p>'}
+        </section>
       </div>`;
   }
+
+  function duelChampTags(champ) {
+    const tags = [];
+    if (Number(champ.guard) > 0) tags.push(`<span class="kp-duel-tag is-guard">Garde ${fmt(champ.guard)}</span>`);
+    if (Number(champ.atkBonus) > 0) tags.push(`<span class="kp-duel-tag is-atk">+${fmt(champ.atkBonus)} ATQ</span>`);
+    if (Number(champ.buff) > 0) tags.push(`<span class="kp-duel-tag is-buff">+${fmt(champ.buff)} préparés</span>`);
+    for (const [key, value] of Object.entries(champ.statuses ?? {})) {
+      if (!value) continue;
+      const label = DUEL_STATUS_LABELS[key] ?? key;
+      const turns = typeof value === 'number' && key !== 'haste' ? ` ${fmt(value)}` : '';
+      tags.push(`<span class="kp-duel-tag is-${esc(String(key).replace(/[^a-z]/gi, ''))}">${esc(label)}${turns}</span>`);
+    }
+    if (Number(champ.invincible) > 0) tags.push(`<span class="kp-duel-tag is-guard">Invulnérable ${fmt(champ.invincible)}</span>`);
+    if (champ.attackBlock) tags.push('<span class="kp-duel-tag is-guard">Contre prêt</span>');
+    if (champ.saveLethal) tags.push('<span class="kp-duel-tag is-regen">Survie 1 PV</span>');
+    if (Number(champ.disabled) > 0) tags.push(`<span class="kp-duel-tag is-skip">Sans attaque ${fmt(champ.disabled)}</span>`);
+    if (champ.ultimateUsed) tags.push('<span class="kp-duel-tag is-ult">Ultime utilisé</span>');
+    return tags.join('');
+  }
+
+  function duelChampTile(champ, side, index, ctx) {
+    const alive = champ.alive !== false && Number(champ.hp) > 0;
+    const max = Math.max(1, Number(champ.maxHp ?? champ.hp ?? 1));
+    const hp = Math.max(0, Number(champ.hp ?? 0));
+    const pct = Math.max(0, Math.min(100, Math.round((hp / max) * 100)));
+    const hpClass = pct > 50 ? 'is-high' : pct > 25 ? 'is-mid' : 'is-low';
+    const card = duelCardById(champ.id);
+    const image = champ.image ?? card?.image ?? '';
+    const isTarget = ctx.targets.has(`${side}:${index}`);
+    const isActor = side === ctx.you && ctx.actors.has(index);
+    const isSelected = side === ctx.you && ctx.sel.actor === index;
+    let act = '';
+    if (isTarget) act = `data-act="duel-target" data-side="${side}" data-index="${index}"`;
+    else if (isActor && ctx.sel.move == null) act = `data-act="duel-actor" data-index="${index}"`;
+    else if (isActor) act = `data-act="duel-actor" data-index="${index}"`;
+    const classes = [
+      'kp-duel-champ',
+      alive ? '' : 'is-ko',
+      isTarget ? 'is-target' : '',
+      isActor && !isTarget ? 'is-actor' : '',
+      isSelected ? 'is-selected' : ''
+    ]
+      .filter(Boolean)
+      .join(' ');
+    return `<div class="${classes}" ${act}>
+        <div class="kp-duel-champ-art">
+          ${image ? `<img src="${esc(image)}" alt="" loading="lazy">` : ''}
+          ${alive ? '' : '<span class="kp-duel-ko">KO</span>'}
+          ${card ? `<button class="kp-duel-info" type="button" data-act="duel-card" data-id="${esc(String(card.id))}" title="Fiche de la carte">i</button>` : ''}
+        </div>
+        <b title="${esc(champ.name ?? card?.name ?? '')}">${esc(champ.name ?? card?.name ?? '—')}</b>
+        <div class="kp-duel-hp ${hpClass}"><i style="width:${pct}%"></i><span>${fmt(hp)} / ${fmt(max)}</span></div>
+        <div class="kp-duel-tags">${duelChampTags(champ)}</div>
+      </div>`;
+  }
+
+  function duelSideHtml(player, side, ctx, current) {
+    const maxChakra = duelRuleValue('maxChakra', 5);
+    const chakra = Math.max(0, Number(player?.chakra ?? 0));
+    const pips = Array.from(
+      { length: Math.max(maxChakra, chakra) },
+      (_, i) => `<i class="${i < chakra ? 'is-on' : ''}"></i>`
+    ).join('');
+    const champs = (player?.champions ?? []).map((champ, index) => duelChampTile(champ, side, index, ctx)).join('');
+    const mine = side === ctx.you;
+    return `<div class="kp-duel-side ${mine ? 'is-mine' : 'is-foe'} ${current === side ? 'is-turn' : ''}">
+        <div class="kp-duel-side-head">
+          <b>${esc(player?.name ?? (mine ? 'Toi' : 'Adversaire'))}</b>${mine ? '<small>(toi)</small>' : ''}
+          ${player?.skipNext ? '<span class="kp-duel-tag is-skip">saute son prochain tour</span>' : ''}
+          <span class="kp-duel-chakra" title="Chakra ${fmt(chakra)} / ${fmt(maxChakra)}">${pips}<em>${fmt(chakra)} chakra</em></span>
+        </div>
+        <div class="kp-duel-row5">${champs}</div>
+      </div>`;
+  }
+
+  function duelEndHtml(match) {
+    const winner = duelWinner(match);
+    const reasonKey = match.ended?.reason || match.endReason || match.state?.endReason || match.state?.reason || '';
+    const lost = (winner === 0 || winner === 1) && winner !== match.you;
+    const reason =
+      reasonKey === 'ko' && lost
+        ? 'tous tes champions sont KO'
+        : reasonKey === 'timeout' && !lost && winner === match.you
+          ? 'ton adversaire est absent depuis trop longtemps'
+          : DUEL_END_REASONS[reasonKey] ?? (reasonKey ? String(reasonKey) : '');
+    const forfeitByMe = reasonKey === 'forfeit' && winner === 1 - match.you;
+    let title = 'Match nul';
+    let cls = 'is-draw';
+    if (winner === match.you) {
+      title = 'Victoire !';
+      cls = 'is-win';
+    } else if (winner === 0 || winner === 1) {
+      title = 'Défaite';
+      cls = 'is-loss';
+    }
+    const why = forfeitByMe ? 'tu as abandonné' : reasonKey === 'forfeit' && winner === match.you ? 'ton adversaire a abandonné' : reason;
+    const waiting = match.kind === 'online' && match.rematchAsked && state.__duel?.net?.rematchAsked;
+    return `<div class="kp-duel-end ${cls}">
+        <b>${esc(title)}</b>
+        ${why ? `<span>${esc(why.charAt(0).toUpperCase() + why.slice(1))}</span>` : ''}
+        ${waiting ? '<span class="kp-duel-note">Revanche demandée : en attente de ton adversaire…</span>' : ''}
+        <div class="kp-duel-row">
+          <button class="kp-btn is-primary" type="button" data-act="duel-replay" ${waiting ? 'disabled' : ''}>${match.kind === 'online' ? 'Revanche' : 'Rejouer'}</button>
+          <button class="kp-btn" type="button" data-act="duel-lobby">Retour au salon</button>
+        </div>
+      </div>`;
+  }
+
+  function viewDuelCombat() {
+    const duel = duelState();
+    const E = duelEngine();
+    const match = duel.match;
+    if (!match) {
+      return `<div class="kp-duel-head"><b>Combat</b><span>aucun duel en cours</span></div>
+        <div class="kp-empty">
+          <b>Aucun duel en cours</b>
+          Lance un entraînement contre l’IA ou rejoins un salon en ligne depuis l’onglet Duel.
+          <div class="kp-duel-row is-center">
+            <button class="kp-btn is-primary" type="button" data-act="duel-practice" ${E ? '' : 'disabled'}>Entraînement contre l’IA</button>
+            <button class="kp-btn" type="button" data-act="duel-tab" data-tab="duel">Aller au salon</button>
+          </div>
+          ${E ? '' : '<p class="kp-duel-note is-bad">Moteur du duel non chargé (content/duel-engine.js).</p>'}
+        </div>`;
+    }
+
+    const st = match.state ?? {};
+    const players = Array.isArray(st.players) ? st.players : [];
+    const you = match.you;
+    const foe = 1 - you;
+    const over = duelMatchOver(match);
+    const current = over || !E ? null : duelSafe(() => E.currentPlayer(st), null);
+    const myTurn = current === you && !match.pending;
+    const legal = myTurn ? duelSafe(() => E.legalActions(st, you), []) ?? [] : [];
+    const moves = legal.filter((action) => action?.type === 'move');
+    const canPass = legal.some((action) => action?.type === 'pass');
+    const sel = match.sel ?? { actor: null, move: null };
+    const actors = new Set(moves.map((action) => action.actor));
+    if (sel.actor != null && !actors.has(sel.actor)) {
+      sel.actor = null;
+      sel.move = null;
+    }
+    const candidates =
+      sel.actor != null && sel.move != null ? moves.filter((a) => a.actor === sel.actor && a.move === sel.move) : [];
+    const targets = new Set(candidates.filter((a) => a.target).map((a) => `${a.target.side}:${a.target.index}`));
+    const ctx = { you, actors: myTurn ? actors : new Set(), targets, sel };
+
+    const maxRounds = duelRuleValue('maxRounds', 30);
+    const foeName = players[foe]?.name ?? (match.kind === 'practice' ? 'IA' : 'Adversaire');
+    let turnText = '';
+    let turnClass = '';
+    if (over) turnText = 'Duel terminé';
+    else if (!E) turnText = 'Moteur indisponible';
+    else if (match.pending) turnText = 'Action envoyée…';
+    else if (current === you) {
+      turnText = 'À toi de jouer';
+      turnClass = 'is-mine';
+    } else if (match.kind === 'practice') {
+      turnText = 'L’IA réfléchit…';
+      turnClass = 'is-foe';
+    } else {
+      turnText = `Tour de ${foeName}`;
+      turnClass = 'is-foe';
+    }
+
+    let timer = '';
+    if (match.kind === 'online' && match.deadlineAt && !over) {
+      const left = Math.max(0, Math.ceil((match.deadlineAt - Date.now()) / 1000));
+      timer = `<span class="kp-duel-timer ${left <= 10 ? 'is-urgent' : ''}" data-role="duel-timer" title="Passe automatique à 0">${fmt(left)} s</span>`;
+    }
+
+    const modeTag =
+      match.kind === 'practice'
+        ? '<span class="kp-duel-tag is-mode">Entraînement</span>'
+        : `<span class="kp-duel-tag is-mode">En ligne${duel.net?.room?.code ? ` · ${esc(duel.net.room.code)}` : ''}</span>`;
+
+    // Barre d'action : champion → capacité → cible, ou Passer.
+    let actionBar = '';
+    if (over) {
+      actionBar = duelEndHtml(match);
+    } else if (!E) {
+      actionBar = '<div class="kp-duel-hint is-bad">Moteur du duel non chargé : impossible de calculer les coups jouables.</div>';
+    } else if (!myTurn) {
+      actionBar = `<div class="kp-duel-hint">${esc(turnText)}</div>`;
+    } else if (sel.actor == null) {
+      actionBar = `<div class="kp-duel-hint">${
+        actors.size ? 'Choisis un de tes champions (surlignés).' : 'Aucune capacité jouable : passe ton tour.'
+      }</div>
+        <div class="kp-duel-row">${canPass ? '<button class="kp-btn" type="button" data-act="duel-pass">Passer le tour</button>' : ''}</div>`;
+    } else {
+      const champ = players[you]?.champions?.[sel.actor] ?? {};
+      const usable = new Set(moves.filter((a) => a.actor === sel.actor).map((a) => a.move));
+      const chakra = Number(players[you]?.chakra ?? 0);
+      const buttons = duelMovesOf(champ)
+        .map((move, k) => {
+          const ok = usable.has(k);
+          const cost = duelMoveCost(move);
+          const why = ok ? '' : move.kind === 'ultimate' && champ.ultimateUsed ? 'Ultime déjà utilisé' : cost > chakra ? 'Chakra insuffisant' : 'Indisponible';
+          return `<button class="kp-duel-move is-${esc(move.kind ?? 'attack')} ${sel.move === k ? 'is-selected' : ''}" type="button" data-act="duel-move" data-move="${k}" ${ok ? '' : `disabled title="${esc(why)}"`}>
+              <span class="kp-duel-move-head"><b>${esc(move.name ?? '—')}</b><i>${esc(duelKindLabel(move.kind))} · ${cost ? `${fmt(cost)} chakra` : 'gratuit'}</i></span>
+              <small>${esc(duelEffectText(move))}</small>
+              ${ok ? '' : `<em>${esc(why)}</em>`}
+            </button>`;
+        })
+        .join('');
+      const hint =
+        sel.move != null && targets.size
+          ? 'Choisis une cible (surlignée).'
+          : `${esc(champ.name ?? 'Champion')} : choisis une capacité.`;
+      actionBar = `<div class="kp-duel-hint">${hint}</div>
+        <div class="kp-duel-moves">${buttons}</div>
+        <div class="kp-duel-row">
+          <button class="kp-btn is-ghost" type="button" data-act="duel-cancel">Annuler</button>
+          ${canPass ? '<button class="kp-btn" type="button" data-act="duel-pass">Passer le tour</button>' : ''}
+        </div>`;
+    }
+
+    const log = match.log
+      .map((entry) => `<li class="${entry.type ? `is-${esc(entry.type)}` : ''}">${esc(entry.text)}</li>`)
+      .join('');
+
+    return `<div class="kp-duel-battle">
+        <div class="kp-duel-topbar">
+          <span class="kp-duel-round">Manche <b>${fmt(st.round)}</b><small>/ ${fmt(maxRounds)}</small></span>
+          <span class="kp-duel-turn ${turnClass}">${esc(turnText)}</span>
+          ${timer}
+          ${modeTag}
+          <span class="kp-duel-spacer"></span>
+          ${
+            over
+              ? ''
+              : `<button class="kp-btn is-danger" type="button" data-act="duel-forfeit">${match.forfeitArmed ? 'Confirmer l’abandon' : 'Abandonner'}</button>`
+          }
+        </div>
+        ${match.filled ? '<div class="kp-duel-note">Deck complété au hasard pour cette partie.</div>' : ''}
+        ${duel.net?.peer === 'left' && match.kind === 'online' && !over ? '<div class="kp-duel-note is-warn">Ton adversaire s’est déconnecté : il a 60 s pour revenir.</div>' : ''}
+        <div class="kp-duel-arena">
+          <div class="kp-duel-board">
+            ${duelSideHtml(players[foe], foe, ctx, current)}
+            <div class="kp-duel-actionbar">${actionBar}${match.error ? `<div class="kp-duel-note is-bad">${esc(match.error)}</div>` : ''}</div>
+            ${duelSideHtml(players[you], you, ctx, current)}
+          </div>
+          <aside class="kp-duel-log">
+            <b>Journal</b>
+            <ol class="kp-duel-log-list">${log || '<li class="is-empty">Le duel commence.</li>'}</ol>
+          </aside>
+        </div>
+      </div>`;
+  }
+
+  /** Sections du livre de règles, quelle que soit la forme exposée (tableau ou { sections }). */
+  function duelRuleSections() {
+    const R = typeof window !== 'undefined' ? window.KYARA_DUEL_RULES : null;
+    const list = Array.isArray(R) ? R : Array.isArray(R?.sections) ? R.sections : null;
+    if (!list) return null;
+    return list.filter((section) => section && typeof section === 'object');
+  }
+
+  /** Paragraphe de règle : texte échappé, **gras** et listes « - » rendus. */
+  function duelRuleParagraph(text) {
+    const lines = String(text ?? '').split('\n');
+    const inline = (value) => esc(value).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    const bullets = lines.filter((line) => /^\s*[-•]\s+/.test(line));
+    if (bullets.length && bullets.length === lines.filter((line) => line.trim()).length) {
+      return `<ul>${bullets.map((line) => `<li>${inline(line.replace(/^\s*[-•]\s+/, ''))}</li>`).join('')}</ul>`;
+    }
+    if (bullets.length) {
+      let html = '';
+      let open = false;
+      for (const line of lines) {
+        if (/^\s*[-•]\s+/.test(line)) {
+          if (!open) html += '<ul>';
+          open = true;
+          html += `<li>${inline(line.replace(/^\s*[-•]\s+/, ''))}</li>`;
+        } else if (line.trim()) {
+          if (open) html += '</ul>';
+          open = false;
+          html += `<p>${inline(line)}</p>`;
+        }
+      }
+      return open ? `${html}</ul>` : html;
+    }
+    return `<p>${inline(String(text ?? ''))}</p>`;
+  }
+
+  function viewDuelRules() {
+    const sections = duelRuleSections();
+    if (!sections || !sections.length) {
+      return `<div class="kp-duel-head"><b>Règles</b><span>livre de règles</span></div>
+        <div class="kp-empty"><b>Livre de règles indisponible</b>content/duel-rules.js n’est pas chargé.</div>`;
+    }
+    const titleOf = (section, index) => String(section.titre ?? section.title ?? `Section ${index + 1}`);
+    const toc = sections
+      .map(
+        (section, index) =>
+          `<li><button type="button" data-act="duel-rule-goto" data-index="${index}">${fmt(index + 1)}. ${esc(titleOf(section, index))}</button></li>`
+      )
+      .join('');
+    const body = sections
+      .map((section, index) => {
+        const paragraphs = Array.isArray(section.paragraphes)
+          ? section.paragraphes
+          : Array.isArray(section.paragraphs)
+            ? section.paragraphs
+            : [];
+        return `<section class="kp-duel-rule" id="kp-duel-rule-${index}">
+            <h3>${fmt(index + 1)}. ${esc(titleOf(section, index))}</h3>
+            ${paragraphs.map((text) => duelRuleParagraph(text)).join('')}
+          </section>`;
+      })
+      .join('');
+    return `<div class="kp-duel-head"><b>Règles</b><span>${fmt(sections.length)} sections</span></div>
+      <div class="kp-duel-rules">
+        <nav class="kp-duel-toc"><b>Sommaire</b><ol>${toc}</ol></nav>
+        <div class="kp-duel-rules-body">${body}</div>
+      </div>`;
+  }
+
 
   function renderTabs() {
     if (!ui) return;
     renderModes();
     const duel = duelState();
     if (duel.mode === 'duel') {
+      const live = duel.match && !duelMatchOver(duel.match);
       ui.tabs.innerHTML = [
         ['collection', 'Collection'],
-        ['duel', 'Duel']
+        ['duel', 'Duel'],
+        ['combat', 'Combat'],
+        ['regles', 'Règles']
       ]
         .map(
           ([id, label]) =>
-            `<button class="kp-tab ${duel.tab === id ? 'is-active' : ''}" type="button" data-act="duel-tab" data-tab="${id}">${esc(label)}</button>`
+            `<button class="kp-tab ${duel.tab === id ? 'is-active' : ''}" type="button" data-act="duel-tab" data-tab="${id}">${esc(label)}${
+              id === 'combat' && live ? '<i class="kp-duel-live" title="Duel en cours"></i>' : ''
+            }</button>`
         )
         .join('');
       return;
@@ -2959,7 +3995,15 @@
     if (!ui) return;
     const duel = duelState();
     if (duel.mode === 'duel') {
-      ui.view.innerHTML = duel.tab === 'duel' ? viewDuelRooms() : viewDuelCollection();
+      // Le journal du combat garde sa position (ou reste collé en bas s'il l'était).
+      const oldLog = ui.view.querySelector('.kp-duel-log-list');
+      const keepLog = oldLog
+        ? { top: oldLog.scrollTop, atBottom: oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 24 }
+        : null;
+      const view = { duel: viewDuelRooms, combat: viewDuelCombat, regles: viewDuelRules }[duel.tab] ?? viewDuelCollection;
+      ui.view.innerHTML = view();
+      const newLog = ui.view.querySelector('.kp-duel-log-list');
+      if (newLog) newLog.scrollTop = !keepLog || keepLog.atBottom ? newLog.scrollHeight : keepLog.top;
       return;
     }
     const fn = {
@@ -8296,8 +9340,147 @@
       }
       case 'duel-tab': {
         const duel = duelState();
-        duel.tab = el.getAttribute('data-tab') === 'duel' ? 'duel' : 'collection';
+        const tab = el.getAttribute('data-tab');
+        const next = ['collection', 'duel', 'combat', 'regles'].includes(tab) ? tab : 'collection';
+        if (next !== duel.tab && ui?.view) ui.view.scrollTop = 0;
+        duel.tab = next;
         render();
+        break;
+      }
+      case 'duel-fill': {
+        const duel = duelState();
+        duel.deck = duelFillDeck(duel.deck, { preferOwned: true });
+        persistDuelPrefs();
+        render();
+        break;
+      }
+      case 'duel-practice':
+        duelStartPractice();
+        break;
+      case 'duel-copy-code': {
+        const code = duelState().net?.room?.code;
+        if (code) {
+          copyText(code);
+          notify(`Code ${code} copié.`);
+        }
+        break;
+      }
+      case 'duel-leave-room': {
+        const duel = duelState();
+        const match = duel.match;
+        if (match?.kind === 'online' && !duelMatchOver(match)) {
+          duelForfeit();
+        } else {
+          try {
+            duel.net?.client?.leave();
+          } catch {
+            /* connexion fermée */
+          }
+        }
+        duelCloseNet();
+        render();
+        break;
+      }
+      case 'duel-actor': {
+        const match = duelState().match;
+        if (!match) break;
+        const index = Number(el.getAttribute('data-index'));
+        match.sel = match.sel?.actor === index && match.sel?.move == null ? { actor: null, move: null } : { actor: index, move: null };
+        render();
+        break;
+      }
+      case 'duel-move': {
+        const match = duelState().match;
+        const E = duelEngine();
+        if (!match || !E || match.sel?.actor == null) break;
+        const move = Number(el.getAttribute('data-move'));
+        const legal = duelSafe(() => E.legalActions(match.state, match.you), []) ?? [];
+        const options = legal.filter((a) => a?.type === 'move' && a.actor === match.sel.actor && a.move === move);
+        if (!options.length) break;
+        // Sans cible à choisir, la capacité part directement.
+        if (!options.some((a) => a.target)) {
+          duelPlay(options[0]);
+          break;
+        }
+        match.sel = { actor: match.sel.actor, move: match.sel.move === move ? null : move };
+        render();
+        break;
+      }
+      case 'duel-target': {
+        const match = duelState().match;
+        const E = duelEngine();
+        if (!match || !E || match.sel?.actor == null || match.sel?.move == null) break;
+        const side = Number(el.getAttribute('data-side'));
+        const index = Number(el.getAttribute('data-index'));
+        const legal = duelSafe(() => E.legalActions(match.state, match.you), []) ?? [];
+        const action = legal.find(
+          (a) =>
+            a?.type === 'move' &&
+            a.actor === match.sel.actor &&
+            a.move === match.sel.move &&
+            a.target &&
+            a.target.side === side &&
+            a.target.index === index
+        );
+        if (action) duelPlay(action);
+        break;
+      }
+      case 'duel-cancel': {
+        const match = duelState().match;
+        if (match) match.sel = { actor: null, move: null };
+        render();
+        break;
+      }
+      case 'duel-pass': {
+        const match = duelState().match;
+        const E = duelEngine();
+        if (!match || !E) break;
+        const legal = duelSafe(() => E.legalActions(match.state, match.you), []) ?? [];
+        const pass = legal.find((a) => a?.type === 'pass');
+        if (pass) duelPlay(pass);
+        break;
+      }
+      case 'duel-forfeit': {
+        const match = duelState().match;
+        if (!match || duelMatchOver(match)) break;
+        if (!match.forfeitArmed) {
+          match.forfeitArmed = true;
+          setTimeout(() => {
+            if (match.forfeitArmed) {
+              match.forfeitArmed = false;
+              render();
+            }
+          }, 4000);
+          render();
+          break;
+        }
+        match.forfeitArmed = false;
+        duelForfeit();
+        break;
+      }
+      case 'duel-replay': {
+        const duel = duelState();
+        const match = duel.match;
+        if (match?.kind === 'online') {
+          duelRematch();
+        } else {
+          duelStartPractice();
+        }
+        break;
+      }
+      case 'duel-lobby': {
+        const duel = duelState();
+        duelStopAi();
+        if (duel.match?.kind === 'online') duelCloseNet();
+        duel.match = null;
+        duel.tab = 'duel';
+        if (ui?.view) ui.view.scrollTop = 0;
+        render();
+        break;
+      }
+      case 'duel-rule-goto': {
+        const target = qs(`#kp-duel-rule-${Number(el.getAttribute('data-index')) || 0}`);
+        if (target) target.scrollIntoView({ block: 'start', behavior: 'smooth' });
         break;
       }
       case 'duel-card': {
@@ -8314,29 +9497,29 @@
       case 'duel-pick': {
         const duel = duelState();
         const id = String(el.getAttribute('data-id') ?? '');
-        if (!duelOwnedIds().has(id)) break;
+        // Toute Mythique peut entrer au deck ; le duel en ligne n'accepte que les possédées.
+        if (!duelIsMythic(id)) break;
         if (duel.deck.includes(id)) duel.deck = duel.deck.filter((value) => value !== id);
-        else if (duel.deck.length < 5) duel.deck = [...duel.deck, id];
+        else if (duel.deck.length < DUEL_DECK_SIZE) duel.deck = [...duel.deck, id];
+        else notify(`Deck complet (${DUEL_DECK_SIZE} cartes) : retire une carte d’abord.`);
+        persistDuelPrefs();
         render();
         break;
       }
       case 'duel-clear': {
         duelState().deck = [];
+        persistDuelPrefs();
         render();
         break;
       }
       case 'duel-create':
+        duelConnect({ type: 'create' });
+        break;
       case 'duel-join': {
         const duel = duelState();
-        const relayInput = shadow.querySelector('[data-role="duel-relay"]');
-        const relay = String(relayInput?.value ?? '').trim();
-        duel.relay = relay;
-        if (!relay) {
-          notify('Renseigne l’adresse du relais (wss://…) avant de créer ou rejoindre un salon.');
-        } else {
-          notify('Relais enregistré. La connexion sera branchée dès que l’adresse Railway sera en ligne.');
-        }
-        render();
+        const codeInput = qs('[data-role="duel-code"]');
+        if (codeInput) duel.code = String(codeInput.value ?? '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
+        duelConnect({ type: 'join', code: duel.code });
         break;
       }
       case 'toggle':
@@ -8778,6 +9961,17 @@
       render();
       return;
     }
+    const duelOwned = target.closest('[data-role="duel-owned"]');
+    if (duelOwned) {
+      duelState().ownedOnly = Boolean(duelOwned.checked);
+      render();
+      return;
+    }
+    if (target.closest('[data-role="duel-relay"]')) {
+      duelState().relay = String(target.value ?? '').trim();
+      persistDuelPrefs();
+      return;
+    }
     const checkbox = target.closest('input[data-sel]');
     if (checkbox) {
       const id = checkbox.getAttribute('data-sel');
@@ -8977,6 +10171,13 @@
     if (event.key !== 'Enter') return;
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
+    if (target.closest('[data-role="duel-code"]')) {
+      event.preventDefault();
+      const duel = duelState();
+      duel.code = String(target.value ?? '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
+      duelConnect({ type: 'join', code: duel.code });
+      return;
+    }
     if (target.closest('[data-role="profile-search"]')) {
       event.preventDefault();
       const results = state.profile.results;
@@ -9015,6 +10216,18 @@
           /* champ remplacé */
         }
       }
+      return;
+    }
+    // Champs du salon : on mémorise sans re-rendu pour garder le focus.
+    if (target.closest('[data-role="duel-relay"]')) {
+      duelState().relay = String(target.value ?? '').trim();
+      persistDuelPrefs();
+      return;
+    }
+    if (target.closest('[data-role="duel-code"]')) {
+      const clean = String(target.value ?? '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
+      if (target.value !== clean) target.value = clean;
+      duelState().code = clean;
       return;
     }
 
@@ -9177,11 +10390,20 @@
       statSeriesProgress,
       statCollectionValue,
       statAccountMetrics,
-      statOwnerCounts
+      statOwnerCounts,
+      // +Duel
+      duelState,
+      duelStartPractice,
+      duelPlay,
+      duelOnlineDeckIssue
     };
   }
 
   boot();
+  loadDuelPrefs();
+
+  // +Duel : minuteur de tour et statut du relais, sans re-rendu complet.
+  setInterval(duelTick, 1000);
 
   // Compte à rebours de l'auto-open : on ne touche qu'au texte, pas au panneau entier.
   setInterval(() => {

@@ -34,6 +34,9 @@
       ],
       "js": [
         "content/duel-data.js",
+        "content/duel-rules.js",
+        "content/duel-engine.js",
+        "content/duel-net.js",
         "content/ui.js"
       ],
       "run_at": "document_idle"
