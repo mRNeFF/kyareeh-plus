@@ -331,8 +331,7 @@ async function visualPass() {
       ['quick', 'balanced', 'max'].every((value) => strategyValues.includes(value)),
       strategyValues.join(',')
     );
-    const autoShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
-    writeFileSync(join(SHOTS, 'chrome-vente-auto.png'), Buffer.from(autoShot.data, 'base64'));
+
 
     await evaluate(
       cdp,
@@ -400,6 +399,32 @@ async function visualPass() {
     );
     check('Vente auto : annonces créées', auto.created > 0, `${auto.created} annonce(s) · ${auto.cycles} cycle(s)`);
     check('Vente auto : identifiant API présent', Number.isFinite(Number(auto.characterId)), String(auto.characterId));
+    const sales = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const text = root.querySelector('#kp-view')?.innerText || '';
+         return {
+           count: window.__kyaraPlus.state.salesLog.length,
+           auto: window.__kyaraPlus.state.salesLog.filter((e) => e.source === 'auto').length,
+           chart: text.includes('Ventes') && text.toLowerCase().includes('net estimé')
+         };
+       })()`
+    );
+    check('Ventes auto enregistrées', sales.auto > 0, `${sales.auto} auto · ${sales.count} total`);
+    check('Graphique de ventes affiché', sales.chart === true);
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const view = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view');
+         if (view) view.scrollTop = view.scrollHeight;
+         return true;
+       })()`
+    );
+    const autoShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+    writeFileSync(join(SHOTS, 'chrome-vente-auto.png'), Buffer.from(autoShot.data, 'base64'));
     await waitFor(
       () => evaluate(cdp, sessionId, 'window.__kyaraPlus.state.autoSell.running === false'),
       { label: 'arrêt de la vente auto', timeout: 5000 }
@@ -417,7 +442,7 @@ async function visualPass() {
     );
     check(
       'Marché global intégré à l’onglet Marché',
-      marketText.includes('Marché global') && marketText.includes('Recherche faite par le serveur')
+      marketText.includes('Marché global') && marketText.includes('Recherche serveur')
     );
     const marketShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
     writeFileSync(join(SHOTS, 'chrome-marche.png'), Buffer.from(marketShot.data, 'base64'));

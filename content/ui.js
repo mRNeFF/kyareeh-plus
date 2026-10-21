@@ -33,6 +33,8 @@
   const PACK_AVG_KEY = 'kyareeh.packavg.v1';
   const PACK_POOLS_KEY = 'kyareeh.packpools.v1';
   const STATS_KEY = 'kyareeh.statboard.v1';
+  const SALES_KEY = 'kyareeh.sales.v1';
+  const SALES_MAX = 2000;
   // Les comptes suivis sont relus au bout de 12 h (ou à la demande).
   const STAT_CACHE_MS = 12 * 3600 * 1000;
   const STAT_MAX_ACCOUNTS = 20;
@@ -227,6 +229,9 @@
     query: '',
     selected: new Set(),
     sell: null,
+    // Journal local des annonces créées par Kyareeh+ (pas d'historique côté site).
+    salesLog: [],
+    salesLogLoaded: false,
     debug: [],
     bootKeys: [],
     notice: '',
@@ -853,6 +858,7 @@
     if (cached && typeof cached === 'object') {
       state.prices = cached.prices && typeof cached.prices === 'object' ? cached.prices : cached;
     }
+    await loadSalesLog();
     await mount();
     await loadData();
     await loadAutoLog();
@@ -1405,6 +1411,62 @@
   }
   /* AUTOSELL:END */
 
+  /* SALES:BEGIN — cumuls purs du graphique de ventes, testés par verify-sales-chart.mjs */
+  function salesTotals(log) {
+    const totals = { net: 0, count: 0, matched: 0, auto: 0, manual: 0, autoNet: 0, manualNet: 0 };
+    for (const entry of Array.isArray(log) ? log : []) {
+      const net = Math.max(0, Number(entry?.net) || 0);
+      totals.net += net;
+      totals.count += 1;
+      if (entry?.source === 'auto') {
+        totals.auto += 1;
+        totals.autoNet += net;
+      } else {
+        totals.manual += 1;
+        totals.manualNet += net;
+      }
+      if (entry?.matched) totals.matched += 1;
+    }
+    return totals;
+  }
+
+  /** Net cumulé par jour, sur les `days` derniers jours (auto et manuel séparés). */
+  function salesChartSeries(log, now = Date.now(), days = 7) {
+    const count = Math.max(2, Math.min(31, Math.round(Number(days) || 7)));
+    const end = new Date(now);
+    end.setHours(0, 0, 0, 0);
+    const start = new Date(end);
+    start.setDate(start.getDate() - (count - 1));
+
+    const buckets = Array.from({ length: count }, (_, index) => {
+      const date = new Date(start);
+      date.setDate(start.getDate() + index);
+      return { at: date.getTime(), auto: 0, manual: 0 };
+    });
+
+    for (const entry of Array.isArray(log) ? log : []) {
+      const at = Number(entry?.at);
+      if (!Number.isFinite(at) || at < start.getTime() || at > now) continue;
+      const date = new Date(at);
+      date.setHours(0, 0, 0, 0);
+      const index = Math.round((date.getTime() - start.getTime()) / 86400000);
+      if (index < 0 || index >= count) continue;
+      const net = Math.max(0, Number(entry.net) || 0);
+      buckets[index][entry.source === 'auto' ? 'auto' : 'manual'] += net;
+    }
+
+    let auto = 0;
+    let manual = 0;
+    const points = buckets.map((bucket) => {
+      auto += bucket.auto;
+      manual += bucket.manual;
+      return { at: bucket.at, auto, manual };
+    });
+    const max = Math.max(1, ...points.map((point) => Math.max(point.auto, point.manual)));
+    return { points, max };
+  }
+  /* SALES:END */
+
   /**
    * Prix auto : on réutilise exactement les trois stratégies de la vente manuelle.
    * Sans données de marché, on renvoie null : la vente auto n'invente pas de prix.
@@ -1689,6 +1751,59 @@
       view.refreshing = false;
       render();
     }
+  }
+
+  let salesSaveTimer = null;
+
+  /** Le site ne fournit aucun historique : on garde seulement ce que Kyareeh+ a créé. */
+  async function loadSalesLog() {
+    try {
+      const saved = await storageGet(SALES_KEY, []);
+      if (Array.isArray(saved)) {
+        state.salesLog = saved
+          .filter((entry) => entry && Number.isFinite(Number(entry.at)) && Number.isFinite(Number(entry.net)))
+          .map((entry) => ({
+            at: Number(entry.at),
+            source: entry.source === 'auto' ? 'auto' : 'manual',
+            name: String(entry.name ?? ''),
+            rarity: String(entry.rarity ?? ''),
+            price: Math.max(0, Math.round(Number(entry.price) || 0)),
+            net: Math.max(0, Math.round(Number(entry.net) || 0)),
+            matched: Boolean(entry.matched)
+          }))
+          .slice(-SALES_MAX);
+      }
+    } catch {
+      /* pas de journal : le graphique reste vide */
+    } finally {
+      state.salesLogLoaded = true;
+    }
+  }
+
+  function saveSalesSoon() {
+    if (salesSaveTimer) clearTimeout(salesSaveTimer);
+    salesSaveTimer = setTimeout(() => {
+      salesSaveTimer = null;
+      storageSet(SALES_KEY, state.salesLog.slice(-SALES_MAX)).catch(() => {});
+    }, 700);
+  }
+
+  /** Enregistre une annonce réellement créée (jamais en simulation). */
+  function recordSale(entry) {
+    const price = Math.max(0, Math.round(Number(entry?.price) || 0));
+    const net = Math.max(0, Math.round(Number(entry?.net) || 0));
+    if (!price && !net) return;
+    state.salesLog.push({
+      at: Number(entry?.at) || Date.now(),
+      source: entry?.source === 'auto' ? 'auto' : 'manual',
+      name: String(entry?.name ?? ''),
+      rarity: String(entry?.rarity ?? ''),
+      price,
+      net,
+      matched: Boolean(entry?.matched)
+    });
+    if (state.salesLog.length > SALES_MAX) state.salesLog.splice(0, state.salesLog.length - SALES_MAX);
+    saveSalesSoon();
   }
 
   function computeStats(rows) {
@@ -2662,6 +2777,7 @@
     const gapMs = Math.max(350, Number(options.gapMs) || 1200);
     const log = typeof options.log === 'function' ? options.log : () => {};
     const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
+    const source = options.source === 'auto' ? 'auto' : 'manual';
     const result = { created: 0, matched: 0, errors: 0, simulated: 0, stopped: null };
 
     let consecutiveErrors = 0;
@@ -2697,6 +2813,14 @@
           });
           result.created += 1;
           if (posted?.matched) result.matched += 1;
+          recordSale({
+            source,
+            name: row.name,
+            rarity: row.rarity,
+            price: row.price,
+            net: Math.max(0, Number(row.price) - feeOf(row.price) - taxOf(row.price)),
+            matched: Boolean(posted?.matched)
+          });
           log(`✓ ${row.name} · ${label}${posted?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
           consecutiveErrors = 0;
         } catch (err) {
@@ -2753,6 +2877,7 @@
       buyoutPct,
       dryRun: state.settings.dryRun,
       gapMs: state.settings.gapMs,
+      source: 'manual',
       log,
       shouldStop: () => !sell.running
     });
@@ -2895,6 +3020,7 @@
       buyoutPct: state.settings.buyoutPct,
       dryRun,
       gapMs: state.settings.gapMs,
+      source: 'auto',
       log: autoSellLog,
       shouldStop: () => !a.running || a.stop
     });
@@ -6393,8 +6519,6 @@
           <span><b>${fmt(spare)}</b> exemplaire(s) en trop</span>
           <span><b>${fmt(spare - (s.autoSellIncludeML ? 0 : mlSpare))}</b> éligible(s)</span>
           <span><b>${slots.remaining}</b> place(s) libre(s)</span>
-          <span><b>${fmt(a.created)}</b> annonce(s) créée(s)</span>
-          <span><b>${fmt(a.matched)}</b> vente(s) immédiate(s)</span>
         </div>
         ${
           a.status
@@ -6403,9 +6527,6 @@
               }</div>`
             : ''
         }
-        <div class="kp-autosell-note">
-          Une annonce créée n’est pas une vente : seules les ventes immédiates sont confirmées par l’API.
-        </div>
         <div class="kp-autosell-grid">
           <label>
             <span>Type</span>
@@ -6447,7 +6568,7 @@
             <input type="checkbox" data-autosell-dryrun ${s.autoSellDryRun ? 'checked' : ''} ${a.running ? 'disabled' : ''}>
             Simulation
           </label>
-          <span class="kp-autosell-note">${fmt(withoutPrice)} doublon(s) sans prix connu · ${fmt(mlSpare)} M/L en double</span>
+          <span class="kp-autosell-note">${fmt(withoutPrice)} sans prix · ${fmt(mlSpare)} M/L</span>
         </div>
         <div class="kp-autosell-actions">
           <button class="kp-btn" type="button" data-act="autosell-preview" ${a.running ? 'disabled' : ''}>Aperçu</button>
@@ -6496,6 +6617,66 @@
       </section>`;
   }
 
+  function salesChart() {
+    const totals = salesTotals(state.salesLog);
+    const model = salesChartSeries(state.salesLog);
+    const { points, max } = model;
+    const W = 720;
+    const H = 210;
+    const pad = { l: 44, r: 14, t: 14, b: 26 };
+    const x = (index) => pad.l + (index / Math.max(1, points.length - 1)) * (W - pad.l - pad.r);
+    const y = (value) => H - pad.b - (value / max) * (H - pad.t - pad.b);
+    const line = (key) =>
+      points.map((point, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(point[key]).toFixed(1)}`).join(' ');
+    const grid = [0, 0.5, 1]
+      .map((ratio) => {
+        const value = max * ratio;
+        const gy = y(value);
+        const label = Number.isInteger(value) ? fmt(value) : value.toFixed(1).replace('.', ',');
+        return `<line class="kp-sales-grid" x1="${pad.l}" y1="${gy.toFixed(1)}" x2="${W - pad.r}" y2="${gy.toFixed(
+          1
+        )}"></line><text class="kp-sales-axis" x="${pad.l - 7}" y="${(gy + 3).toFixed(1)}" text-anchor="end">◆ ${label}</text>`;
+      })
+      .join('');
+    const xLabels = points
+      .map((point, index) => {
+        const date = new Date(point.at).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+        return `<text class="kp-sales-axis" x="${x(index).toFixed(1)}" y="${H - 7}" text-anchor="middle">${esc(
+          date
+        )}</text>`;
+      })
+      .join('');
+    return `
+      <section class="kp-sales">
+        <div class="kp-sales-head">
+          <b>Ventes</b>
+          <span>7 jours · via Kyareeh+</span>
+        </div>
+        <div class="kp-sales-kpis">
+          <span><b>◆ ${fmt(totals.net)}</b><small>net estimé</small></span>
+          <span><b>${fmt(totals.count)}</b><small>ventes</small></span>
+          <span><b>${fmt(totals.matched)}</b><small>immédiates</small></span>
+        </div>
+        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Net des ventes par jour">
+          ${grid}
+          <path class="kp-sales-line is-auto" d="${line('auto')}"></path>
+          <path class="kp-sales-line is-manual" d="${line('manual')}"></path>
+          <circle class="kp-sales-dot is-auto" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
+            points[points.length - 1].auto
+          ).toFixed(1)}" r="3"></circle>
+          <circle class="kp-sales-dot is-manual" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
+            points[points.length - 1].manual
+          ).toFixed(1)}" r="3"></circle>
+          ${xLabels}
+        </svg>
+        <div class="kp-sales-legend">
+          <span><i class="is-auto"></i>Auto <b>◆ ${fmt(totals.autoNet)}</b></span>
+          <span><i class="is-manual"></i>Manuelle <b>◆ ${fmt(totals.manualNet)}</b></span>
+        </div>
+        <div class="kp-sales-note">Net estimé des annonces créées via Kyareeh+.</div>
+      </section>`;
+  }
+
   function viewSell() {
     if (!state.user) return loginHTML();
     const view = state.sellView;
@@ -6505,14 +6686,9 @@
     if (view.mode === 'auto') {
       return `
         ${sellModeSwitch()}
-        <div class="kp-hint">
-          La vente auto ne met en vente que les exemplaires en trop : une copie de chaque carte est toujours conservée.
-          Les prix utilisent la stratégie choisie (vente rapide, équilibrée ou prix maximal).
-        </div>
+        <div class="kp-hint">Doublons uniquement · une copie conservée.</div>
         ${autoSellPanel(all, slots)}
-        <div class="kp-hint">
-          Une annonce n'est pas une vente confirmée : seules les ventes immédiates sont certaines. Aucun historique de ventes n'est fourni par l'API.
-        </div>`;
+        ${salesChart()}`;
     }
 
     const rows = filteredSellRows(all);
@@ -6522,7 +6698,7 @@
     for (const row of all) counts[row.rarity] = (counts[row.rarity] ?? 0) + 1;
 
     if (!all.length) {
-      return `${sellModeSwitch()}<div class="kp-empty"><b>Collection vide</b>Le site n'a renvoyé aucune carte pour ce compte.</div>`;
+      return `${sellModeSwitch()}${salesChart()}<div class="kp-empty"><b>Collection vide</b>Le site n'a renvoyé aucune carte pour ce compte.</div>`;
     }
 
     // Prix marché des lignes affichées uniquement, par petits lots.
@@ -6556,6 +6732,7 @@
           ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="sell-more-rows">Afficher plus (${fmt(rows.length - visible.length)})</button></div>`
           : ''
       }
+      ${salesChart()}
       ${sellSelectionBar(rows)}`;
   }
 
@@ -6582,7 +6759,7 @@
           ${view.loading ? '<span class="kp-spinner"></span> Recherche…' : 'Actualiser le marché'}
         </button>
       </div>
-      <div class="kp-hint">Recherche faite par le serveur : nom, rareté et type, avec pagination réelle.</div>`;
+      <div class="kp-hint">Recherche serveur · pagination réelle.</div>`;
   }
 
   function marketGlobalFilters() {

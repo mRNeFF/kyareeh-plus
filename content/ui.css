@@ -1755,6 +1755,133 @@ img.kp-avatar {
   color: var(--kp-bad);
 }
 
+/* Graphique de ventes */
+.kp-sales {
+  margin: 14px 0 4px;
+  padding: 11px 12px 9px;
+  border: 1px solid var(--kp-line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(0, 0, 0, 0.08));
+}
+
+.kp-sales-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kp-sales-head b {
+  font-size: 12px;
+}
+
+.kp-sales-head span {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-sales-kpis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 6px 0 2px;
+}
+
+.kp-sales-kpis span {
+  display: grid;
+  gap: 0;
+}
+
+.kp-sales-kpis b {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kp-sales-kpis small {
+  color: var(--kp-muted);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kp-sales-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 2px;
+}
+
+.kp-sales-grid {
+  stroke: rgba(255, 255, 255, 0.075);
+  stroke-width: 1;
+}
+
+.kp-sales-axis {
+  fill: var(--kp-muted);
+  font-size: 8px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.kp-sales-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.kp-sales-line.is-auto,
+.kp-sales-dot.is-auto {
+  stroke: var(--kp-accent);
+}
+
+.kp-sales-line.is-manual,
+.kp-sales-dot.is-manual {
+  stroke: #60a5fa;
+}
+
+.kp-sales-dot {
+  fill: var(--kp-bg);
+  stroke-width: 2;
+}
+
+.kp-sales-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-sales-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.kp-sales-legend i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--kp-accent);
+}
+
+.kp-sales-legend i.is-manual {
+  background: #60a5fa;
+}
+
+.kp-sales-legend b {
+  color: var(--kp-text);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.kp-sales-note {
+  margin-top: 4px;
+  color: var(--kp-muted);
+  font-size: 8px;
+}
+
 /* Liste de l'onglet Vente */
 .kp-sell-list {
   display: grid;
