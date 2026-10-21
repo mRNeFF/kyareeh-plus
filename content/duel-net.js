@@ -1,13 +1,26 @@
-/* Kyara Duel — client réseau du relais (chantier B, voir docs/DUEL-SPEC.md §4).
+/* Kyara Duel — client réseau du relais, protocole v2 (chantier B, voir docs/DUEL-SPEC.md §4 et
+ * docs/DUEL-V2.md §2). Script classique (aucune syntaxe de module) : il se charge aussi bien dans
+ * un content script que dans une page d'extension (duel/duel.html, moz-extension://) ou sous Node.
  *
- * Expose window.KYARA_DUEL_NET (content script, sans module ni build) et module.exports (tests Node).
+ * Expose window.KYARA_DUEL_NET (ou globalThis) et module.exports (tests Node).
  *
  *   const net = KYARA_DUEL_NET.connect(url, { name, deck, onEvent });
  *   net.create(); net.join('ABCDE'); net.act(action); net.rematch(); net.leave(); net.close();
  *   net.status   // 'connecting' | 'open' | 'reconnecting' | 'closed'
  *
+ * Choix simultanés : à chaque phase (net.phase = 'choose' | 'replace' | 'ended'), chaque joueur
+ * de net.pending range UN choix secret avec net.act(action) (une des net.legal). L'adversaire
+ * n'apprend que « il a choisi » (message 'chosen', net.chosen = joueurs ayant verrouillé). Le tour
+ * est résolu quand les deux ont choisi : un seul message 'state' porte alors tous les événements.
+ *   net.pending        // joueurs (0|1) qui doivent encore choisir
+ *   net.chosen         // joueurs attendus qui ont déjà verrouillé leur choix
+ *   net.phase          // 'choose' | 'replace' | 'ended' | null
+ *   net.choice         // mon choix verrouillé (null tant que je n'ai pas choisi)
+ *   net.canAct()       // vrai si c'est à moi de choisir (je suis dans net.pending)
+ *   net.opponentChosen()  // vrai si l'adversaire a verrouillé son choix
+ *
  * onEvent(msg, net) reçoit chaque message du serveur tel quel ({ t: 'welcome' | 'room' | 'state' |
- * 'end' | 'error' | 'peer' | 'pong', … }) ainsi que des événements locaux { t: 'net', status }
+ * 'chosen' | 'end' | 'error' | 'peer' | 'pong', … }) ainsi que des événements locaux { t: 'net', status }
  * à chaque changement de net.status, et { t: 'error', code: 'session_taken', message } si la
  * session est reprise dans un autre onglet (pas de reconnexion automatique dans ce cas).
  *
@@ -18,7 +31,7 @@
 (function () {
   'use strict';
 
-  var PROTOCOL = 1;
+  var PROTOCOL = 2;
   var DEFAULTS = {
     pingMs: 20000, // keepalive applicatif
     deadMs: 50000, // sans aucun message du serveur depuis ce délai : connexion jugée morte
@@ -55,10 +68,16 @@
       room: null, // dernier message 'room'
       you: null, // 0 | 1 dans le duel courant
       seq: null, // numéro du dernier état reçu
-      state: null, // dernier état du moteur
+      state: null, // dernier état du moteur (vue du joueur : le choix adverse est masqué)
+      phase: null, // 'choose' | 'replace' | 'ended'
+      pending: [], // joueurs qui doivent encore choisir dans cette phase
+      chosen: [], // joueurs attendus qui ont déjà verrouillé leur choix
+      choice: null, // mon choix verrouillé de la phase courante
       legal: [], // actions légales pour moi dans cet état (fournies par le serveur)
-      deadlineAt: null, // horodatage local de fin du tour courant
+      deadlineAt: null, // horodatage local de fin de la phase courante
+      phaseMs: null, // durée totale de la phase courante (pour une jauge)
       ended: null, // dernier message 'end'
+      last: null, // résumé du dernier tour résolu ({ phase, actions[2], auto[2] })
 
       create: function (extra) {
         send(merge({ t: 'create' }, extra));
@@ -82,7 +101,15 @@
         if (p && p.deck !== undefined) profile.deck = p.deck;
         send(hello());
       },
-      /** Millisecondes restantes du tour courant (null hors duel). */
+      /** Vrai si je dois encore choisir (action ou remplaçant). */
+      canAct: function () {
+        return net.you !== null && net.pending.indexOf(net.you) >= 0;
+      },
+      /** Vrai si l'adversaire a verrouillé son choix (on ne sait pas lequel). */
+      opponentChosen: function () {
+        return net.you !== null && net.chosen.indexOf(1 - net.you) >= 0;
+      },
+      /** Millisecondes restantes de la phase courante (null hors duel). */
       timeLeft: function () {
         return net.deadlineAt === null ? null : Math.max(0, net.deadlineAt - Date.now());
       },
@@ -123,9 +150,19 @@
       net.you = null;
       net.seq = null;
       net.state = null;
+      clearPhase();
+      net.last = null;
+      net.ended = null;
+    }
+
+    function clearPhase() {
+      net.phase = null;
+      net.pending = [];
+      net.chosen = [];
+      net.choice = null;
       net.legal = [];
       net.deadlineAt = null;
-      net.ended = null;
+      net.phaseMs = null;
     }
 
     function emit(msg) {
@@ -270,8 +307,8 @@
           if (msg.status === 'waiting') {
             net.state = null;
             net.seq = null;
-            net.legal = [];
-            net.deadlineAt = null;
+            clearPhase();
+            net.last = null;
             net.ended = null;
           }
           break;
@@ -279,11 +316,30 @@
           net.seq = msg.seq;
           net.you = msg.you;
           net.state = msg.state;
+          net.phase = msg.phase || null;
+          net.pending = msg.pending || [];
+          net.chosen = msg.chosen || [];
+          net.choice = msg.choice || null;
           net.legal = msg.legal || [];
           net.deadlineAt = typeof msg.deadline === 'number' ? Date.now() + msg.deadline : null;
+          net.phaseMs = typeof msg.timer === 'number' ? msg.timer : null;
+          if (msg.last) net.last = msg.last;
+          break;
+        case 'chosen':
+          // Un joueur a verrouillé son choix. Le mien me revient avec l'action ; celui de l'adversaire sans.
+          if (typeof msg.seq === 'number' && msg.seq !== net.seq) break; // message périmé
+          net.pending = msg.pending || [];
+          net.chosen = msg.chosen || [];
+          if (msg.player === net.you) {
+            net.choice = msg.action || net.choice;
+            net.legal = [];
+          }
           break;
         case 'end':
           net.ended = msg;
+          net.phase = 'ended';
+          net.pending = [];
+          net.choice = null;
           net.deadlineAt = null;
           net.legal = [];
           break;
@@ -307,6 +363,7 @@
   }
 
   var api = { connect: connect, PROTOCOL: PROTOCOL };
-  if (typeof window !== 'undefined') window.KYARA_DUEL_NET = api;
+  var root = typeof window !== 'undefined' ? window : typeof self !== 'undefined' ? self : typeof globalThis !== 'undefined' ? globalThis : null;
+  if (root) root.KYARA_DUEL_NET = api;
   if (typeof module !== 'undefined' && module && module.exports) module.exports = api;
 })();
