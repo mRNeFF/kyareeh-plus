@@ -1,6 +1,6 @@
 # Kyareeh+
 
-Extension Firefox pour [kyara.games](https://kyara.games) : tableau de bord de compte, valorisation de la collection en chakra, analyse du marché, vente assistée et mise en enchère des cartes.
+Extension **Firefox et Chrome / Edge** pour [kyara.games](https://kyara.games) : tableau de bord de compte, valorisation de la collection en chakra, analyse du marché, vente assistée et mise en enchère des cartes.
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
@@ -47,6 +47,18 @@ Une fois l'extension publiée sur AMO :
 5. Un bouton **◆ Kyareeh+** apparaît en bas à droite. Raccourci : `Alt+K`.
 
 Un add-on temporaire disparaît au redémarrage de Firefox : c'est pour le développement, pas pour un usage quotidien.
+
+### Chrome / Edge
+
+Le paquet Chrome est dérivé du même code (manifeste MV3 avec service worker) :
+
+```powershell
+npm.cmd run build:chrome     # → dist/chrome/ + web-ext-artifacts/kyareeh-plus-<version>-chrome.zip
+```
+
+Puis `chrome://extensions` → **Mode développeur** → **Charger l'extension non empaquetée** →
+`dist/chrome`. La procédure complète (test automatisé, fiche Chrome Web Store, Edge Add-ons)
+est dans [`CHROME.md`](CHROME.md).
 
 ## Mettre à jour
 
@@ -190,6 +202,16 @@ Les 12 avertissements `UNSAFE_VAR_ASSIGNMENT` sont attendus : l'interface est co
 `innerHTML` dans un Shadow DOM, avec échappement systématique via `esc()` pour toute valeur
 issue du réseau.
 
+## Publier sur le Chrome Web Store
+
+Le paquet Chrome est **dérivé** du même code : `npm run build:chrome` génère
+`dist/chrome/` et `web-ext-artifacts/kyareeh-plus-<version>-chrome.zip`. Le manifeste est
+converti pour Chrome (service worker MV3, suppression des clés Firefox, icône 128) ; aucun
+fichier de code n'est transformé.
+
+La procédure détaillée — compte développeur, fiche, captures, justifications des permissions,
+Edge Add-ons et différences Firefox/Chrome — est dans [`CHROME.md`](CHROME.md).
+
 ## Utilisation
 
 - **Compte** : vue d'ensemble, valorisation, ressources, top cartes.
@@ -274,17 +296,22 @@ npm run lint
 npm run verify:statglobal # calculs de l'onglet Stat
 npm run verify:analysis
 npm run build
+npm run build:chrome     # paquet Chrome / Edge (dist/chrome + zip)
+npm run verify:chrome    # charge le paquet dans un Chrome headless (11 contrôles)
 ```
 
 Structure :
 
 ```
-manifest.json
+manifest.json        # manifeste Firefox ; le manifeste Chrome en est dérivé
 content/
   ui.js             # panneau, chargement des données, moteur de prix, vente, statistiques
+  duel-data.js      # données des cartes pour le mode Duel
   ui.css            # styles injectés dans le Shadow DOM
 popup/              # popup de la barre d'outils
 icons/
+scripts/build-chrome.mjs  # manifeste + zip Chrome
+dist/chrome/        # sortie du build Chrome (gitignorée)
 ```
 
 Le panneau est monté dans un Shadow DOM pour ne pas entrer en conflit avec le CSS du site.

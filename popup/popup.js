@@ -1,5 +1,11 @@
 const ext = globalThis.browser ?? globalThis.chrome;
 
+// Le même popup sert Firefox et Chrome : seul le texte de secours change.
+const IS_GECKO = /firefox\//i.test(navigator.userAgent);
+const MANUAL_RELOAD_HINT = IS_GECKO
+  ? 'Échec : recharge manuellement dans about:debugging.'
+  : 'Échec : recharge manuellement dans chrome://extensions.';
+
 const statusEl = document.getElementById('status');
 const openBtn = document.getElementById('open');
 const siteEl = document.getElementById('site');const reloadBtn = document.getElementById('reload');
@@ -59,7 +65,7 @@ function doReload() {
       try {
         ext.runtime.reload();
       } catch {
-        reloadHint.textContent = 'Échec : recharge manuellement dans about:debugging.';
+        reloadHint.textContent = MANUAL_RELOAD_HINT;
       }
       finish();
     });
