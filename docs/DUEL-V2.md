@@ -9,11 +9,11 @@ conventions, relais autoritatif) reste valable. Conventions : `AGENTS.md` (fran�
 
 | Chantier | Statut |
 |---|---|
-| A — moteur v2 + règles + équilibrage | à faire |
-| B — relais v2 (choix simultanés) | à faire |
-| C — application duel détachable | à faire |
-| D — effets (sons, particules, carte d'ultime) | à faire |
-| Intégration + test navigateur | à faire |
+| A — moteur v2 + règles + équilibrage | fait (457 contrôles ; 12 000 duels : 15,4 tours, Mythiques 36–68 %) |
+| B — relais v2 (choix simultanés) | fait (171 contrôles) |
+| C — application duel détachable | fait (testé sous Chromium ; à vérifier dans Firefox sur kyara.games) |
+| D — effets (sons, particules, carte d'ultime) | fait (démo : duel/fx-demo.html) |
+| Intégration + test navigateur | fait (entraînement : changement, K.O., remplacement, ultime) |
 
 Reprise : lire ce fichier, `git log duel-v2`, puis relancer les chantiers non terminés.
 

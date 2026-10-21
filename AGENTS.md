@@ -50,9 +50,10 @@ l'extension depuis la console ou un navigateur automatisé.
 | `content/duel-data.js` | Champions du duel (données + `passiveFx` générés par `scripts/duel-passives.mjs`). |
 | `content/duel-engine.js` | Moteur du duel, **pur** (aucun DOM/réseau/aléa hors graine), partagé par l'extension et le relais. |
 | `content/duel-rules.js` | Livre de règles affiché dans l'onglet Règles (copie : `docs/REGLES-DUEL.md`). |
-| `content/duel-net.js` | Client WebSocket du relais (reconnexion par jeton). |
+| `content/duel-net.js` | Client WebSocket du relais (protocole v2, reconnexion par jeton). |
+| `duel/` | Application du duel (page d'extension) : `duel-app.js`, `duel.css`, `duel-fx.js` (sons/particules/ultime), `fx-demo.html`. Intégrée au panneau par iframe ou détachée en fenêtre. |
 | `relay/` | Serveur Node autoritatif des salons en ligne (Railway). Exclu du zip AMO. |
-| `docs/DUEL-SPEC.md` | Contrat moteur / protocole / interface du duel. |
+| `docs/DUEL-SPEC.md`, `docs/DUEL-V2.md` | Contrats du duel (v1, puis v2 : combat 1 contre 1, application détachable, effets). |
 | `background/background.js` | Service worker minimal (messages popup ↔ onglet). |
 | `popup/` | Popup de la barre d'outils (recharger l'extension). |
 | `test/harness.html` | Faux site + fausse API (comptes, marché, packs, amis, classements). |
