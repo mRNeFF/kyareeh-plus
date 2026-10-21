@@ -5,14 +5,15 @@ Ce fichier est destiné à l'agent IA qui reprend le projet dans un autre enviro
 
 ## 1. Le projet en une phrase
 
-Extension **Firefox (Manifest V3)** nommée **Kyareeh+** (`kyara-plus@axel.dev`) qui ajoute un
-panneau de contrôle à [kyara.games](https://kyara.games) : tableau de bord du compte, valorisation
-en chakra, vente assistée, marché, chasses de cartes, auto-open de boosters et statistiques.
+Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kyareeh+**
+(`kyara-plus@axel.dev`) qui ajoute un panneau de contrôle à [kyara.games](https://kyara.games) :
+tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
+auto-open de boosters et statistiques.
 
-- Version actuelle : **1.0.2** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.0.1** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
-- Dernier commit de référence : `150960f`
+- Dernier commit de référence : `4ca978a`
 
 ## 2. Démarrage rapide
 
@@ -20,13 +21,16 @@ en chakra, vente assistée, marché, chasses de cartes, auto-open de boosters et
 npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
+npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
+npm run verify:chrome       # 11 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 43 contrôles
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-odds.mjs        # ~97 comparaisons (1 écart "season-2026-fall R" PRÉEXISTANT, ne pas s'alarmer)
 ```
 
-Chargement manuel : `about:debugging#/runtime/this-firefox` → *Charger un module temporaire* →
-`manifest.json`. Le panneau s'ouvre avec **Alt+K** ou le bouton flottant.
+Chargement manuel Firefox : `about:debugging#/runtime/this-firefox` → *Charger un module temporaire* →
+`manifest.json`. Chargement Chrome : `chrome://extensions` → mode développeur →
+*Charger l'extension non empaquetée* → `dist/chrome`. Le panneau s'ouvre avec **Alt+K** ou le bouton flottant.
 
 Harness de test local (API du site simulée, aucun compte requis) :
 
@@ -41,16 +45,20 @@ l'extension depuis la console ou un navigateur automatisé.
 
 | Fichier | Rôle |
 |---|---|
-| `content/ui.js` (~8 800 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
+| `content/ui.js` (~9 200 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
 | `content/ui.css` (~3 300 lignes) | Styles injectés dans un Shadow DOM (préfixe `kp-`). |
+| `content/duel-data.js` | Données des cartes pour le mode Duel. |
 | `background/background.js` | Service worker minimal (messages popup ↔ onglet). |
 | `popup/` | Popup de la barre d'outils (recharger l'extension). |
 | `test/harness.html` | Faux site + fausse API (comptes, marché, packs, amis, classements). |
 | `test/server.cjs` | Serveur statique local pour le harness. |
 | `test/verify-*.mjs` | Tests Node des blocs purs extraits de `ui.js`. |
+| `test/chrome-smoke.mjs` | Charge le paquet Chrome dans un Chrome headless (CDP) et vérifie worker, content script, popup, rendu. |
 | `scripts/release.mjs` | Bump + build + lint + commit/push (+ upload AMO si clés API). |
+| `scripts/build-chrome.mjs` | Manifeste Chrome **dérivé** de `manifest.json` + zip (aucun code transformé). |
 | `.web-ext-config.mjs` | Fichiers exclus du `.zip` publié. |
-| `README.md` | Documentation utilisateur (fonctionnalités, installation, AMO). |
+| `README.md` | Documentation utilisateur (fonctionnalités, installation, AMO, Chrome). |
+| `CHROME.md` | Portage Chrome/Edge : build, test, publication Chrome Web Store. |
 
 ## 4. Conventions à ne pas casser
 
@@ -66,7 +74,10 @@ l'extension depuis la console ou un navigateur automatisé.
    `/* ANALYSIS:BEGIN … ANALYSIS:END */` et `/* STATS:BEGIN … STATS:END */`.
    Les tests Node extraient littéralement ces blocs → **ne jamais y mettre de DOM, de réseau ou de stockage**.
 7. **Version** : bumper `manifest.json`, `package.json` **et** le nom du zip dans `scripts.build`.
-8. **Avant de livrer** : `node --check content/ui.js`, les deux `verify-*.mjs`, `web-ext lint`, puis commit + push.
+   Le manifeste Chrome n'est jamais édité à la main : il est régénéré par `scripts/build-chrome.mjs`.
+8. **Avant de livrer** : `node --check content/ui.js`, les tests `verify-*.mjs`, `web-ext lint`,
+   puis commit + push. Toute modification du manifeste ou du background exige aussi
+   `npm run verify:chrome`.
 9. Ne jamais supprimer une fonctionnalité existante sans accord explicite.
 
 ## 5. Comment étendre
@@ -130,11 +141,11 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
 | **Stat** | Classement de comptes suivis (recherche manuelle + import auto des amis) sur 10 métriques. Menu déroulant du critère, tableau réduit à ce critère, camembert à droite avec tous les comptes et 50 couleurs max, rangs ex æquo, rang site sous le pseudo, détail par compte. |
 | **Réglages** | Cache des prix, délais, décote, type de vente, sound, anti-AFK. Plus de boutons de mise à jour. |
-| **Debug** | Version du code, version chargée par Firefox, rechargement de l'extension, requêtes récentes, clés du bootstrap, diagnostic copiable. |
+| **Debug** | Version du code, version chargée par le navigateur, rechargement de l'extension, requêtes récentes, clés du bootstrap, diagnostic copiable. |
 
 ## 8. Limites connues / dette
 
-- `content/ui.js` est un monolithe (~8 600 lignes). Toute nouvelle vue l'agrandit : extraire un
+- `content/ui.js` est un monolithe (~9 200 lignes). Toute nouvelle vue l'agrandit : extraire un
   module serait utile mais risqué sans tests de non-régression UI.
 - 12 avertissements `web-ext lint` (`UNSAFE_VAR_ASSIGNMENT` sur `innerHTML`) : inhérents au rendu
   par chaînes ; à traiter seulement si on migre vers du DOM construit.
@@ -143,6 +154,13 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 - Le harness simule l'API : une forme de réponse réelle inattendue (ex. `/api/me/friends`)
   ne se verrait qu'en production.
 - `verify-odds.mjs` a **1 écart préexistant** (`season-2026-fall R`), antérieur à la 1.0.0.
+- **Paquet Chrome** : manifeste dérivé (`scripts/build-chrome.mjs`), aucun code transformé.
+  `icons/icon-128.png` est un agrandissement LANCZOS de `icon-96.png` (pas d'original plus
+  grand) : à remplacer si un logo source réapparaît. Depuis Chrome 137, `--load-extension`
+  est ignoré dans les builds de marque ; `test/chrome-smoke.mjs` charge donc l'extension via
+  CDP `Extensions.loadUnpacked` et travaille sur une copie autorisant `127.0.0.1:8787`.
+- Les textes qui nomment le navigateur ou sa page de réglages passent par `IS_GECKO` /
+  `BROWSER_NAME` dans `ui.js` (et `popup.js`) : ne pas réintroduire « Firefox » en dur.
 
 ## 9. Pistes proposées, non développées
 

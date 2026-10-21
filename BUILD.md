@@ -82,3 +82,18 @@ popup/popup.js             3552
   dépôt GitHub, pour indiquer à l'utilisateur qu'une nouvelle version existe. Aucune donnée
   n'est transmise.
 - Aucun script distant n'est chargé : tout le code est dans le paquet.
+
+## Variante Chrome / Edge
+
+Le paquet déposé sur le Chrome Web Store est construit à partir du **même dépôt**, sans
+transformation du code :
+
+```bash
+npm run build:chrome
+# → dist/chrome/ + web-ext-artifacts/kyareeh-plus-<version>-chrome.zip
+```
+
+Seul le manifeste est dérivé : `background.scripts` devient `background.service_worker`,
+les clés `browser_specific_settings` (Firefox/AMO) sont retirées, `minimum_chrome_version`
+et l'icône 128 sont ajoutés. Les fichiers JS/CSS sont copiés octet pour octet.
+Détail complet et procédure de publication : [`CHROME.md`](CHROME.md).
