@@ -25,6 +25,7 @@ npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
 npm run verify:chrome       # 11 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 43 contrôles
 node test/verify-statglobal.mjs  # 55 contrôles
+node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
 node test/verify-odds.mjs        # ~97 comparaisons (1 écart "season-2026-fall R" PRÉEXISTANT, ne pas s'alarmer)
 ```
 

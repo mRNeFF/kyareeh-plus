@@ -14,6 +14,7 @@
     "verify:odds": "node test/verify-odds.mjs",
     "verify:analysis": "node test/verify-analysis.mjs",
     "verify:statglobal": "node test/verify-statglobal.mjs",
+    "verify:duel": "node test/verify-duel-data.mjs",
     "verify:chrome": "node test/chrome-smoke.mjs"
   },
   "devDependencies": {
