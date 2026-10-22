@@ -35,6 +35,7 @@
   const STATS_KEY = 'kyareeh.statboard.v1';
   const SALES_KEY = 'kyareeh.sales.v1';
   const SALES_MAX = 2000;
+  const SOUND_KEY = 'kyareeh.sound.v1';
   // Les comptes suivis sont relus au bout de 12 h (ou à la demande).
   const STAT_CACHE_MS = 12 * 3600 * 1000;
   const STAT_MAX_ACCOUNTS = 20;
@@ -71,9 +72,8 @@
     // Vente automatique : uniquement les doublons, jamais la dernière copie.
     autoSellType: 'fixed',
     autoSellStrategy: 'balanced',
-    autoSellMinPrice: 1,
-    autoSellIntervalSec: 60,
-    autoSellMaxPerCycle: 10,
+    autoSellDelayMinSec: 5,
+    autoSellDelayMaxSec: 60,
     autoSellIncludeML: false,
     autoSellDryRun: false
   };
@@ -200,6 +200,7 @@
       detail: null,
       detailLoading: false,
       detailError: null,
+      detailHideRecommend: false,
       refreshing: false,
       lastRefresh: 0
     },
@@ -232,6 +233,8 @@
     // Journal local des annonces créées par Kyareeh+ (pas d'historique côté site).
     salesLog: [],
     salesLogLoaded: false,
+    // Son global, partagé par les onglets Global et par +Duel.
+    sound: { muted: false, volume: 0.7 },
     debug: [],
     bootKeys: [],
     notice: '',
@@ -385,6 +388,10 @@
             <div><b>Kyareeh+</b><small>chakra &amp; doublons</small></div>
           </div>
           <div class="kp-head-actions">
+            <span class="kp-sound">
+              <button class="kp-icon-btn" id="kp-sound-btn" type="button" data-act="sound-mute" aria-pressed="false" title="Couper le son">🔊</button>
+              <input class="kp-volume" id="kp-sound-range" type="range" min="0" max="100" step="5" value="70" data-role="sound-volume" aria-label="Volume global">
+            </span>
             <button class="kp-icon-btn" type="button" data-act="refresh" title="Rafraîchir les données">⟳</button>
             <button class="kp-icon-btn" type="button" data-act="close" title="Fermer">✕</button>
           </div>
@@ -413,7 +420,9 @@
       slot: qs('#kp-duel-slot'),
       foot: qs('#kp-foot'),
       modal: qs('#kp-modal'),
-      modalCard: qs('#kp-modal-card')
+      modalCard: qs('#kp-modal-card'),
+      soundBtn: qs('#kp-sound-btn'),
+      soundRange: qs('#kp-sound-range')
     };
 
     shadow.addEventListener('click', onClick);
@@ -801,14 +810,13 @@
     state.settings.autoSellStrategy = ['quick', 'balanced', 'max'].includes(state.settings.autoSellStrategy)
       ? state.settings.autoSellStrategy
       : 'balanced';
-    state.settings.autoSellMinPrice = Math.max(1, Math.round(Number(state.settings.autoSellMinPrice) || 1));
-    state.settings.autoSellIntervalSec = Math.min(
-      3600,
-      Math.max(30, Math.round(Number(state.settings.autoSellIntervalSec) || 60))
+    state.settings.autoSellDelayMinSec = Math.min(
+      300,
+      Math.max(5, Math.round(Number(state.settings.autoSellDelayMinSec) || 5))
     );
-    state.settings.autoSellMaxPerCycle = Math.min(
-      10,
-      Math.max(1, Math.round(Number(state.settings.autoSellMaxPerCycle) || 10))
+    state.settings.autoSellDelayMaxSec = Math.min(
+      300,
+      Math.max(state.settings.autoSellDelayMinSec, Math.round(Number(state.settings.autoSellDelayMaxSec) || 60))
     );
     state.settings.autoSellIncludeML = Boolean(state.settings.autoSellIncludeML);
     state.settings.autoSellDryRun = Boolean(state.settings.autoSellDryRun);
@@ -836,7 +844,10 @@
       'autoJitterMs',
       'autoSeriesCount',
       'autoSeriesSec',
-      'autoMaxDelaySec'
+      'autoMaxDelaySec',
+      'autoSellMinPrice',
+      'autoSellIntervalSec',
+      'autoSellMaxPerCycle'
     ]) {
       delete state.settings[stale];
     }
@@ -861,6 +872,7 @@
       state.prices = cached.prices && typeof cached.prices === 'object' ? cached.prices : cached;
     }
     await loadSalesLog();
+    await loadSoundPrefs();
     await mount();
     await loadData();
     await loadAutoLog();
@@ -1368,7 +1380,6 @@
    */
   function autoSellSelect(rows, options = {}) {
     const includeML = Boolean(options.includeML);
-    const minPrice = Math.max(0, Number(options.minPrice) || 0);
     return (Array.isArray(rows) ? rows : [])
       .map((row) => ({ ...row, autoQty: autoSellSpare(row) }))
       .filter((row) => {
@@ -1378,8 +1389,7 @@
         if (!includeML && ['M', 'L'].includes(String(row.rarity || '').toUpperCase())) return false;
         if (row.price == null || row.price === '') return false;
         const price = Number(row.price);
-        if (!Number.isFinite(price) || price < minPrice) return false;
-        return true;
+        return Number.isFinite(price) && price > 0;
       })
       .sort(
         (a, b) =>
@@ -1399,12 +1409,7 @@
 
   /** Répartit les places d'annonce disponibles, en commençant par les lots les plus values. */
   function autoSellBuildPlan(candidates, options = {}) {
-    const slots = Math.max(0, Math.min(10, Math.round(Number(options.slots) || 0)));
-    const maxPerCycle = Math.max(
-      1,
-      Math.min(slots || 10, Math.round(Number(options.maxPerCycle) || slots || 10))
-    );
-    let left = Math.min(slots, maxPerCycle);
+    let left = Math.max(0, Math.min(10, Math.round(Number(options.slots) || 0)));
     const plan = [];
     for (const row of Array.isArray(candidates) ? candidates : []) {
       if (left <= 0) break;
@@ -1674,7 +1679,7 @@
   }
 
   /** Ouverture de la fiche détaillée : prix, concurrence, carnet d'achat. */
-  async function openCardDetail(id) {
+  async function openCardDetail(id, opts = {}) {
     const key = String(id ?? '');
     if (!key) return;
     const view = state.sellView;
@@ -1682,6 +1687,8 @@
     view.detail = null;
     view.detailError = null;
     view.detailLoading = true;
+    // Fiche ouverte depuis une annonce en cours : on masque le prix recommandé.
+    view.detailHideRecommend = Boolean(opts.hideRecommend);
     render();
 
     const row = sellRowOf(key);
@@ -1736,6 +1743,7 @@
     view.detail = null;
     view.detailError = null;
     view.detailLoading = false;
+    view.detailHideRecommend = false;
     render();
   }
 
@@ -1747,7 +1755,7 @@
     render();
     try {
       if (view.detailId) {
-        await openCardDetail(view.detailId);
+        await openCardDetail(view.detailId, { hideRecommend: view.detailHideRecommend });
       } else {
         const ids = [...new Set(state.collection.map((c) => String(c.characterId ?? c.id)))];
         await loadPrices(ids, true);
@@ -1756,6 +1764,71 @@
     } finally {
       view.refreshing = false;
       render();
+    }
+  }
+
+  let saleAudioCtx = null;
+
+  /** Applique le son global (partagé entre les onglets et +Duel). */
+  function applySoundPrefs(raw) {
+    if (!raw || typeof raw !== 'object') return;
+    if (typeof raw.muted === 'boolean') state.sound.muted = raw.muted;
+    if (Number.isFinite(Number(raw.volume))) {
+      state.sound.volume = Math.max(0, Math.min(1, Number(raw.volume)));
+    }
+    syncSoundControls();
+  }
+
+  function syncSoundControls() {
+    if (!ui?.soundBtn || !ui?.soundRange) return;
+    ui.soundBtn.setAttribute('aria-pressed', state.sound.muted ? 'true' : 'false');
+    ui.soundBtn.textContent = state.sound.muted ? '🔇' : '🔊';
+    ui.soundBtn.title = state.sound.muted ? 'Activer le son' : 'Couper le son';
+    ui.soundRange.value = String(Math.round(state.sound.volume * 100));
+    ui.soundRange.disabled = state.sound.muted;
+  }
+
+  async function loadSoundPrefs() {
+    applySoundPrefs(await storageGet(SOUND_KEY, null));
+    try {
+      ext.storage.onChanged.addListener((changes, area) => {
+        if (area && area !== 'local') return;
+        if (changes && changes[SOUND_KEY]) applySoundPrefs(changes[SOUND_KEY].newValue);
+      });
+    } catch {
+      /* pas d'écoute : le son reste local à cet onglet */
+    }
+    syncSoundControls();
+  }
+
+  function persistSound() {
+    storageSet(SOUND_KEY, { muted: state.sound.muted, volume: state.sound.volume });
+  }
+
+  /** Petit son discret de vente, coupé si le son global est muet. */
+  function playSaleSound() {
+    if (state.sound.muted || state.sound.volume <= 0) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      if (!saleAudioCtx) saleAudioCtx = new Ctx();
+      const ctx = saleAudioCtx;
+      const t = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, t);
+      osc.frequency.exponentialRampToValueAtTime(1318.5, t + 0.09);
+      const peak = Math.max(0.0001, 0.07 * state.sound.volume);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(peak, t + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.24);
+    } catch {
+      /* audio indisponible */
     }
   }
 
@@ -1809,6 +1882,7 @@
       matched: Boolean(entry?.matched)
     });
     if (state.salesLog.length > SALES_MAX) state.salesLog.splice(0, state.salesLog.length - SALES_MAX);
+    if (entry?.matched) playSaleSound();
     saveSalesSoon();
   }
 
@@ -2781,6 +2855,7 @@
     const buyoutPct = Number(options.buyoutPct) || 0;
     const dryRun = Boolean(options.dryRun);
     const gapMs = Math.max(350, Number(options.gapMs) || 1200);
+    const gap = typeof options.gap === 'function' ? options.gap : () => gapMs;
     const log = typeof options.log === 'function' ? options.log : () => {};
     const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
     const source = options.source === 'auto' ? 'auto' : 'manual';
@@ -2844,7 +2919,7 @@
           }
         }
 
-        await sleep(gapMs);
+        await sleep(Math.max(0, Number(gap()) || gapMs));
       }
     }
     return result;
@@ -2942,6 +3017,17 @@
       : cfg.durations[0] ?? 12;
   }
 
+  /** Délai anti-flag entre deux ventes : aléatoire dans la plage réglée. */
+  function autoSellRandomDelayMs() {
+    const rawMin = Number(state.settings.autoSellDelayMinSec);
+    const rawMax = Number(state.settings.autoSellDelayMaxSec);
+    // Valeur nulle : utilisé uniquement par les tests automatisés.
+    if (!(rawMin > 0) || !(rawMax > 0)) return 0;
+    const min = Math.min(300, Math.max(5, rawMin));
+    const max = Math.min(300, Math.max(min, rawMax));
+    return (min + Math.random() * (max - min)) * 1000;
+  }
+
   /**
    * Un cycle : relit la collection, prix uniquement les doublons, respecte les
    * places d'annonce, puis crée les annonces. `preview` ne poste rien.
@@ -2973,13 +3059,9 @@
       floor: recycleFloor(row.rarity)
     }));
     const candidates = autoSellSelect(priced, {
-      includeML: Boolean(s.autoSellIncludeML),
-      minPrice: Number(s.autoSellMinPrice) || 1
+      includeML: Boolean(s.autoSellIncludeML)
     });
-    const plan = autoSellBuildPlan(candidates, {
-      slots: slots.remaining,
-      maxPerCycle: Number(s.autoSellMaxPerCycle) || 10
-    });
+    const plan = autoSellBuildPlan(candidates, { slots: slots.remaining });
     const withoutPrice = priced.filter(
       (row) =>
         autoSellSpare(row) > 0 &&
@@ -3025,7 +3107,7 @@
       duration: autoSellDuration(),
       buyoutPct: state.settings.buyoutPct,
       dryRun,
-      gapMs: state.settings.gapMs,
+      gap: autoSellRandomDelayMs,
       source: 'auto',
       log: autoSellLog,
       shouldStop: () => !a.running || a.stop
@@ -3181,12 +3263,8 @@
         break;
       }
 
-      const interval = Math.min(
-        3600,
-        Math.max(30, Math.round(Number(state.settings.autoSellIntervalSec) || 60))
-      ) * 1000;
-      const idle = Math.max(interval, 5 * 60 * 1000);
-      const wait = result.plan.length ? interval : idle;
+      const idle = Math.max(autoSellRandomDelayMs(), 60 * 1000);
+      const wait = result.plan.length ? autoSellRandomDelayMs() : idle;
       a.nextAt = Date.now() + wait;
       a.status = result.plan.length
         ? `Cycle ${a.cycles} · ${fmt(a.created)} annonce(s) · ${fmt(a.matched)} vente(s) immédiate(s)`
@@ -3213,6 +3291,7 @@
 
   function renderUnsafe() {
     if (!state.mounted || !ui) return;
+    syncSoundControls();
     ui.panel.hidden = !state.open;
     // Les onglets denses (Vente, Stat) gardent un peu plus de largeur.
     ui.panel.classList.toggle('is-wide', state.tab === 'sell' || state.tab === 'stat');
@@ -3524,10 +3603,9 @@
           `<button class="kp-mode ${duel.mode === id ? 'is-active' : ''}" type="button" data-act="mode" data-mode="${id}">${label}</button>`
       )
       .join('');
-    const detach =
-      duel.mode === 'duel' && !duel.detached
-        ? '<button class="kp-mode kp-duel-detach" type="button" data-act="duel-detach" title="Ouvrir le duel dans sa propre fenêtre">⧉ Détacher</button>'
-        : '';
+    const detach = !duel.detached
+      ? '<button class="kp-mode kp-duel-detach" type="button" data-act="duel-detach" title="Ouvrir le duel dans sa propre fenêtre">⧉ Détacher</button>'
+      : '';
     ui.modes.innerHTML = buttons + detach;
   }
 
@@ -5480,9 +5558,26 @@
       </div>`;
   }
 
+  /** Valeur totale des doublons selon la stratégie choisie (recalculée à chaque rendu). */
+  function autoSellEstimate() {
+    const strategy = state.settings.autoSellStrategy;
+    const priced = sellRows().map((row) => ({ ...row, price: autoSellPrice(row, strategy) }));
+    const candidates = autoSellSelect(priced, { includeML: Boolean(state.settings.autoSellIncludeML) });
+    let total = 0;
+    let copies = 0;
+    for (const row of candidates) {
+      total += (Number(row.price) || 0) * row.autoQty;
+      copies += row.autoQty;
+    }
+    return { total, copies, cards: candidates.length };
+  }
+
   function autoSellPanel(all, slots) {
     const a = state.autoSell;
     const s = state.settings;
+    const estimate = autoSellEstimate();
+    const strategyLabel =
+      { quick: 'Vente rapide', balanced: 'Équilibrée', max: 'Prix maximal' }[s.autoSellStrategy] ?? 'Équilibrée';
     const dupes = all.filter((row) => row.qty > 1).length;
     const spare = all.reduce((sum, row) => sum + autoSellSpare(row), 0);
     const withoutPrice = all.filter(
@@ -5539,21 +5634,11 @@
               <option value="max" ${s.autoSellStrategy === 'max' ? 'selected' : ''}>Prix maximal</option>
             </select>
           </label>
-          <label>
-            <span>Prix min</span>
-            <input class="kp-input" type="number" min="1" step="1" data-autosell-min-price
-              value="${Math.max(1, Number(s.autoSellMinPrice) || 1)}" ${a.running ? 'disabled' : ''}>
-          </label>
-          <label>
-            <span>Intervalle (s)</span>
-            <input class="kp-input" type="number" min="30" max="3600" step="10" data-autosell-interval
-              value="${Math.min(3600, Math.max(30, Number(s.autoSellIntervalSec) || 60))}" ${a.running ? 'disabled' : ''}>
-          </label>
-          <label>
-            <span>Max / cycle</span>
-            <input class="kp-input" type="number" min="1" max="10" step="1" data-autosell-max
-              value="${Math.min(10, Math.max(1, Number(s.autoSellMaxPerCycle) || 10))}" ${a.running ? 'disabled' : ''}>
-          </label>
+        </div>
+        <div class="kp-autosell-estimate">
+          <span>Gain estimé · ${strategyLabel}</span>
+          <b>◆ ${fmt(estimate.total)}</b>
+          <small>${fmt(estimate.copies)} doublon(s) · ${fmt(estimate.cards)} carte(s)</small>
         </div>
         <div class="kp-autosell-opts">
           <label class="kp-check">
@@ -5578,7 +5663,7 @@
           a.armed
             ? `<div class="kp-autosell-confirm">
                  <b>Confirmer la vente auto ?</b>
-                 <span>${fmt(spare)} exemplaire(s) en trop · ${slots.remaining} place(s) libre(s) · ${
+                 <span>${fmt(spare)} exemplaire(s) en trop · ◆ ${fmt(estimate.total)} estimés · ${slots.remaining} place(s) libre(s) · ${
                    s.autoSellIncludeML ? 'M/L incluses' : 'M/L exclues'
                  } · dernière copie conservée.</span>
                </div>`
@@ -5635,9 +5720,10 @@
             const type = listing.type === 'auction' ? 'enchère' : 'fixe';
             const left = listingTimeLeft(listing);
             const price = listing.finalPrice ?? listing.currentBid ?? listing.price;
-            return `<button class="kp-listed-card" type="button" data-act="open-listing" data-listing="${esc(
-              listing.id ?? ''
-            )}" data-type="${esc(listing.type ?? 'fixed')}" data-name="${esc(card?.name ?? '')}" title="Ouvrir cette annonce sur kyara.games">
+            const id = String(listing.characterId ?? card?.id ?? '');
+            return `<button class="kp-listed-card" type="button" data-act="sell-detail" data-id="${esc(
+              id
+            )}" data-hide-recommend="1" title="Voir l'étude de marché de cette carte">
               <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
               <span class="kp-listed-info">
                 <b>${esc(card?.name ?? `Carte #${listing.characterId ?? '?'}`)}</b>
@@ -7927,6 +8013,14 @@
           <input class="kp-input" type="number" min="400" step="100" data-setting="gapMs" value="${state.settings.gapMs}">
         </label>
         <label class="kp-field">
+          <span>Vente auto — délai min<small>Anti-flag : 5 s minimum</small></span>
+          <input class="kp-input" type="number" min="5" max="300" step="1" data-setting="autoSellDelayMinSec" value="${state.settings.autoSellDelayMinSec}">
+        </label>
+        <label class="kp-field">
+          <span>Vente auto — délai max<small>Plage aléatoire entre chaque vente</small></span>
+          <input class="kp-input" type="number" min="5" max="300" step="1" data-setting="autoSellDelayMaxSec" value="${state.settings.autoSellDelayMaxSec}">
+        </label>
+        <label class="kp-field">
           <span>Annonces max / lot<small>Garde-fou sur la vente en masse</small></span>
           <input class="kp-input" type="number" min="1" max="60" data-setting="maxBatch" value="${state.settings.maxBatch}">
         </label>
@@ -8787,7 +8881,7 @@
         </div>
 
         ${
-          rec
+          rec && !view.detailHideRecommend
             ? `<div class="kp-explain-sub">Prix de vente recommandé</div>
                <div class="kp-reco-list">
                  ${['quick', 'balanced', 'max']
@@ -9213,6 +9307,12 @@
       case 'refresh':
         loadData();
         break;
+      case 'sound-mute':
+        state.sound.muted = !state.sound.muted;
+        persistSound();
+        syncSoundControls();
+        render();
+        break;
       case 'reload-ext': {
         if (!state.reloadArmed) {
           state.reloadArmed = true;
@@ -9322,7 +9422,7 @@
         break;
       case 'sell-detail': {
         const id = el.getAttribute('data-id');
-        if (id) openCardDetail(id);
+        if (id) openCardDetail(id, { hideRecommend: el.getAttribute('data-hide-recommend') === '1' });
         break;
       }
       case 'market-expand': {
@@ -9776,12 +9876,9 @@
     // --- Vente auto : réglages (jamais modifiables pendant la boucle) ---
     const autoType = target.closest('[data-autosell-type]');
     const autoStrategy = target.closest('[data-autosell-strategy]');
-    const autoMin = target.closest('[data-autosell-min-price]');
-    const autoInterval = target.closest('[data-autosell-interval]');
-    const autoMax = target.closest('[data-autosell-max]');
     const autoIncludeML = target.closest('[data-autosell-include-ml]');
     const autoDryRun = target.closest('[data-autosell-dryrun]');
-    if (autoType || autoStrategy || autoMin || autoInterval || autoMax || autoIncludeML || autoDryRun) {
+    if (autoType || autoStrategy || autoIncludeML || autoDryRun) {
       if (state.autoSell.running) return;
       state.autoSell.armed = false;
       if (autoType) state.settings.autoSellType = autoType.value === 'auction' ? 'auction' : 'fixed';
@@ -9789,19 +9886,6 @@
         state.settings.autoSellStrategy = ['quick', 'balanced', 'max'].includes(autoStrategy.value)
           ? autoStrategy.value
           : 'balanced';
-      }
-      if (autoMin) state.settings.autoSellMinPrice = Math.max(1, Math.round(Number(autoMin.value) || 1));
-      if (autoInterval) {
-        state.settings.autoSellIntervalSec = Math.min(
-          3600,
-          Math.max(30, Math.round(Number(autoInterval.value) || 60))
-        );
-      }
-      if (autoMax) {
-        state.settings.autoSellMaxPerCycle = Math.min(
-          10,
-          Math.max(1, Math.round(Number(autoMax.value) || 10))
-        );
       }
       if (autoIncludeML) state.settings.autoSellIncludeML = Boolean(autoIncludeML.checked);
       if (autoDryRun) state.settings.autoSellDryRun = Boolean(autoDryRun.checked);
@@ -9833,6 +9917,20 @@
         state.settings.autoMaxPerBoosterMin = Math.min(60, Math.max(1, Math.round(Number(value) || 10)));
       }
       if (key === 'autoRefreshMin') state.settings.autoRefreshMin = Math.min(120, Math.max(1, Math.round(Number(value) || 10)));
+      if (key === 'autoSellDelayMinSec') {
+        state.settings.autoSellDelayMinSec = Math.min(300, Math.max(5, Math.round(Number(value) || 5)));
+        state.settings.autoSellDelayMaxSec = Math.max(
+          state.settings.autoSellDelayMinSec,
+          state.settings.autoSellDelayMaxSec
+        );
+      }
+      if (key === 'autoSellDelayMaxSec') {
+        state.settings.autoSellDelayMaxSec = Math.min(300, Math.max(5, Math.round(Number(value) || 60)));
+        state.settings.autoSellDelayMinSec = Math.min(
+          state.settings.autoSellDelayMinSec,
+          state.settings.autoSellDelayMaxSec
+        );
+      }
       persistSettings();
       if (key === 'ttlH') schedulePriceRun();
       if (key === 'autoRefreshMin') startAutoRefreshLoop();
@@ -9933,6 +10031,14 @@
   function onInput(event) {
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
+
+    const soundVolume = target.closest('[data-role="sound-volume"]');
+    if (soundVolume) {
+      state.sound.volume = Math.max(0, Math.min(1, Number(soundVolume.value) / 100));
+      persistSound();
+      syncSoundControls();
+      return;
+    }
 
 
     const packSearch = target.closest('[data-role="pack-search"]');

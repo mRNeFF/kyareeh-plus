@@ -27,6 +27,7 @@
   const REDUCED = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   const PREFS_KEY = 'kyareeh.duel.v1';
+  const SOUND_KEY = 'kyareeh.sound.v1';
   const PROFILE_KEY = 'kyareeh.duel.profile';
   const SESSION_KEY = 'kyareeh.duel.session';
   const WINDOW_KEY = 'kyareeh.duel.window';
@@ -435,6 +436,18 @@
       if (typeof saved.muted === 'boolean') app.muted = saved.muted;
       if (Number.isFinite(Number(saved.volume))) app.volume = Math.max(0, Math.min(1, Number(saved.volume)));
     }
+    // Le son est piloté par la fenêtre Global ; l'ancien réglage ne sert que
+    // de repli si la clé globale n'existe pas encore.
+    const sound = await store.get(SOUND_KEY);
+    if (sound && typeof sound === 'object') applySound(sound);
+  }
+
+  function applySound(raw) {
+    if (!raw || typeof raw !== 'object') return;
+    if (typeof raw.muted === 'boolean') app.muted = raw.muted;
+    if (Number.isFinite(Number(raw.volume))) app.volume = Math.max(0, Math.min(1, Number(raw.volume)));
+    fxCall('setMuted', app.muted);
+    fxCall('setVolume', app.volume);
   }
 
   let persistTimer = null;
@@ -1417,10 +1430,6 @@
       <nav class="kd-tabs">${tabs}</nav>
       <div class="kd-tools">
         ${profile}
-        <div class="kd-sound">
-          <button class="kd-iconbtn" type="button" data-act="mute" title="${app.muted ? 'Activer le son' : 'Couper le son'}" aria-pressed="${app.muted}">${app.muted ? ICONS.mute : ICONS.sound}</button>
-          <input type="range" min="0" max="100" step="5" value="${Math.round(app.volume * 100)}" data-role="volume" aria-label="Volume" ${app.muted ? 'disabled' : ''}>
-        </div>
         ${attach}
       </div>`;
   }
@@ -2166,12 +2175,6 @@
         }
         break;
       }
-      case 'mute':
-        app.muted = !app.muted;
-        fxCall('setMuted', app.muted);
-        persistPrefs();
-        renderTop();
-        break;
       case 'attach':
         attach();
         break;
@@ -2345,10 +2348,6 @@
       const clean = String(t.value || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
       if (clean !== t.value) t.value = clean;
       app.code = clean;
-    } else if (role === 'volume') {
-      app.volume = Math.max(0, Math.min(1, Number(t.value) / 100));
-      fxCall('setVolume', app.volume);
-      persistPrefs();
     }
   }
 
@@ -2358,10 +2357,7 @@
     if (role === 'series') app.series = t.value;
     else if (role === 'type') app.type = t.value;
     else if (role === 'owned') app.ownedOnly = Boolean(t.checked);
-    else if (role === 'volume') {
-      sound('select');
-      return;
-    } else return;
+    else return;
     render();
   }
 
@@ -2445,6 +2441,8 @@
         applyProfile(value);
         if (!app.playing) render();
         else renderTop();
+      } else if (key === SOUND_KEY) {
+        applySound(value);
       }
     });
     const root = document.getElementById('kd-app');

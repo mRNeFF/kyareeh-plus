@@ -3888,9 +3888,27 @@ img.kp-avatar {
   box-shadow: 0 4px 12px rgba(255, 77, 46, 0.24);
 }
 
-.kp-seg-btn.is-active small {
-  background: rgba(0, 0, 0, 0.16);
-  color: #2a1c0e;
+.kp-seg-lg .kp-seg-btn small {
+  background: rgba(255, 255, 255, 0.1);
+  color: #d4d7df;
+}
+
+.kp-seg-btn:hover small {
+  color: #ffffff;
+}
+
+.kp-seg-lg .kp-seg-btn.is-active small {
+  background: rgba(0, 0, 0, 0.32);
+  color: #ffffff;
+}
+
+.kp-seg-btn:disabled {
+  opacity: 0.55;
+}
+
+.kp-seg-btn:disabled small {
+  background: rgba(255, 255, 255, 0.06);
+  color: #9aa0ae;
 }
 
 .kp-icon-btn {
@@ -3948,6 +3966,36 @@ img.kp-avatar {
   background: linear-gradient(180deg, var(--kp-bg-3), var(--kp-bg-2));
 }
 
+.kp-autosell-estimate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--kp-line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255, 176, 32, 0.08), transparent);
+}
+
+.kp-autosell-estimate span {
+  color: var(--kp-muted);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.kp-autosell-estimate b {
+  color: var(--kp-accent-2);
+  font: 700 16px/1 var(--kp-display);
+  font-variant-numeric: tabular-nums;
+}
+
+.kp-autosell-estimate small {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
 .kp-listed-card {
   border-color: #3a3f4e;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent), var(--kp-bg-2);
@@ -3989,4 +4037,148 @@ img.kp-avatar {
   border-color: var(--kp-line);
   background: #20232c;
   color: var(--kp-text);
+}
+
+/* Raccords +Tools / +Duel : en-tête et sélecteur de mode alignés */
+.kp-head {
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--kp-line);
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(255, 77, 46, 0.08), transparent 55%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0)) var(--kp-bg-2);
+}
+
+.kp-modes {
+  display: flex;
+  flex-basis: 100%;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--kp-line);
+  border-radius: 13px;
+  background: var(--kp-bg-2);
+}
+
+.kp-mode {
+  flex: 1;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--kp-muted);
+  font: 700 11.5px/1 var(--kp-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.kp-mode:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--kp-text);
+}
+
+.kp-mode.is-active {
+  background: linear-gradient(135deg, var(--kp-accent), var(--kp-accent-2));
+  color: #16110c;
+  box-shadow: 0 4px 12px rgba(255, 77, 46, 0.24);
+}
+
+.kp-modes .kp-duel-detach {
+  flex: none;
+  padding: 8px 12px;
+  border: 1px solid var(--kp-line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--kp-muted);
+  font: 700 11px/1 var(--kp-display);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.kp-modes .kp-duel-detach:hover {
+  border-color: var(--kp-accent);
+  background: var(--kp-bg-3);
+  color: var(--kp-text);
+}
+
+.kp-panel.is-duel .kp-brand,
+.kp-panel.is-duel .kp-head-actions {
+  display: none;
+}
+
+.kp-panel.is-duel .kp-head {
+  padding-bottom: 6px;
+}
+
+.kp-tabs {
+  gap: 4px;
+  padding: 8px 12px 6px;
+  border-bottom: 1px solid var(--kp-line);
+}
+
+/* Son global (fenêtre Global, partagé entre les onglets) */
+.kp-sound {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kp-volume {
+  width: 84px;
+  accent-color: var(--kp-accent);
+}
+
+.kp-sound .kp-icon-btn[aria-pressed='true'] {
+  border-color: rgba(251, 191, 36, 0.45);
+  color: var(--kp-warn);
+}
+
+/* Redimensionnement : le panneau et les contrôles restent utilisables */
+@media (max-width: 860px) {
+  .kp-panel {
+    right: 8px;
+    bottom: 70px;
+    width: calc(100vw - 16px);
+    height: min(720px, calc(100vh - 82px));
+  }
+
+  .kp-brand small {
+    display: none;
+  }
+
+  .kp-volume {
+    width: 58px;
+  }
+
+  .kp-autosell-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .kp-listed-grid {
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  }
+
+  .kp-settings .kp-field {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
+@media (max-width: 560px) {
+  .kp-head {
+    padding: 8px 10px;
+  }
+
+  .kp-tab {
+    padding: 0 8px;
+    font-size: 10.5px;
+  }
+
+  .kp-listed-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .kp-sales-kpis {
+    gap: 4px 10px;
+  }
 }

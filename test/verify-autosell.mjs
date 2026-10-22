@@ -51,7 +51,7 @@ const base = [
   row({ id: 'b', name: 'B', price: 100 }),
   row({ id: 'c', name: 'C', price: 50 })
 ];
-const selected = api.autoSellSelect(base, { minPrice: 1 });
+const selected = api.autoSellSelect(base, {});
 check('tri par valeur du lot', selected[0]?.id === 'b' && selected[1]?.id === 'c', selected.map((r) => r.id).join(','));
 check('autoQty exposé', selected[0]?.autoQty === 1);
 
@@ -61,16 +61,17 @@ check('blocage générique exclu', api.autoSellSelect([row({ block: { reason: 'x
 check('M exclue par défaut', api.autoSellSelect([row({ rarity: 'M' })], {}).length === 0);
 check('L exclue par défaut', api.autoSellSelect([row({ rarity: 'L' })], {}).length === 0);
 check('M incluse si demandé', api.autoSellSelect([row({ rarity: 'M' })], { includeML: true }).length === 1);
-check('prix sous le plancher exclu', api.autoSellSelect([row({ price: 2 })], { minPrice: 3 }).length === 0);
+check('prix nul exclu', api.autoSellSelect([row({ price: 0 })], {}).length === 0);
 check('prix absent exclu', api.autoSellSelect([row({ price: null })], {}).length === 0);
 
 const candidates = [
   row({ id: 'a', name: 'A', price: 10, autoQty: 5 }),
   row({ id: 'b', name: 'B', price: 100, autoQty: 5 })
 ];
-const plan = api.autoSellBuildPlan(candidates, { slots: 4, maxPerCycle: 3 });
-check('plan limité par max/cycle', plan.reduce((n, r) => n + r.qty, 0) === 3);
-check('plan limité par les places', api.autoSellBuildPlan(candidates, { slots: 2, maxPerCycle: 10 }).reduce((n, r) => n + r.qty, 0) === 2);
+const plan = api.autoSellBuildPlan(candidates, { slots: 3 });
+check('plan limité par les places', plan.reduce((n, r) => n + r.qty, 0) === 3);
+check('plan limité à 10 places', api.autoSellBuildPlan(candidates, { slots: 99 }).reduce((n, r) => n + r.qty, 0) === 10);
+check('plan limité par les places libres', api.autoSellBuildPlan(candidates, { slots: 2 }).reduce((n, r) => n + r.qty, 0) === 2);
 check(
   'plan répartit sur plusieurs cartes',
   api.autoSellBuildPlan(
@@ -78,10 +79,10 @@ check(
       row({ id: 'a', price: 10, autoQty: 2 }),
       row({ id: 'b', price: 100, autoQty: 3 })
     ],
-    { slots: 4, maxPerCycle: 4 }
+    { slots: 4 }
   ).length === 2
 );
-check('plan vide sans place', api.autoSellBuildPlan(candidates, { slots: 0, maxPerCycle: 10 }).length === 0);
+check('plan vide sans place', api.autoSellBuildPlan(candidates, { slots: 0 }).length === 0);
 
 const rec = {
   quick: { price: 10 },

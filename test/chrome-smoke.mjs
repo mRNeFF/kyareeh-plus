@@ -351,7 +351,85 @@ async function visualPass() {
       ['quick', 'balanced', 'max'].every((value) => strategyValues.includes(value)),
       strategyValues.join(',')
     );
+    const autoUi = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         return {
+           min: Boolean(root.querySelector('[data-autosell-min-price]')),
+           interval: Boolean(root.querySelector('[data-autosell-interval]')),
+           max: Boolean(root.querySelector('[data-autosell-max]')),
+           estimate: root.querySelector('.kp-autosell-estimate')?.innerText || '',
+           detach: Boolean(root.querySelector('.kp-duel-detach')),
+           sound: Boolean(root.querySelector('#kp-sound-btn') && root.querySelector('#kp-sound-range')),
+           delay: window.__kyaraPlus.state.settings.autoSellDelayMinSec,
+           delayMax: window.__kyaraPlus.state.settings.autoSellDelayMaxSec
+         };
+       })()`
+    );
+    check('Prix minimum / intervalle / max cycle supprimés', !autoUi.min && !autoUi.interval && !autoUi.max);
+    check(
+      'Estimation des gains affichée',
+      autoUi.estimate.toLowerCase().includes('gain estimé') && autoUi.estimate.includes('◆'),
+      autoUi.estimate
+    );
+    check('Délai anti-flag 5–60 s', autoUi.delay === 5 && autoUi.delayMax === 60, `${autoUi.delay}–${autoUi.delayMax} s`);
+    check('Bouton Détacher disponible dans +Tools', autoUi.detach === true);
+    check('Son global disponible', autoUi.sound === true);
+    const soundState = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('#kp-sound-btn')?.click();
+         const muted = window.__kyaraPlus.state.sound.muted;
+         root.querySelector('#kp-sound-btn')?.click();
+         const range = root.querySelector('#kp-sound-range');
+         range.value = '25';
+         range.dispatchEvent(new Event('input', { bubbles: true }));
+         return { muted, volume: window.__kyaraPlus.state.sound.volume };
+       })()`
+    );
+    check('Son global mute + volume', soundState.muted === true && Math.abs(soundState.volume - 0.25) < 0.001, JSON.stringify(soundState));
 
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('.kp-listed-card')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          sessionId,
+          `(document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-modal-card')?.innerText || '').toLowerCase().includes('prix médian 7 j')`
+        ),
+      { label: 'fiche marché depuis une annonce', timeout: 20000 }
+    );
+    const detailText = await evaluate(
+      cdp,
+      sessionId,
+      `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-modal-card')?.innerText || ''`
+    );
+    check(
+      'Fiche marché sans prix recommandé',
+      detailText.toLowerCase().includes('prix médian 7 j') &&
+        !detailText.toLowerCase().includes('prix de vente recommandé')
+    );
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="sell-detail-close"]')?.click();
+         return true;
+       })()`
+    );
+    await sleep(200);
 
     await evaluate(
       cdp,
@@ -376,6 +454,16 @@ async function visualPass() {
     );
     check('Aperçu vente auto sans POST', preview.plan > 0, `${preview.plan} annonce(s) · ${preview.status}`);
 
+    // Tests uniquement : délai nul pour ne pas attendre 5–60 s entre les ventes.
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         window.__kyaraPlus.state.settings.autoSellDelayMinSec = 0;
+         window.__kyaraPlus.state.settings.autoSellDelayMaxSec = 0;
+         return true;
+       })()`
+    );
     await evaluate(
       cdp,
       sessionId,
@@ -474,6 +562,38 @@ async function visualPass() {
       `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view')?.innerText || ''`
     );
     check('Vente : plus de sous-onglet Marché global', !sellTextAfter.includes('Marché global'));
+
+    await cdp.send(
+      'Emulation.setDeviceMetricsOverride',
+      { width: 420, height: 800, deviceScaleFactor: 1, mobile: false },
+      sessionId
+    );
+    await sleep(350);
+    const narrow = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const panel = root.querySelector('.kp-panel');
+         const view = root.querySelector('#kp-view');
+         const r = panel.getBoundingClientRect();
+         return {
+           width: r.width,
+           viewport: window.innerWidth,
+           overflow: view ? view.scrollWidth > view.clientWidth + 2 : false
+         };
+       })()`
+    );
+    check(
+      'Panneau étroit sans débordement',
+      narrow.width <= narrow.viewport && !narrow.overflow,
+      `largeur ${Math.round(narrow.width)} / ${narrow.viewport}`
+    );
+    await cdp.send(
+      'Emulation.setDeviceMetricsOverride',
+      { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false },
+      sessionId
+    );
 
     check('Aucune exception JS pendant le rendu', cdp.exceptions.length === 0, cdp.exceptions.join(' | '));
   } finally {

@@ -552,6 +552,12 @@
           );
         }
 
+        if (url.includes('/api/market/prices/')) {
+          const id = decodeURIComponent(url.split('/api/market/prices/')[1].split(/[?#]/)[0]);
+          const p = PRICES[id];
+          return json(p ? { characterId: Number(id), ...p } : {});
+        }
+
         if (url.includes('/api/market/listings') && String(init?.method || 'GET').toUpperCase() === 'POST') {
           log('   -> listing créé: ' + (init?.body || ''));
           return json({ ok: true, id: 'new-listing-' + Date.now() });
