@@ -162,6 +162,9 @@
     invalid_price: 'Prix invalide.',
     price_too_low: 'Prix inférieur au minimum autorisé par le marché.',
     too_many_listings: 'Limite d’annonces actives atteinte.',
+    has_bids: 'Impossible de retirer cette vente : des enchères existent déjà.',
+    listing_closed: 'Cette annonce est déjà terminée.',
+    own_listing: 'C’est déjà ta propre annonce.',
     chakra: 'Pas assez de chakra pour les frais de dépôt.',
     rate_limited: 'Trop de requêtes : patiente quelques secondes.',
     guest_limit: 'Compte invité : connecte-toi avec Discord.',
@@ -244,9 +247,11 @@
     query: '',
     selected: new Set(),
     sell: null,
+    listingCancelId: null,
     // Journal local des annonces créées par Kyareeh+ (pas d'historique côté site).
     salesLog: [],
     salesLogLoaded: false,
+    salesChart: null,
     // Son global, partagé par les onglets Global et par +Duel.
     sound: { muted: false, volume: 0.7 },
     debug: [],
@@ -458,6 +463,8 @@
     shadow.addEventListener('change', onChange);
     shadow.addEventListener('input', onInput);
     shadow.addEventListener('keydown', onKeyDown);
+    shadow.addEventListener('pointermove', onPointerMove);
+    shadow.addEventListener('pointerleave', hideSalesChartHover);
 
     document.addEventListener(
       'keydown',
@@ -2013,6 +2020,7 @@
     view.detailLoading = true;
     // Fiche ouverte depuis une annonce en cours : on masque le prix recommandé.
     view.detailHideRecommend = Boolean(opts.hideRecommend);
+    state.listingCancelId = null;
     render();
 
     const row = sellRowOf(key);
@@ -2068,6 +2076,7 @@
     view.detailError = null;
     view.detailLoading = false;
     view.detailHideRecommend = false;
+    state.listingCancelId = null;
     render();
   }
 
@@ -2595,7 +2604,10 @@
     const fixedLow = rivalFixed[0] ?? null;
     const fixedHigh = rivalFixed.length ? rivalFixed[rivalFixed.length - 1] : null;
     const auctionBuyout = auctionBuyouts[0] ?? null;
-    const lowest = fixedLow ?? rivalAuctions[0] ?? null;
+    // Prix de référence du marché : le minimum entre une annonce fixe et un
+    // achat immédiat d'enchère. Une mise courante n'est pas un prix de vente.
+    const saleLows = [fixedLow, auctionBuyout].filter((value) => value != null && value > 0);
+    const lowest = saleLows.length ? Math.min(...saleLows) : null;
     const bestBid = bids[0] ?? null;
     const myListing = items.find((item) => item.isMine) ?? null;
 
@@ -2700,18 +2712,24 @@
     const vol = Number.isFinite(volatility) ? volatility : null;
     const safe = (value) => Math.max(min, Math.round(value));
 
+    // 1) Vente rapide : uniquement basée sur la vente la plus basse du marché
+    //    (prix fixe ou achat immédiat d'enchère), −1 chakra pour passer devant.
+    //    Sans annonce exploitable, repli sur −10 % vs médiane.
+    let quickRaw;
+    if (lowest != null && lowest > 0) {
+      quickRaw = lowest > min ? lowest - 1 : lowest;
+    } else {
+      quickRaw = base * 0.9;
+      if (bestBid != null && bestBid > min) quickRaw = Math.max(quickRaw, Math.min(bestBid, base));
+    }
+    const quick = safe(quickRaw);
+
     // 2) Équilibrée : médiane ajustée de la tendance, bornée à ±10 %.
+    //    Elle ne descend jamais sous la vente rapide (prix ordonnés).
     const adjust = clamp(trend / 100, -0.1, 0.1);
     let balancedRaw = base * (1 + adjust);
     if (lowest != null && lowest > 1) balancedRaw = Math.min(balancedRaw, Math.max(min, lowest));
-    const balanced = safe(balancedRaw);
-
-    // 1) Vente rapide : sous la moins chère, sinon −10 % vs médiane.
-    //    Elle ne dépasse jamais l'équilibrée (les trois prix restent ordonnés).
-    let quickRaw = base * 0.9;
-    if (lowest != null && lowest > 1) quickRaw = Math.min(quickRaw, lowest - 1);
-    if (bestBid != null && bestBid > min) quickRaw = Math.max(quickRaw, Math.min(bestBid, base));
-    const quick = Math.min(balanced, safe(quickRaw));
+    const balanced = Math.max(quick, safe(balancedRaw));
 
     // 3) Prix maximal : plafond des annonces fixes quand il existe, sinon haut
     //    des ventes récentes. C'est le prix le plus haut réellement demandé,
@@ -2746,7 +2764,12 @@
         net: netOf(quick),
         label: 'Vente rapide',
         delay: liquidity === 'lent' ? 'délai incertain' : 'le plus rapide',
-        reason: reason(quick, quick < base ? `−${Math.round(((base - quick) / base) * 100)} % vs médiane` : null)
+        reason:
+          lowest != null
+            ? `vente la plus basse ◆ ${fmt(lowest)} · ${
+                quick < lowest ? '−1 chakra' : 'plancher de prix'
+              }`
+            : reason(quick, quick < base ? `−${Math.round(((base - quick) / base) * 100)} % vs médiane` : null)
       },
       balanced: {
         id: 'balanced',
@@ -3734,6 +3757,29 @@
         current.slots.remaining
       )} place(s) libre(s)`;
       render();
+
+      // Vente rapide : on lit la vraie vente la plus basse (fixe ou achat
+      // immédiat) de la carte choisie. Un seul instantané par carte, pas un
+      // scan de tout l'inventaire.
+      if (s.autoSellStrategy === 'quick') {
+        const key = String(single.id);
+        if (!state.marketScanned.has(key)) {
+          a.status = `Lecture du prix le plus bas · ${single.name}…`;
+          render();
+          try {
+            await ensureMarketData([key]);
+          } catch {
+            /* repli sur le prix conseillé déjà connu */
+          }
+        }
+        const adjusted = autoSellPrice(single, 'quick');
+        if (adjusted != null && adjusted !== single.price) {
+          single.price = adjusted;
+          a.lastPick = single;
+          a.status = `Vente rapide · ${single.name} · ◆ ${fmt(single.price)}`;
+          render();
+        }
+      }
 
       const result = await runSalePlan([single], {
         type,
@@ -6807,6 +6853,18 @@
       .join('');
 
     const rangeLabel = { '1d': '24 h', '7d': '7 jours', total: 'Total' }[range];
+    state.salesChart = {
+      points,
+      pad,
+      W,
+      H,
+      plotW,
+      plotH,
+      yMax,
+      range,
+      stepHours: model.stepHours,
+      startAt: model.startAt
+    };
     return `
       <section class="kp-sales">
         <div class="kp-sales-head">
@@ -6833,6 +6891,12 @@
           <circle class="kp-sales-dot is-sales" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
             points[points.length - 1].value
           ).toFixed(1)}" r="3"></circle>
+          <g class="kp-sales-hover" style="display:none">
+            <line class="kp-sales-hover-line" x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}"></line>
+            <circle class="kp-sales-hover-dot" cx="${pad.l}" cy="${H - pad.b}" r="4"></circle>
+            <rect class="kp-sales-tip-bg" x="${pad.l}" y="${pad.t}" width="140" height="21" rx="5"></rect>
+            <text class="kp-sales-tip" x="${pad.l + 70}" y="${pad.t + 14}" text-anchor="middle"></text>
+          </g>
           ${xLabels}
         </svg>
         <div class="kp-sales-legend">
@@ -9840,6 +9904,16 @@
 
     const card = analysis.card;
     const info = rarityInfo(card.rarity);
+    // L'annonce du marché peut ne pas encore contenir `isMine` : on retombe
+    // sur la liste des ventes actives déjà chargée.
+    const myListing =
+      analysis.myListing ??
+      autoSellActiveEntries().find(
+        (listing) =>
+          !listing.pending &&
+          String(listing.characterId ?? listing.character?.id ?? '') === String(card.id)
+      ) ??
+      null;
     const trend = analysis.trend;
     const conf = analysis.confidence;
     const owned = analysis.mine;
@@ -9983,10 +10057,23 @@
         }
 
         ${
-          analysis.myListing
-            ? `<div class="kp-alert" style="margin-top:10px">Tu as déjà une annonce sur cette carte (${esc(
-                analysis.myListing.type === 'auction' ? 'enchère' : 'prix fixe'
-              )} · ◆ ${fmt(analysis.myListing.buyoutPrice ?? analysis.myListing.currentBid ?? analysis.myListing.price)}).</div>`
+          myListing
+            ? `<div class="kp-alert" style="margin-top:10px">
+                 Tu as déjà une annonce sur cette carte (${esc(
+                   myListing.type === 'auction' ? 'enchère' : 'prix fixe'
+                 )} · ◆ ${fmt(myListing.buyoutPrice ?? myListing.currentBid ?? myListing.price)}).
+                 ${
+                   myListing.id
+                     ? `<button class="kp-btn ${
+                         state.listingCancelId === String(myListing.id) ? 'is-primary' : ''
+                       }" type="button" data-act="listing-cancel" data-listing="${esc(
+                         myListing.id
+                       )}" data-character="${esc(card.id)}" data-name="${esc(card.name)}">${
+                         state.listingCancelId === String(myListing.id) ? 'Confirmer le retrait' : 'Retirer la vente'
+                       }</button>`
+                     : ''
+                 }
+               </div>`
             : ''
         }
 
@@ -10333,7 +10420,79 @@
     render();
   }
 
-  function onClick(event) {
+  function hideSalesChartHover() {
+    if (!ui?.view) return;
+    for (const group of ui.view.querySelectorAll('.kp-sales-hover')) {
+      group.style.display = 'none';
+    }
+  }
+
+  /** Infobulle du graphique : valeur exacte de la courbe sous la souris. */
+  function onPointerMove(event) {
+    const chart = state.salesChart;
+    if (!chart || !chart.points.length) {
+      hideSalesChartHover();
+      return;
+    }
+    const target = event.target;
+    const svg = target && typeof target.closest === 'function' ? target.closest('.kp-sales-svg') : null;
+    if (!svg) {
+      hideSalesChartHover();
+      return;
+    }
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width) return;
+    const vx = clamp(
+      ((event.clientX - rect.left) / rect.width) * chart.W,
+      chart.pad.l,
+      chart.W - chart.pad.r
+    );
+    const position = ((vx - chart.pad.l) / chart.plotW) * Math.max(1, chart.points.length - 1);
+    const i0 = Math.max(0, Math.min(chart.points.length - 1, Math.floor(position)));
+    const i1 = Math.min(chart.points.length - 1, i0 + 1);
+    const ratio = Math.max(0, Math.min(1, position - i0));
+    const p0 = chart.points[i0];
+    const p1 = chart.points[i1];
+    // Valeur exacte sur le segment, pas seulement au point le plus proche.
+    const value = p0.value + (p1.value - p0.value) * ratio;
+    const at = p0.at + (p1.at - p0.at) * ratio;
+    const cy = chart.H - chart.pad.b - (value / chart.yMax) * chart.plotH;
+
+    const group = svg.querySelector('.kp-sales-hover');
+    if (!group) return;
+    group.style.display = '';
+    const line = group.querySelector('.kp-sales-hover-line');
+    const dot = group.querySelector('.kp-sales-hover-dot');
+    const tip = group.querySelector('.kp-sales-tip');
+    const bg = group.querySelector('.kp-sales-tip-bg');
+    if (!line || !dot || !tip || !bg) return;
+
+    line.setAttribute('x1', vx.toFixed(1));
+    line.setAttribute('x2', vx.toFixed(1));
+    line.setAttribute('y1', String(chart.pad.t));
+    line.setAttribute('y2', String(chart.H - chart.pad.b));
+    dot.setAttribute('cx', vx.toFixed(1));
+    dot.setAttribute('cy', cy.toFixed(1));
+
+    const date = new Date(at);
+    const hh = `${String(date.getHours()).padStart(2, '0')} h`;
+    const day = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}`;
+    const when = chart.range === '1d' ? hh : `${day} ${hh}`;
+    const display = Math.round(value * 10) / 10;
+    const text = `◆ ${display.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} · ${when}`;
+    const width = Math.max(116, Math.min(chart.plotW, text.length * 6.4 + 18));
+    const tipX = Math.max(chart.pad.l, Math.min(vx - width / 2, chart.W - chart.pad.r - width));
+    const tipY = Math.max(chart.pad.t + 2, cy - 32);
+    bg.setAttribute('x', tipX.toFixed(1));
+    bg.setAttribute('y', tipY.toFixed(1));
+    bg.setAttribute('width', width.toFixed(1));
+    bg.setAttribute('height', '21');
+    tip.setAttribute('x', (tipX + width / 2).toFixed(1));
+    tip.setAttribute('y', (tipY + 14.5).toFixed(1));
+    tip.textContent = text;
+  }
+
+  async function onClick(event) {
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
     const el = target.closest('[data-act]');
@@ -10513,6 +10672,74 @@
       case 'sell-detail-retry': {
         const id = el.getAttribute('data-id') || state.sellView.detailId;
         if (id) openCardDetail(id);
+        break;
+      }
+      case 'listing-cancel': {
+        const listingId = el.getAttribute('data-listing');
+        const name = el.getAttribute('data-name') || 'cette carte';
+        if (!listingId) break;
+        // Deux clics : le premier arme, le second retire réellement.
+        if (state.listingCancelId !== String(listingId)) {
+          state.listingCancelId = String(listingId);
+          render();
+          break;
+        }
+        state.listingCancelId = null;
+        el.disabled = true;
+        try {
+          const canceled = await api(`/api/market/listings/${encodeURIComponent(listingId)}/cancel`, {
+            method: 'POST',
+            timeout: 20000
+          });
+          if (canceled && canceled.ok === false) throw new ApiError(0, 'Annonce introuvable ou déjà terminée.');
+          const characterId = state.sellView.detailId || el.getAttribute('data-character');
+          const removeLocally = (withPending = true) => {
+            const rows = autoSellListingRows(state.mine).filter(
+              (listing) => String(listing.id) !== String(listingId)
+            );
+            if (Array.isArray(state.mine)) state.mine = rows;
+            else if (state.mine && typeof state.mine === 'object') state.mine = { ...state.mine, listings: rows };
+            if (!withPending) return;
+            const pending = state.autoSell.pendingListings;
+            const sameCardPending = pending.filter(
+              (listing) =>
+                characterId != null &&
+                String(listing.characterId ?? listing.character?.id ?? '') === String(characterId)
+            );
+            const byId = sameCardPending.find((listing) => String(listing.id) === String(listingId));
+            // Priorité à l'identifiant ; sinon on retire la réservation la plus
+            // récente (baseline la plus haute), celle qui correspond à l'annonce
+            // affichée en dernier.
+            const target =
+              byId ||
+              sameCardPending.reduce(
+                (best, listing) => (!best || Number(listing.baseline || 0) >= Number(best.baseline || 0) ? listing : best),
+                null
+              );
+            if (target) {
+              state.autoSell.pendingListings = pending.filter((listing) => listing !== target);
+            } else {
+              state.autoSell.pendingListings = pending.filter(
+                (listing) => String(listing.id) !== String(listingId)
+              );
+            }
+          };
+          removeLocally();
+          notify(`Annonce retirée : ${name}.`);
+          closeCardDetail();
+          try {
+            await autoSellRefresh();
+          } catch {
+            /* la liste sera relue au prochain passage */
+          }
+          // Si le serveur n'a pas encore retiré l'annonce de sa réponse,
+          // on garde au moins l'affichage cohérent avec l'action utilisateur.
+          removeLocally(false);
+          render();
+        } catch (err) {
+          el.disabled = false;
+          notify(`Retrait impossible : ${friendlyError(err)}`);
+        }
         break;
       }
       case 'sell-card': {

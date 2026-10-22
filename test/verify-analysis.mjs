@@ -172,6 +172,49 @@ check('vente rapide sous la concurrence', reco.quick.price < 150, `quick=${reco.
 check('justification chiffrée', /médiane/.test(reco.balanced.reason) && /vente/.test(reco.balanced.reason));
 check('net après frais', reco.balanced.net < reco.balanced.price);
 
+// Vente rapide : uniquement la vente la plus basse (fixe ou achat immédiat).
+const quickMarket = api.buildRecommendations({
+  median: 100,
+  median7: 100,
+  median30: 100,
+  lowest: 20,
+  bestBid: 50,
+  fixedHigh: 15,
+  floor: 1
+});
+check('vente rapide = vente la plus basse − 1', quickMarket.quick.price === 19, String(quickMarket.quick.price));
+check(
+  'vente rapide ignore la médiane et le meilleur ordre',
+  quickMarket.quick.price < 20 && quickMarket.quick.price !== 50,
+  String(quickMarket.quick.price)
+);
+check(
+  'vente rapide explique le prix bas',
+  /vente la plus basse/.test(quickMarket.quick.reason),
+  quickMarket.quick.reason
+);
+
+const onlyBid = api.analyzeCard({
+  prices: { median7d: 100, median30d: 100 },
+  listings: { items: [{ type: 'auction', price: 5, currentBid: 5, buyoutPrice: null }] },
+  card: { id: 'bid-only', floor: 1 }
+});
+check('une mise aux enchères n’est pas un prix de vente', onlyBid.lowest === null, String(onlyBid.lowest));
+check('repli vente rapide sans vente fixe/immédiate', onlyBid.recommend?.quick.price === 90, String(onlyBid.recommend?.quick.price));
+
+const fixedAndBuyout = api.analyzeCard({
+  prices: { median7d: 100, median30d: 100 },
+  listings: {
+    items: [
+      { type: 'fixed', price: 15 },
+      { type: 'auction', price: 5, currentBid: 5, buyoutPrice: 20 }
+    ]
+  },
+  card: { id: 'fixed-buyout', floor: 1 }
+});
+check('prix de référence = minimum fixe/achat immédiat', fixedAndBuyout.lowest === 15, String(fixedAndBuyout.lowest));
+check('vente rapide sous 15', fixedAndBuyout.recommend?.quick.price === 14, String(fixedAndBuyout.recommend?.quick.price));
+
 /* --- 7. Cas sans données --------------------------------------------- */
 
 const empty = api.analyzeCard({ prices: null, listings: null, book: null, card: { id: '2' } });

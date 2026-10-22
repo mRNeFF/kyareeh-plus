@@ -2024,6 +2024,33 @@ img.kp-avatar {
   stroke-width: 2;
 }
 
+.kp-sales-hover-line {
+  stroke: rgba(255, 255, 255, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  pointer-events: none;
+}
+
+.kp-sales-hover-dot {
+  fill: var(--kp-bg);
+  stroke: var(--kp-accent-2);
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.kp-sales-tip-bg {
+  fill: var(--kp-bg-3);
+  stroke: color-mix(in srgb, var(--kp-accent-2) 55%, var(--kp-line));
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.kp-sales-tip {
+  fill: var(--kp-text);
+  font: 600 9px "JetBrains Mono", ui-monospace, monospace;
+  pointer-events: none;
+}
+
 .kp-sales-legend {
   display: flex;
   flex-wrap: wrap;

@@ -569,6 +569,8 @@ async function visualPass() {
          window.__kyaraPlus.state.settings.autoSellDelayMaxSec = 0;
          window.__kyaraPlus.state.settings.autoSellRefreshMinMin = 0;
          window.__kyaraPlus.state.settings.autoSellRefreshMaxMin = 0;
+         window.__kyaraPlus.state.settings.autoSellStrategy = 'quick';
+         window.__kyaraPlus.render();
          return true;
        })()`
     );
@@ -654,14 +656,81 @@ async function visualPass() {
     const autoMarketScans = (autoApiLog.match(/API GET \/api\/market\/listings\?characterId=/g) || []).length;
     const maxApi = await evaluate(cdp, sessionId, `Number(window.__apiMaxActive) || 0`);
     check(
-      'Vente auto : pas de scan marché carte par carte',
-      autoMarketScans === 0 && autoRequests < 30,
-      `${autoRequests} requête(s) · ${autoMarketScans} scan(s) par carte`
+      'Vente auto : scan ciblé ou cache, jamais l’inventaire complet',
+      autoMarketScans <= 6 && autoRequests < 35,
+      `${autoRequests} requête(s) · ${autoMarketScans} scan(s) ciblé(s)`
     );
     check(
       'Requêtes API sérialisées une par une',
       maxApi <= 1,
       `${maxApi} requête(s) simultanée(s) au maximum`
+    );
+
+    // Retrait explicite d'une vente active depuis sa fiche.
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('.kp-listed-card')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          sessionId,
+          `Boolean(document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="listing-cancel"]'))`
+        ),
+      { label: 'bouton Retirer la vente', timeout: 20000 }
+    );
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="listing-cancel"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          sessionId,
+          `(document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="listing-cancel"]')?.textContent || '').includes('Confirmer')`
+        ),
+      { label: 'confirmation du retrait', timeout: 10000 }
+    );
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="listing-cancel"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          sessionId,
+          `window.__kyaraPlus.autoSellActiveEntries().length < ${auto.active}`
+        ),
+      { label: 'retrait de la vente active', timeout: 20000 }
+    );
+    const removed = await evaluate(
+      cdp,
+      sessionId,
+      `(() => ({
+         active: window.__kyaraPlus.autoSellActiveEntries().length,
+         modalClosed: document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-modal')?.hidden === true
+       }))()`
+    );
+    check(
+      'Vente active : retrait depuis la fiche',
+      removed.active < auto.active,
+      `${removed.active}/${auto.active} active(s) · modale fermée=${removed.modalClosed}`
     );
     const sales = await evaluate(
       cdp,
@@ -724,6 +793,29 @@ async function visualPass() {
         chartDay.labels.includes('◆ 50') &&
         chartDay.labels.includes('◆ 100'),
       `${chartDay.range} · ${chartDay.labels.replace(/\s+/g, ' ').slice(0, 120)}`
+    );
+    const hover = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const svg = root.querySelector('.kp-sales-svg');
+         const rect = svg.getBoundingClientRect();
+         svg.dispatchEvent(new PointerEvent('pointermove', {
+           bubbles: true,
+           clientX: rect.left + rect.width * 0.62,
+           clientY: rect.top + rect.height * 0.5,
+           pointerId: 1
+         }));
+         const tip = root.querySelector('.kp-sales-tip');
+         const group = root.querySelector('.kp-sales-hover');
+         return { text: tip?.textContent || '', visible: group?.style.display !== 'none' };
+       })()`
+    );
+    check(
+      'Graphique : valeur exacte au survol',
+      hover.visible && /◆/.test(hover.text) && /\d{2} h/.test(hover.text),
+      hover.text
     );
     await evaluate(
       cdp,

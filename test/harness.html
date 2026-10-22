@@ -547,6 +547,17 @@
           return json(p ? { characterId: Number(id), ...p } : {});
         }
 
+        if (
+          url.includes('/api/market/listings/') &&
+          url.includes('/cancel') &&
+          String(init?.method || 'GET').toUpperCase() === 'POST'
+        ) {
+          const id = decodeURIComponent(url.split('/api/market/listings/')[1].split('/cancel')[0]);
+          const index = MARKET_STATE.listings.findIndex((item) => item.id === id);
+          if (index >= 0) MARKET_STATE.listings.splice(index, 1);
+          return json({ ok: index >= 0 });
+        }
+
         if (url.includes('/api/market/listings') && String(init?.method || 'GET').toUpperCase() === 'POST') {
           if (window.__kyaraPriceTooLowOnce) {
             window.__kyaraPriceTooLowOnce = false;

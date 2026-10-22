@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.3.5** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.3.6** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `f934538`
@@ -22,8 +22,8 @@ npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
-npm run verify:chrome       # 50 contrôles dans un Chrome headless réel
-node test/verify-analysis.mjs    # 43 contrôles
+npm run verify:chrome       # 67 contrôles dans un Chrome headless réel
+node test/verify-analysis.mjs    # 50 contrôles
 node test/verify-autosell.mjs    # 50 contrôles (sélection pure + stratégies + ordre + ventes actives)
 node test/verify-sales-chart.mjs # 27 contrôles (tranches horaires 1 j / 7 j / total)
 node test/verify-statglobal.mjs  # 55 contrôles
@@ -150,7 +150,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | Onglet | Contenu |
 |---|---|
 | **Compte** | Valeur du compte, ressources, top cartes, valeur par rareté, séries complètes, recherche d'un autre joueur (valorisation exacte). |
-| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (section **Ventes actives** : nom, quantité, prix unitaire/total, état et temps restant, bordure de rareté, cliquable vers la fiche marché sans prix recommandé, relue au démarrage, après une vente immédiate et en fin de cycle ; doublons uniquement, dernière copie conservée, **exemplaires déjà en vente réservés**, **Mythiques exclues par défaut**, **Légendaires en double incluses automatiquement**, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse sur le prix unitaire**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, refus explicite si le tri est impossible, prix trop bas réessayé à la hausse, remplissage plafonné à 8 s par annonce et surveillance d'une place libre toutes les 30 s, arrêt d'urgence). Les prix manquants sont lus **en un lot** (`/api/me/collection/prices`), sans scan marché carte par carte. En bas, **graphique local** du **chakra gagné par heure** (grille 50/100/1000 chakra, heures/12 h/24 h) avec menu **1 jour / 7 jours / Total** et **une seule courbe « Vente »**, total des ventes et ventes immédiates sur la période. |
+| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (section **Ventes actives** : nom, quantité, prix unitaire/total, état et temps restant, bordure de rareté, cliquable vers la fiche marché sans prix recommandé, relue au démarrage, après une vente immédiate et en fin de cycle ; doublons uniquement, dernière copie conservée, **exemplaires déjà en vente réservés**, **Mythiques exclues par défaut**, **Légendaires en double incluses automatiquement**, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse sur le prix unitaire**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, refus explicite si le tri est impossible, prix trop bas réessayé à la hausse, remplissage plafonné à 8 s par annonce et surveillance d'une place libre toutes les 30 s, arrêt d'urgence). Les prix manquants sont lus **en un lot** (`/api/me/collection/prices`) ; en **Vente rapide**, un seul instantané marché est lu pour la carte choisie (prix fixe ou achat immédiat le plus bas, −1 chakra), jamais tout l'inventaire. En bas, **graphique local** du **chakra gagné par heure** (grille 50/100/1000 chakra, heures/12 h/24 h) avec menu **1 jour / 7 jours / Total**, **une seule courbe « Vente »** et **infobulle au survol** (valeur exacte sur la courbe). Le clic sur une carte en vente ouvre sa fiche avec **Retirer la vente** (double clic de confirmation). Total des ventes et ventes immédiates sur la période. |
 | **Marché** | Deux vues internes : **Marché global** (recherche serveur, une ligne par carte, prix fixe/enchère le plus bas, achat immédiat, dépliant des ventes) et **Bons plans** (scan sous la médiane, tri, pages, seuil). Mes annonces actives en bas. |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
@@ -163,7 +163,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 
 - `content/ui.js` est un monolithe (~11 000 lignes). Toute nouvelle vue l'agrandit : extraire un
   module serait utile mais risqué sans tests de non-régression UI.
-- 24 avertissements `web-ext lint` : `UNSAFE_VAR_ASSIGNMENT` sur `innerHTML` dans `content/ui.js`
+- 25 avertissements `web-ext lint` : `UNSAFE_VAR_ASSIGNMENT` sur `innerHTML` dans `content/ui.js`
   et `duel/duel-app.js`, plus un `INLINE_SCRIPT` dans `duel/fx-demo.html` ; inhérents au rendu
   par chaînes ; à traiter seulement si on migre vers du DOM construit.
 - L'onglet Stat dépend de `trades/owned` + `fair-play/prices` : si le site change ces endpoints,
@@ -171,7 +171,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 - Le harness simule l'API : une forme de réponse réelle inattendue (ex. `/api/me/friends`)
   ne se verrait qu'en production.
 - `verify-odds.mjs` a **1 écart préexistant** (`season-2026-fall R`), antérieur à la 1.0.0.
-- **Anti-rafale** : toutes les requêtes `/api/…` passent par une file dans `content/ui.js` (une seule à la fois, 350 ms minimum entre deux départs). La vente auto lit les prix manquants en un lot et ne scanne plus le marché carte par carte ; elle ne relit collection + ventes actives qu'après une vente immédiate et une fois en fin de cycle, pas après chaque mise en vente.
+- **Anti-rafale** : toutes les requêtes `/api/…` passent par une file dans `content/ui.js` (une seule à la fois, 350 ms minimum entre deux départs). La vente auto lit les prix manquants en un lot et ne scanne plus tout l'inventaire ; en **Vente rapide**, elle lit un seul instantané marché pour la carte choisie. Elle ne relit collection + ventes actives qu'après une vente immédiate et une fois en fin de cycle, pas après chaque mise en vente.
 - **Paquet Chrome** : manifeste dérivé (`scripts/build-chrome.mjs`), aucun code transformé.
   `icons/icon-128.png` suit la règle Chrome (illustration 96 px + 16 px de marge transparente)
   et n'a pas d'original plus grand : à remplacer si un logo source réapparaît. Depuis Chrome 137, `--load-extension`
