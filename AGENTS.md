@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.3.1** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.3.2** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `261655f`
@@ -22,7 +22,7 @@ npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
-npm run verify:chrome       # 41 contrôles dans un Chrome headless réel
+npm run verify:chrome       # 43 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 43 contrôles
 node test/verify-autosell.mjs    # 50 contrôles (sélection pure + stratégies + ordre + ventes actives)
 node test/verify-sales-chart.mjs # 13 contrôles (cumuls du graphique de ventes)
@@ -148,7 +148,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | Onglet | Contenu |
 |---|---|
 | **Compte** | Valeur du compte, ressources, top cartes, valeur par rareté, séries complètes, recherche d'un autre joueur (valorisation exacte). |
-| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (section **Ventes actives** : nom, quantité, prix unitaire/total, état et temps restant, bordure de rareté, cliquable vers la fiche marché sans prix recommandé, relue au démarrage, après chaque vente et toutes les 60 s ; doublons uniquement, dernière copie conservée, **exemplaires déjà en vente réservés**, M/L exclues par défaut, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse sur le prix unitaire**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, refus explicite si le tri est impossible, arrêt d'urgence). En bas, **graphique local** du net cumulé sur 7 jours (auto/manuelle), total des ventes et ventes immédiates. |
+| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (section **Ventes actives** : nom, quantité, prix unitaire/total, état et temps restant, bordure de rareté, cliquable vers la fiche marché sans prix recommandé, relue au démarrage, après chaque vente et toutes les 60 s ; doublons uniquement, dernière copie conservée, **exemplaires déjà en vente réservés**, M/L exclues par défaut, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse sur le prix unitaire**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, refus explicite si le tri est impossible, arrêt d'urgence). Les prix manquants sont lus **en un lot** (`/api/me/collection/prices`), sans scan marché carte par carte. En bas, **graphique local** du net cumulé sur 7 jours (auto/manuelle), total des ventes et ventes immédiates. |
 | **Marché** | Deux vues internes : **Marché global** (recherche serveur, une ligne par carte, prix fixe/enchère le plus bas, achat immédiat, dépliant des ventes) et **Bons plans** (scan sous la médiane, tri, pages, seuil). Mes annonces actives en bas. |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
@@ -169,6 +169,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 - Le harness simule l'API : une forme de réponse réelle inattendue (ex. `/api/me/friends`)
   ne se verrait qu'en production.
 - `verify-odds.mjs` a **1 écart préexistant** (`season-2026-fall R`), antérieur à la 1.0.0.
+- **Anti-rafale** : toutes les requêtes `/api/…` passent par une file dans `content/ui.js` (une seule à la fois, 350 ms minimum entre deux départs). La vente auto lit les prix manquants en un lot et ne scanne plus le marché carte par carte ; après chaque vente elle relit seulement la collection puis les ventes actives, séquentiellement.
 - **Paquet Chrome** : manifeste dérivé (`scripts/build-chrome.mjs`), aucun code transformé.
   `icons/icon-128.png` est un agrandissement LANCZOS de `icon-96.png` (pas d'original plus
   grand) : à remplacer si un logo source réapparaît. Depuis Chrome 137, `--load-extension`

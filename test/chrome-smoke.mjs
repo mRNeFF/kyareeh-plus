@@ -488,13 +488,13 @@ async function visualPass() {
       sessionId,
       `(() => {
          const state = window.__kyaraPlus.state;
+         window.__kyaraNoPrices = true;
          state.prices = {};
          state.fixedLow = {};
          state.fixedHigh = {};
          state.auctionBuyout = {};
          state.lowest = {};
-         state.marketScanned.clear();
-         for (const id of ['10668', '282077']) state.marketScanned.add(id);
+         state.autoSell.priceScanAt = 0;
          window.__kyaraPlus.render();
          const root = document.querySelector('#kyara-plus-root').shadowRoot;
          root.querySelector('[data-act="autosell-start"]')?.click();
@@ -528,7 +528,16 @@ async function visualPass() {
       JSON.stringify(blockedStart)
     );
     // Les prix seront relus normalement au démarrage réel.
-    await evaluate(cdp, sessionId, `window.__kyaraPlus.state.marketScanned.clear()`);
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         window.__kyaraNoPrices = false;
+         window.__kyaraPlus.state.autoSell.priceScanAt = 0;
+         document.getElementById('log').textContent = '';
+         return true;
+       })()`
+    );
 
     // Tests uniquement : délai nul pour ne pas attendre 5–60 s entre les ventes.
     await evaluate(
@@ -602,6 +611,20 @@ async function visualPass() {
       'Vente auto : les nouvelles annonces comptent dans les 10 places',
       auto.active === 3 + auto.created && auto.slots.active === auto.active,
       `${auto.active} active(s) · ${auto.slots.active}/${auto.slots.max}`
+    );
+    const autoApiLog = await evaluate(cdp, sessionId, `document.getElementById('log').textContent || ''`);
+    const autoRequests = (autoApiLog.match(/API (?:GET|POST)/g) || []).length;
+    const autoMarketScans = (autoApiLog.match(/API GET \/api\/market\/listings\?characterId=/g) || []).length;
+    const maxApi = await evaluate(cdp, sessionId, `Number(window.__apiMaxActive) || 0`);
+    check(
+      'Vente auto : pas de scan marché carte par carte',
+      autoMarketScans === 0 && autoRequests < 30,
+      `${autoRequests} requête(s) · ${autoMarketScans} scan(s) par carte`
+    );
+    check(
+      'Requêtes API sérialisées une par une',
+      maxApi <= 1,
+      `${maxApi} requête(s) simultanée(s) au maximum`
     );
     const sales = await evaluate(
       cdp,

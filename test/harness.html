@@ -239,11 +239,16 @@
       const json = (data) => new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
 
       const realFetch = window.fetch.bind(window);
+      let apiActive = 0;
+      window.__apiMaxActive = 0;
       window.fetch = async (input, init) => {
         const url = String(input);
         if (!url.includes('/api/')) return realFetch(input, init);
+        apiActive += 1;
+        window.__apiMaxActive = Math.max(window.__apiMaxActive, apiActive);
         log('API ' + (init?.method || 'GET') + ' ' + url);
 
+        try {
         const path = new URL(url, location.href).pathname;
 
         if (path.endsWith('/open-many')) {
@@ -273,6 +278,12 @@
         }
 
         if (url.includes('/api/me/collection/prices')) {
+          if (window.__kyaraNoPrices) {
+            return new Response(JSON.stringify({ error: 'prices_unavailable' }), {
+              status: 503,
+              headers: { 'content-type': 'application/json' }
+            });
+          }
           const ids = new URL(url, location.href).searchParams.get('ids').split(',');
           return json(ids.map((id) => ({ characterId: Number(id), ...(PRICES[id] || {}) })));
         }
@@ -630,6 +641,9 @@
         }
 
         return json({});
+        } finally {
+          apiActive = Math.max(0, apiActive - 1);
+        }
       };
     </script>
 

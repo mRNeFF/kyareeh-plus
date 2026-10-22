@@ -312,7 +312,9 @@
       // Annonces actives lues sur le site + celles créées pendant le cycle.
       listingsAt: 0,
       listingsError: null,
+      priceScanAt: 0,
       pendingListings: [],
+      initialPrep: null,
       refreshing: false,
       lastPick: null,
       log: []
@@ -749,13 +751,58 @@
     return {};
   }
 
+  /*
+   * Le site coupe l'accès quelques minutes dès qu'il voit une rafale de requêtes.
+   * Toutes les requêtes API passent donc par une petite file : **une seule à la
+   * fois** et un délai minimum entre deux départs. Les scans marché carte par
+   * carte ne peuvent plus partir en grappe.
+   */
+  const API_GATE = {
+    max: 1,
+    gapMs: 350,
+    active: 0,
+    lastStart: 0,
+    waiting: [],
+    timer: null
+  };
+
+  function pumpApiGate() {
+    if (API_GATE.active >= API_GATE.max || !API_GATE.waiting.length) return;
+    const wait = API_GATE.lastStart + API_GATE.gapMs - Date.now();
+    if (wait > 0) {
+      if (!API_GATE.timer) {
+        API_GATE.timer = setTimeout(() => {
+          API_GATE.timer = null;
+          pumpApiGate();
+        }, wait);
+      }
+      return;
+    }
+    const resolve = API_GATE.waiting.shift();
+    API_GATE.active += 1;
+    API_GATE.lastStart = Date.now();
+    resolve(() => {
+      API_GATE.active = Math.max(0, API_GATE.active - 1);
+      pumpApiGate();
+    });
+    pumpApiGate();
+  }
+
+  function acquireApiSlot() {
+    return new Promise((resolve) => {
+      API_GATE.waiting.push(resolve);
+      pumpApiGate();
+    });
+  }
+
   async function api(path, options = {}) {
     const method = options.method || 'GET';
-    const started = performance.now();
     const headers = { accept: 'application/json', ...readAuthHeaders() };
     if (method !== 'GET') Object.assign(headers, readPassHeader());
     if (options.body != null) headers['content-type'] = 'application/json';
 
+    const release = await acquireApiSlot();
+    const started = performance.now();
     try {
       const res = await fetch(path, {
         method,
@@ -797,6 +844,8 @@
       const message = err?.name === 'TimeoutError' ? 'Délai dépassé' : err?.message || 'Erreur réseau';
       pushDebug({ method, path, status: 0, ms, ok: false, error: message });
       throw new ApiError(0, message);
+    } finally {
+      release();
     }
   }
 
@@ -3242,16 +3291,13 @@
     const a = state.autoSell;
     let mine;
     try {
-      const [me, coll, response] = await Promise.all([
-        api('/api/me', { timeout: 20000 }).catch(() => null),
-        api('/api/me/collection?lean=1', { timeout: 25000 }),
-        api('/api/me/market', { timeout: 20000 })
-      ]);
-      mine = response;
+      // Volontairement séquentiel : deux requêtes suffisent, et elles ne
+      // partent jamais en même temps qu'un POST de vente.
+      const coll = await api('/api/me/collection?lean=1', { timeout: 25000 });
+      mine = await api('/api/me/market', { timeout: 20000 });
       const list = Array.isArray(coll) ? coll : Array.isArray(coll?.items) ? coll.items : null;
       if (!list) throw new Error('Collection illisible');
       if (!autoSellHasListings(mine)) throw new Error('Ventes actives illisibles : /api/me/market ne renvoie aucune liste d’annonces.');
-      if (me && typeof me === 'object') mergeUser(me);
       state.collection = list;
       state.mine = mine;
       state.lastSync = Date.now();
@@ -3301,6 +3347,34 @@
   }
 
   /**
+   * Récupère les prix manquants en **un seul lot** via l'endpoint officiel, au
+   * lieu d'un scan marché par carte. C'est ce qui évite la rafale de requêtes
+   * qui faisait expulser le compte.
+   */
+  async function autoSellEnsurePrices(ids) {
+    const a = state.autoSell;
+    const unique = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+    const missing = unique.filter((id) => priceOf(id) == null);
+    if (!missing.length) return;
+    a.priceScanAt = Date.now();
+    for (let offset = 0; offset < missing.length; offset += 500) {
+      const chunk = missing.slice(offset, offset + 500);
+      let array = null;
+      try {
+        const data = await api(`/api/me/collection/prices?ids=${chunk.join(',')}`, { timeout: 45000 });
+        if (Array.isArray(data)) array = data;
+        else if (Array.isArray(data?.prices)) array = data.prices;
+      } catch {
+        /* les prix déjà en cache restent utilisables */
+      }
+      if (array) {
+        chunk.forEach((id, index) => mergePriceEntry(id, parsePriceEntry(array[index])));
+      }
+      if (offset + 500 < missing.length) await sleep(250);
+    }
+  }
+
+  /**
    * Prépare un cycle sans rien poster : relit la collection et les ventes
    * actives, met à jour les prix manquants, puis classe les doublons selon le
    * tri actif. Avant chaque vente, l'appelant rappelle cette fonction.
@@ -3332,12 +3406,12 @@
       autoSellEligible(row, { ...options, requirePrice: false })
     );
     const duplicateIds = eligible.map((row) => String(row.id));
-    const unscanned = duplicateIds.filter((id) => !state.marketScanned.has(id));
-    if (unscanned.length) {
-      a.status = `Lecture du marché (${Math.min(60, unscanned.length)}/${unscanned.length})…`;
+    const missingPrices = duplicateIds.filter((id) => priceOf(id) == null);
+    if (missingPrices.length && Date.now() - Number(a.priceScanAt || 0) > 60000) {
+      a.status = `Lecture des prix (${Math.min(500, missingPrices.length)}/${missingPrices.length})…`;
       render();
-      // Prix par petits lots : les cartes déjà lues restent en cache.
-      await ensureMarketData(unscanned.slice(0, 60));
+      // Un seul appel groupé : plus de scan marché carte par carte au lancement.
+      await autoSellEnsurePrices(missingPrices);
     }
 
     const priced = all.map((row) => ({
@@ -3411,30 +3485,32 @@
    * chaque vente, la collection et les ventes actives sont relues et le
    * meilleur candidat est choisi à nouveau. `preview` ne poste rien.
    */
-  async function autoSellCycle({ dryRun = false, preview = false } = {}) {
+  async function autoSellCycle({ dryRun = false, preview = false, initialPrep = null } = {}) {
     const a = state.autoSell;
     const s = state.settings;
     const type = s.autoSellType === 'auction' ? 'auction' : 'fixed';
 
-    let prep;
-    try {
-      prep = await autoSellPrepare();
-    } catch (err) {
-      const message = friendlyError(err);
-      a.lastError = message;
-      a.status = message;
-      a.preview = null;
-      autoSellLog(message, 'err');
-      return {
-        plan: [],
-        created: 0,
-        matched: 0,
-        errors: 0,
-        simulated: 0,
-        fatal: message,
-        error: message,
-        errorKind: 'listings'
-      };
+    let prep = initialPrep;
+    if (!prep) {
+      try {
+        prep = await autoSellPrepare();
+      } catch (err) {
+        const message = friendlyError(err);
+        a.lastError = message;
+        a.status = message;
+        a.preview = null;
+        autoSellLog(message, 'err');
+        return {
+          plan: [],
+          created: 0,
+          matched: 0,
+          errors: 0,
+          simulated: 0,
+          fatal: message,
+          error: message,
+          errorKind: 'listings'
+        };
+      }
     }
 
     if (prep.error) {
@@ -3552,14 +3628,6 @@
       }
     }
 
-    if (!fatal) {
-      try {
-        await autoSellRefresh();
-      } catch (err) {
-        fatal = `Ventes actives illisibles après la vente : ${friendlyError(err)}`;
-      }
-    }
-
     a.cycles += 1;
     a.created += totals.created;
     a.matched += totals.matched;
@@ -3597,6 +3665,7 @@
     if (a.running || a.starting) return;
     a.starting = true;
     a.preview = null;
+    a.priceScanAt = 0;
     a.status = 'Calcul de l’aperçu…';
     render();
     try {
@@ -3669,6 +3738,8 @@
     a.preview = null;
     a.lastPlan = [];
     a.lastPick = null;
+    a.initialPrep = null;
+    a.priceScanAt = 0;
     a.log = [];
     render();
 
@@ -3707,6 +3778,9 @@
     a.nextAt = 0;
     a.lastError = null;
     a.preview = null;
+    // Le premier cycle réutilise la vérification déjà faite : pas de rafale
+    // collection + ventes actives juste après le démarrage.
+    a.initialPrep = prep;
     autoSellLog('Vente auto démarrée · doublons uniquement, dernière copie conservée');
     persistSettings();
     render();
@@ -3730,6 +3804,7 @@
     a.stop = true;
     a.gen += 1;
     a.nextAt = 0;
+    a.initialPrep = null;
     a.status = reason;
     autoSellLog(reason);
     render();
@@ -3747,9 +3822,12 @@
     const a = state.autoSell;
     const gen = ++a.gen;
     const alive = () => a.running && !a.stop && a.gen === gen;
+    let firstPrep = a.initialPrep;
+    a.initialPrep = null;
     while (alive()) {
       a.beatAt = Date.now();
       if (state.sell) {
+        firstPrep = null;
         a.status = 'Vente manuelle ouverte · attente';
         a.nextAt = Date.now() + 15000;
         render();
@@ -3759,7 +3837,11 @@
 
       let result;
       try {
-        result = await autoSellCycle({ dryRun: Boolean(state.settings.autoSellDryRun) });
+        result = await autoSellCycle({
+          dryRun: Boolean(state.settings.autoSellDryRun),
+          initialPrep: firstPrep
+        });
+        firstPrep = null;
       } catch (err) {
         a.lastError = friendlyError(err);
         a.running = false;
@@ -3781,7 +3863,10 @@
       }
 
       const wait = autoSellRefreshDelayMs();
-      a.nextAt = Date.now() + wait;
+      // En test, le refresh vaut 0 : on garde une petite pause pour ne pas
+      // boucler en rafale sur l'API.
+      const pause = wait > 0 ? wait : result.plan.length ? 250 : 2000;
+      a.nextAt = Date.now() + pause;
       a.status = result.error
         ? result.error
         : result.plan.length
@@ -3790,7 +3875,7 @@
             ? 'Simulation · aucun doublon vendable'
             : 'Aucun doublon vendable · attente';
       render();
-      await autoSellWait(wait, alive);
+      await autoSellWait(pause, alive);
     }
   }
 
