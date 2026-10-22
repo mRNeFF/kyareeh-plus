@@ -90,8 +90,8 @@ check('pinned exclu', api.autoSellSelect([row({ pinned: true })], {}).length ===
 check('revente bloquée exclue', api.autoSellSelect([row({ sellBlock: 'resale_lock' })], {}).length === 0);
 check('blocage générique exclu', api.autoSellSelect([row({ block: { reason: 'x' } })], {}).length === 0);
 check('M exclue par défaut', api.autoSellSelect([row({ rarity: 'M' })], {}).length === 0);
-check('L exclue par défaut', api.autoSellSelect([row({ rarity: 'L' })], {}).length === 0);
-check('M incluse si demandé', api.autoSellSelect([row({ rarity: 'M' })], { includeML: true }).length === 1);
+check('L incluse automatiquement', api.autoSellSelect([row({ rarity: 'L' })], {}).length === 1);
+check('M incluse si demandé', api.autoSellSelect([row({ rarity: 'M' })], { includeM: true }).length === 1);
 check('prix nul exclu', api.autoSellSelect([row({ price: 0 })], {}).length === 0);
 check('prix absent exclu', api.autoSellSelect([row({ price: null })], {}).length === 0);
 

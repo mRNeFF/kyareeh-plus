@@ -388,6 +388,8 @@ async function visualPass() {
            refreshMax: window.__kyaraPlus.state.settings.autoSellRefreshMaxMin,
            order: Array.from(root.querySelectorAll('[data-autosell-order] option')).map((o) => o.value),
            duration: Array.from(root.querySelectorAll('[data-autosell-duration] option')).map((o) => o.value),
+           mythic: Boolean(root.querySelector('[data-autosell-include-m]')),
+           mythicText: root.querySelector('[data-autosell-include-m]')?.closest('label')?.innerText || '',
            rarity: root.querySelector('.kp-listed-card')?.getAttribute('style') || ''
          };
        })()`
@@ -402,6 +404,11 @@ async function visualPass() {
     check('Refresh aléatoire 7–10 min', autoUi.refreshMin === 7 && autoUi.refreshMax === 10, `${autoUi.refreshMin}–${autoUi.refreshMax} min`);
     check('Ordre de vente réglable', autoUi.order.includes('price_desc') && autoUi.order.includes('price_asc'), autoUi.order.join(','));
     check('Durée annonce 12/24/48 h', ['12', '24', '48'].every((h) => autoUi.duration.includes(h)), autoUi.duration.join(','));
+    check(
+      'Option Mythiques uniquement',
+      autoUi.mythic === true && /mythiques/i.test(autoUi.mythicText) && !/M\/L/.test(autoUi.mythicText),
+      autoUi.mythicText.replace(/\s+/g, ' ')
+    );
     check('Bordure de rareté sur les cartes en vente', autoUi.rarity.includes('--rc:'), autoUi.rarity);
     check('Bouton Détacher Global disponible', autoUi.detach === true && autoUi.detachAct === 'panel-detach');
     check('Son global disponible', autoUi.sound === true);
@@ -599,8 +606,18 @@ async function visualPass() {
     check('Vente auto : identifiant API présent', Number.isFinite(Number(auto.characterId)), String(auto.characterId));
     check(
       'Vente auto : la carte la plus chère passe en premier',
-      Number(auto.characterId) === 282077,
+      Number(auto.characterId) === 999001,
       `première=${auto.characterId} · plan=${auto.plan.join(',')}`
+    );
+    check(
+      'Vente auto : les légendaires en double sont incluses',
+      auto.plan.includes('999001'),
+      auto.plan.join(',')
+    );
+    check(
+      'Vente auto : les mythiques restent exclues par défaut',
+      !auto.plan.includes('127691'),
+      auto.plan.join(',')
     );
     check(
       'Vente auto : aucune annonce active existante relancée',
@@ -632,15 +649,58 @@ async function visualPass() {
       `(() => {
          const root = document.querySelector('#kyara-plus-root').shadowRoot;
          const text = root.querySelector('#kp-view')?.innerText || '';
+         const chart = root.querySelector('.kp-sales');
          return {
            count: window.__kyaraPlus.state.salesLog.length,
            auto: window.__kyaraPlus.state.salesLog.filter((e) => e.source === 'auto').length,
-           chart: text.toLowerCase().includes('ventes') && text.toLowerCase().includes('net estimé')
+           chart: text.toLowerCase().includes('ventes') && text.toLowerCase().includes('net estimé'),
+           ranges: Array.from(chart?.querySelectorAll('[data-sales-range] option') || []).map((o) => o.value),
+           lines: chart?.querySelectorAll('.kp-sales-line').length || 0,
+           legend: chart?.querySelector('.kp-sales-legend')?.innerText || '',
+           labels: chart?.querySelector('.kp-sales-svg')?.textContent || ''
          };
        })()`
     );
     check('Ventes auto enregistrées', sales.auto > 0, `${sales.auto} auto · ${sales.count} total`);
     check('Graphique de ventes affiché', sales.chart === true);
+    check(
+      'Graphique : choix 1 jour / 7 jours / total',
+      ['1d', '7d', 'total'].every((value) => sales.ranges.includes(value)),
+      sales.ranges.join(',')
+    );
+    check(
+      'Graphique : une seule courbe « Vente »',
+      sales.lines === 1 && sales.legend.includes('Vente') && !/Auto|Manuelle/.test(sales.legend),
+      `${sales.lines} courbe(s) · ${sales.legend.replace(/\s+/g, ' ')}`
+    );
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const select = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-sales-range]');
+         select.value = '1d';
+         select.dispatchEvent(new Event('change', { bubbles: true }));
+         return true;
+       })()`
+    );
+    await sleep(250);
+    const chartDay = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         return {
+           range: window.__kyaraPlus.state.settings.salesRange,
+           labels: root.querySelector('.kp-sales-svg')?.textContent || '',
+           lines: root.querySelectorAll('.kp-sales-line').length
+         };
+       })()`
+    );
+    check(
+      'Graphique : période 1 jour et axe en heures',
+      chartDay.range === '1d' && chartDay.lines === 1 && /\d{2} h/.test(chartDay.labels),
+      `${chartDay.range} · ${chartDay.labels.replace(/\s+/g, ' ').slice(0, 90)}`
+    );
     await evaluate(
       cdp,
       sessionId,

@@ -57,6 +57,7 @@
     buyoutPct: 0,
     durationHours: 12,
     dupeSort: 'price_desc',
+    salesRange: '7d',
     dealsRarity: 'all',
     dealsSort: 'price_asc',
     dealsPages: 6,
@@ -78,7 +79,7 @@
     autoSellDelayMaxSec: 60,
     autoSellRefreshMinMin: 7,
     autoSellRefreshMaxMin: 10,
-    autoSellIncludeML: false,
+    autoSellIncludeM: false,
     autoSellDryRun: false
   };
 
@@ -897,10 +898,19 @@
       300,
       Math.max(state.settings.autoSellDelayMinSec, Math.round(Number(state.settings.autoSellDelayMaxSec) || 60))
     );
-    state.settings.autoSellIncludeML = Boolean(state.settings.autoSellIncludeML);
+    if (state.settings.autoSellIncludeML != null) {
+      // Ancienne option « M/L » : on ne conserve que l'accord Mythiques.
+      state.settings.autoSellIncludeM =
+        state.settings.autoSellIncludeM || Boolean(state.settings.autoSellIncludeML);
+    }
+    state.settings.autoSellIncludeM = Boolean(state.settings.autoSellIncludeM);
+    delete state.settings.autoSellIncludeML;
     state.settings.autoSellDryRun = Boolean(state.settings.autoSellDryRun);
     state.settings.dealsRarity = String(state.settings.dealsRarity || 'all');
     state.settings.dupeSort = DUPE_SORTS.some(([value]) => value === state.settings.dupeSort) ? state.settings.dupeSort : 'price_desc';
+    state.settings.salesRange = ['1d', '7d', 'total'].includes(state.settings.salesRange)
+      ? state.settings.salesRange
+      : '7d';
     state.settings.dealsType = ['all', 'fixed', 'auction'].includes(state.settings.dealsType) ? state.settings.dealsType : 'all';
     state.settings.dealsSort = DEAL_SORTS.some(([value]) => value === state.settings.dealsSort) ? state.settings.dealsSort : 'price_asc';
     state.settings.dealsPages = Math.min(20, Math.max(1, Math.round(state.settings.dealsPages)));
@@ -1597,7 +1607,9 @@
     if (autoQty <= 0) return false;
     if (row.pinned) return false;
     if (row.sellBlock || row.block) return false;
-    if (!options.includeML && ['M', 'L'].includes(String(row.rarity || '').toUpperCase())) return false;
+    // Les légendaires sont vendues automatiquement ; seules les mythiques
+    // restent protégées par défaut.
+    if (!options.includeM && String(row.rarity || '').toUpperCase() === 'M') return false;
 
     if (options.requirePrice !== false) {
       if (row.price == null || row.price === '') return false;
@@ -1673,40 +1685,74 @@
     return totals;
   }
 
-  /** Net cumulé par jour, sur les `days` derniers jours (auto et manuel séparés). */
-  function salesChartSeries(log, now = Date.now(), days = 7) {
-    const count = Math.max(2, Math.min(31, Math.round(Number(days) || 7)));
-    const end = new Date(now);
-    end.setHours(0, 0, 0, 0);
-    const start = new Date(end);
-    start.setDate(start.getDate() - (count - 1));
+  /**
+   * Net cumulé par **heure** sur la fenêtre demandée (`1d`, `7d`, `total`).
+   * Une seule série : le graphique ne sépare plus auto et manuel.
+   */
+  function salesChartSeries(log, now = Date.now(), range = '7d') {
+    const normalized = ['1d', '7d', 'total'].includes(range) ? range : '7d';
+    const hour = 3600000;
+    const current = new Date(Number(now) || Date.now());
+    current.setMinutes(0, 0, 0);
+    const lastAt = current.getTime();
+    const entries = (Array.isArray(log) ? log : [])
+      .map((entry) => ({ ...entry, at: Number(entry?.at) }))
+      .filter((entry) => Number.isFinite(entry.at) && entry.at <= now);
 
-    const buckets = Array.from({ length: count }, (_, index) => {
-      const date = new Date(start);
-      date.setDate(start.getDate() + index);
-      return { at: date.getTime(), auto: 0, manual: 0 };
-    });
-
-    for (const entry of Array.isArray(log) ? log : []) {
-      const at = Number(entry?.at);
-      if (!Number.isFinite(at) || at < start.getTime() || at > now) continue;
-      const date = new Date(at);
-      date.setHours(0, 0, 0, 0);
-      const index = Math.round((date.getTime() - start.getTime()) / 86400000);
-      if (index < 0 || index >= count) continue;
-      const net = Math.max(0, Number(entry.net) || 0);
-      buckets[index][entry.source === 'auto' ? 'auto' : 'manual'] += net;
+    let startAt;
+    let stepHours = 1;
+    if (normalized === '1d') {
+      startAt = lastAt - 23 * hour;
+    } else if (normalized === '7d') {
+      startAt = lastAt - 167 * hour;
+    } else {
+      const first = entries.length ? Math.min(...entries.map((entry) => entry.at)) : lastAt;
+      const firstHour = new Date(first);
+      firstHour.setMinutes(0, 0, 0);
+      startAt = firstHour.getTime();
+      const spanHours = Math.max(1, Math.floor((lastAt - startAt) / hour) + 1);
+      // « Total » peut couvrir des mois : on garde au plus ~720 points,
+      // toujours par pas d'heures entières.
+      stepHours = Math.max(1, Math.ceil(spanHours / 720));
     }
 
-    let auto = 0;
-    let manual = 0;
+    const count = Math.max(1, Math.floor((lastAt - startAt) / (hour * stepHours)) + 1);
+    const buckets = Array.from({ length: count }, (_, index) => ({
+      at: startAt + index * hour * stepHours,
+      net: 0
+    }));
+
+    let net = 0;
+    let included = 0;
+    let matched = 0;
+    for (const entry of entries) {
+      if (entry.at < startAt) continue;
+      const index = Math.floor((entry.at - startAt) / (hour * stepHours));
+      if (index < 0 || index >= count) continue;
+      const value = Math.max(0, Number(entry.net) || 0);
+      buckets[index].net += value;
+      net += value;
+      included += 1;
+      if (entry.matched) matched += 1;
+    }
+
+    let cumulative = 0;
     const points = buckets.map((bucket) => {
-      auto += bucket.auto;
-      manual += bucket.manual;
-      return { at: bucket.at, auto, manual };
+      cumulative += bucket.net;
+      return { at: bucket.at, value: cumulative };
     });
-    const max = Math.max(1, ...points.map((point) => Math.max(point.auto, point.manual)));
-    return { points, max };
+    const max = Math.max(1, ...points.map((point) => point.value));
+    return {
+      points,
+      max,
+      range: normalized,
+      net,
+      count: included,
+      matched,
+      stepHours,
+      startAt,
+      lastAt
+    };
   }
   /* SALES:END */
 
@@ -3379,12 +3425,14 @@
    * actives, met à jour les prix manquants, puis classe les doublons selon le
    * tri actif. Avant chaque vente, l'appelant rappelle cette fonction.
    */
-  async function autoSellPrepare() {
+  async function autoSellPrepare({ refresh = true } = {}) {
     const a = state.autoSell;
     const s = state.settings;
-    a.status = 'Lecture de la collection et des ventes actives…';
-    render();
-    await autoSellRefresh();
+    if (refresh) {
+      a.status = 'Lecture de la collection et des ventes actives…';
+      render();
+      await autoSellRefresh();
+    }
 
     const slots = listingSlots();
     const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
@@ -3399,7 +3447,7 @@
       0
     );
     const options = {
-      includeML: Boolean(s.autoSellIncludeML),
+      includeM: Boolean(s.autoSellIncludeM),
       order: s.autoSellOrder
     };
     const eligible = duplicates.filter((row) =>
@@ -3447,7 +3495,7 @@
         error = autoSellSortError(withoutPrice, Math.max(eligible.length, duplicates.length));
       } else {
         errorKind = 'empty';
-        error = 'Aucun doublon éligible : vérifie les blocages de revente et les cartes M/L.';
+        error = 'Aucun doublon éligible : vérifie les blocages de revente et les cartes mythiques.';
       }
     }
 
@@ -3573,6 +3621,7 @@
     const totals = { created: 0, matched: 0, errors: 0, simulated: 0 };
     const plan = [];
     let fatal = null;
+    let needSync = false;
     let current = prep;
     while (a.running && !a.stop) {
       if (!current.candidates.length) break;
@@ -3607,6 +3656,7 @@
           // L'annonce est active immédiatement : on la bloque localement pour
           // ne pas la relancer avant que /api/me/market ne la renvoie.
           autoSellRememberListing(single, result.posted, type, autoSellDuration());
+          needSync = true;
         }
       }
 
@@ -3615,16 +3665,30 @@
       if (!a.running || a.stop) break;
 
       try {
-        current = await autoSellPrepare();
+        // Mise en vente simple : pas d'appel réseau, on continue avec l'état
+        // local. Une vente réelle déclenche, elle, une relecture immédiate.
+        current = await autoSellPrepare({ refresh: Boolean(result.matched) });
       } catch (err) {
         fatal = friendlyError(err);
         break;
       }
+      if (result.matched) needSync = false;
       if (current.error) {
         if (current.errorKind === 'price' || current.errorKind === 'listings') {
           fatal = current.error;
         }
         break;
+      }
+    }
+
+    // Une seule relecture en fin de cycle si des annonces non vendues ont été
+    // créées : elles passeront de « confirmation » à l'état réel du site.
+    if (!fatal && needSync && plan.length && !a.stop) {
+      try {
+        await autoSellRefresh();
+        needSync = false;
+      } catch (err) {
+        fatal = `Ventes actives illisibles après le cycle : ${friendlyError(err)}`;
       }
     }
 
@@ -3695,21 +3759,6 @@
       a.lastError = friendlyError(err);
       a.status = a.lastError;
       autoSellLog(a.lastError, 'err');
-    } finally {
-      a.refreshing = false;
-      render();
-    }
-  }
-
-  /** Synchronisation silencieuse de la section quand l'onglet Vente auto est ouvert. */
-  async function autoSellSyncListings() {
-    const a = state.autoSell;
-    if (a.refreshing || a.starting || a.running || state.sell) return;
-    a.refreshing = true;
-    try {
-      await autoSellRefresh();
-    } catch (err) {
-      a.listingsError = friendlyError(err);
     } finally {
       a.refreshing = false;
       render();
@@ -6178,7 +6227,7 @@
       price: autoSellPrice(row, strategy)
     }));
     const candidates = autoSellSelect(priced, {
-      includeML: Boolean(state.settings.autoSellIncludeML),
+      includeM: Boolean(state.settings.autoSellIncludeM),
       order: state.settings.autoSellOrder
     });
     let total = 0;
@@ -6200,7 +6249,7 @@
       activeQty: autoSellActiveQtyFor(row, activeQtyByKey)
     }));
     const options = {
-      includeML: Boolean(s.autoSellIncludeML)
+      includeM: Boolean(s.autoSellIncludeM)
     };
     const strategyLabel =
       { quick: 'Vente rapide', balanced: 'Équilibrée', max: 'Prix maximal' }[s.autoSellStrategy] ?? 'Équilibrée';
@@ -6216,8 +6265,8 @@
         autoSellEligible(row, { ...options, requirePrice: false }) &&
         autoSellPrice(row, s.autoSellStrategy) == null
     ).length;
-    const mlSpare = rows
-      .filter((row) => ['M', 'L'].includes(String(row.rarity || '').toUpperCase()))
+    const mSpare = rows
+      .filter((row) => String(row.rarity || '').toUpperCase() === 'M')
       .reduce((sum, row) => sum + autoSellSpare(row, row.activeQty), 0);
     const stateLabel = a.starting
       ? 'vérification'
@@ -6296,14 +6345,14 @@
         </div>
         <div class="kp-autosell-opts">
           <label class="kp-check">
-            <input type="checkbox" data-autosell-include-ml ${s.autoSellIncludeML ? 'checked' : ''} ${locked ? 'disabled' : ''}>
-            Inclure M/L <em>${s.autoSellIncludeML ? '· dangereux' : '· exclues par défaut'}</em>
+            <input type="checkbox" data-autosell-include-m ${s.autoSellIncludeM ? 'checked' : ''} ${locked ? 'disabled' : ''}>
+            Inclure les Mythiques <em>${s.autoSellIncludeM ? '· dangereux' : '· exclues par défaut'}</em>
           </label>
           <label class="kp-check">
             <input type="checkbox" data-autosell-dryrun ${s.autoSellDryRun ? 'checked' : ''} ${locked ? 'disabled' : ''}>
             Simulation
           </label>
-          <span class="kp-autosell-note">${fmt(withoutPrice)} sans prix · ${fmt(mlSpare)} M/L</span>
+          <span class="kp-autosell-note">${fmt(withoutPrice)} sans prix · ${fmt(mSpare)} mythique(s)</span>
         </div>
         <div class="kp-autosell-actions">
           <button class="kp-btn" type="button" data-act="autosell-preview" ${locked ? 'disabled' : ''}>Aperçu</button>
@@ -6320,7 +6369,7 @@
                  <span>${fmt(eligibleSpare)} exemplaire(s) disponible(s) · ◆ ${fmt(
                    estimate.total
                  )} estimés · ${slots.remaining} place(s) libre(s) · ${
-                   s.autoSellIncludeML ? 'M/L incluses' : 'M/L exclues'
+                   s.autoSellIncludeM ? 'Mythiques incluses' : 'Mythiques exclues'
                  } · dernière copie conservée.</span>
                </div>`
             : ''
@@ -6436,16 +6485,19 @@
   }
 
   function salesChart() {
-    const totals = salesTotals(state.salesLog);
-    const model = salesChartSeries(state.salesLog);
-    const { points, max } = model;
+    const range = ['1d', '7d', 'total'].includes(state.settings.salesRange)
+      ? state.settings.salesRange
+      : '7d';
+    const model = salesChartSeries(state.salesLog, Date.now(), range);
+    const { points, max, net, count, matched } = model;
     const W = 720;
     const H = 210;
-    const pad = { l: 44, r: 14, t: 14, b: 26 };
+    const pad = { l: 44, r: 14, t: 14, b: 30 };
     const x = (index) => pad.l + (index / Math.max(1, points.length - 1)) * (W - pad.l - pad.r);
     const y = (value) => H - pad.b - (value / max) * (H - pad.t - pad.b);
-    const line = (key) =>
-      points.map((point, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(point[key]).toFixed(1)}`).join(' ');
+    const line = points
+      .map((point, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(point.value).toFixed(1)}`)
+      .join(' ');
     const grid = [0, 0.5, 1]
       .map((ratio) => {
         const value = max * ratio;
@@ -6456,42 +6508,59 @@
         )}"></line><text class="kp-sales-axis" x="${pad.l - 7}" y="${(gy + 3).toFixed(1)}" text-anchor="end">◆ ${label}</text>`;
       })
       .join('');
-    const xLabels = points
-      .map((point, index) => {
-        const date = new Date(point.at).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+
+    // Les points sont horaires ; on n'affiche que quelques repères lisibles.
+    const labelStep = Math.max(1, Math.ceil((points.length - 1) / 5));
+    const labelIndexes = [];
+    for (let index = 0; index < points.length; index += labelStep) labelIndexes.push(index);
+    if (labelIndexes[labelIndexes.length - 1] !== points.length - 1) labelIndexes.push(points.length - 1);
+    const labelOf = (at) => {
+      const date = new Date(at);
+      const hh = `${String(date.getHours()).padStart(2, '0')} h`;
+      if (range === '1d') return hh;
+      const day = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}`;
+      return `${day} ${hh}`;
+    };
+    const xLabels = labelIndexes
+      .map((index) => {
+        const point = points[index];
         return `<text class="kp-sales-axis" x="${x(index).toFixed(1)}" y="${H - 7}" text-anchor="middle">${esc(
-          date
+          labelOf(point.at)
         )}</text>`;
       })
       .join('');
+
+    const rangeLabel = { '1d': '24 h', '7d': '7 jours', total: 'Total' }[range];
     return `
       <section class="kp-sales">
         <div class="kp-sales-head">
           <b>Ventes</b>
-          <span>7 jours · via Kyareeh+</span>
+          <div class="kp-sales-head-right">
+            <span>${rangeLabel} · via Kyareeh+</span>
+            <select class="kp-select kp-sales-range" data-sales-range aria-label="Période du graphique de ventes">
+              <option value="1d" ${range === '1d' ? 'selected' : ''}>1 jour</option>
+              <option value="7d" ${range === '7d' ? 'selected' : ''}>7 jours</option>
+              <option value="total" ${range === 'total' ? 'selected' : ''}>Total</option>
+            </select>
+          </div>
         </div>
         <div class="kp-sales-kpis">
-          <span><b>◆ ${fmt(totals.net)}</b><small>net estimé</small></span>
-          <span><b>${fmt(totals.count)}</b><small>ventes</small></span>
-          <span><b>${fmt(totals.matched)}</b><small>immédiates</small></span>
+          <span><b>◆ ${fmt(net)}</b><small>net estimé</small></span>
+          <span><b>${fmt(count)}</b><small>ventes</small></span>
+          <span><b>${fmt(matched)}</b><small>immédiates</small></span>
         </div>
-        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Net des ventes par jour">
+        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Net des ventes cumulé par heure">
           ${grid}
-          <path class="kp-sales-line is-auto" d="${line('auto')}"></path>
-          <path class="kp-sales-line is-manual" d="${line('manual')}"></path>
-          <circle class="kp-sales-dot is-auto" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
-            points[points.length - 1].auto
-          ).toFixed(1)}" r="3"></circle>
-          <circle class="kp-sales-dot is-manual" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
-            points[points.length - 1].manual
+          <path class="kp-sales-line is-sales" d="${line}"></path>
+          <circle class="kp-sales-dot is-sales" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
+            points[points.length - 1].value
           ).toFixed(1)}" r="3"></circle>
           ${xLabels}
         </svg>
         <div class="kp-sales-legend">
-          <span><i class="is-auto"></i>Auto <b>◆ ${fmt(totals.autoNet)}</b></span>
-          <span><i class="is-manual"></i>Manuelle <b>◆ ${fmt(totals.manualNet)}</b></span>
+          <span><i class="is-sales"></i>Vente <b>◆ ${fmt(net)}</b></span>
         </div>
-        <div class="kp-sales-note">Net estimé des annonces créées via Kyareeh+.</div>
+        <div class="kp-sales-note">Net estimé des annonces créées via Kyareeh+ · cumul par heure.</div>
       </section>`;
   }
 
@@ -10595,9 +10664,9 @@
     const autoStrategy = target.closest('[data-autosell-strategy]');
     const autoOrder = target.closest('[data-autosell-order]');
     const autoDuration = target.closest('[data-autosell-duration]');
-    const autoIncludeML = target.closest('[data-autosell-include-ml]');
+    const autoIncludeM = target.closest('[data-autosell-include-m]');
     const autoDryRun = target.closest('[data-autosell-dryrun]');
-    if (autoType || autoStrategy || autoOrder || autoDuration || autoIncludeML || autoDryRun) {
+    if (autoType || autoStrategy || autoOrder || autoDuration || autoIncludeM || autoDryRun) {
       if (state.autoSell.running) return;
       state.autoSell.armed = false;
       if (autoType) state.settings.autoSellType = autoType.value === 'auction' ? 'auction' : 'fixed';
@@ -10611,8 +10680,18 @@
         const hours = Number(autoDuration.value);
         if ([12, 24, 48].includes(hours)) state.settings.durationHours = hours;
       }
-      if (autoIncludeML) state.settings.autoSellIncludeML = Boolean(autoIncludeML.checked);
+      if (autoIncludeM) state.settings.autoSellIncludeM = Boolean(autoIncludeM.checked);
       if (autoDryRun) state.settings.autoSellDryRun = Boolean(autoDryRun.checked);
+      persistSettings();
+      render();
+      return;
+    }
+
+    const salesRange = target.closest('[data-sales-range]');
+    if (salesRange) {
+      state.settings.salesRange = ['1d', '7d', 'total'].includes(salesRange.value)
+        ? salesRange.value
+        : '7d';
       persistSettings();
       render();
       return;
@@ -10979,19 +11058,6 @@
   setInterval(() => {
     if (state.open && state.tab === 'sell') updateLockBadges();
   }, 30000);
-
-  // Ventes actives : synchronisation silencieuse quand l'onglet Vente auto est ouvert.
-  setInterval(() => {
-    if (
-      state.open &&
-      state.user &&
-      state.tab === 'sell' &&
-      state.sellView.mode === 'auto' &&
-      document.visibilityState === 'visible'
-    ) {
-      autoSellSyncListings();
-    }
-  }, 60000);
 
   setInterval(() => {
     if (
