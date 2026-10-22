@@ -1739,14 +1739,16 @@
     let cumulative = 0;
     const points = buckets.map((bucket) => {
       cumulative += bucket.net;
-      return { at: bucket.at, value: cumulative };
+      // Chaque point est le net gagné sur la tranche, pas un cumul : la courbe
+      // ne doit pas être exponentielle.
+      return { at: bucket.at, value: bucket.net };
     });
     const max = Math.max(1, ...points.map((point) => point.value));
     return {
       points,
       max,
       range: normalized,
-      net,
+      net: cumulative,
       count: included,
       matched,
       stepHours,
@@ -6491,29 +6493,73 @@
     const model = salesChartSeries(state.salesLog, Date.now(), range);
     const { points, max, net, count, matched } = model;
     const W = 720;
-    const H = 210;
-    const pad = { l: 44, r: 14, t: 14, b: 30 };
-    const x = (index) => pad.l + (index / Math.max(1, points.length - 1)) * (W - pad.l - pad.r);
-    const y = (value) => H - pad.b - (value / max) * (H - pad.t - pad.b);
+    const H = 230;
+    const pad = { l: 70, r: 16, t: 18, b: 36 };
+    // Échelle en chakra, arrondie à 100 pour que les lignes de 50 restent nettes.
+    const yMax = Math.max(100, Math.ceil(max / 100) * 100);
+    const plotW = W - pad.l - pad.r;
+    const plotH = H - pad.t - pad.b;
+    const x = (index) => pad.l + (index / Math.max(1, points.length - 1)) * plotW;
+    const y = (value) => H - pad.b - (value / yMax) * plotH;
     const line = points
       .map((point, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(point.value).toFixed(1)}`)
       .join(' ');
-    const grid = [0, 0.5, 1]
-      .map((ratio) => {
-        const value = max * ratio;
-        const gy = y(value);
-        const label = Number.isInteger(value) ? fmt(value) : value.toFixed(1).replace('.', ',');
-        return `<line class="kp-sales-grid" x1="${pad.l}" y1="${gy.toFixed(1)}" x2="${W - pad.r}" y2="${gy.toFixed(
-          1
-        )}"></line><text class="kp-sales-axis" x="${pad.l - 7}" y="${(gy + 3).toFixed(1)}" text-anchor="end">◆ ${label}</text>`;
-      })
+
+    // Lignes horizontales : 50 = fine, 100 = moyenne, 1000 = épaisse.
+    const chakraStep = plotH / yMax;
+    const grid = [];
+    for (let value = 0; value <= yMax; value += 50) {
+      const major = value % 1000 === 0;
+      const medium = value % 100 === 0;
+      if (!major && !medium && 50 * chakraStep < 5) continue;
+      if (!major && medium && 100 * chakraStep < 6) continue;
+      grid.push({ value, major, medium });
+    }
+    const labelStep = yMax <= 500 ? 50 : yMax <= 1200 ? 100 : yMax <= 5000 ? 500 : 1000;
+    const yLabels = grid.filter((lineItem) => lineItem.value % labelStep === 0);
+    if (!yLabels.some((lineItem) => lineItem.value === yMax)) {
+      yLabels.push({ value: yMax, major: yMax % 1000 === 0, medium: yMax % 100 === 0 });
+    }
+    const yGrid = grid
+      .map(
+        (lineItem) =>
+          `<line class="kp-sales-grid ${lineItem.major ? 'is-major' : lineItem.medium ? 'is-medium' : 'is-minor'}" x1="${
+            pad.l
+          }" y1="${y(lineItem.value).toFixed(1)}" x2="${W - pad.r}" y2="${y(lineItem.value).toFixed(1)}"></line>`
+      )
+      .join('');
+    const yText = yLabels
+      .map(
+        (lineItem) =>
+          `<text class="kp-sales-axis ${lineItem.major ? 'is-major' : ''}" x="${pad.l - 9}" y="${(
+            y(lineItem.value) + 3
+          ).toFixed(1)}" text-anchor="end">◆ ${fmt(lineItem.value)}</text>`
+      )
       .join('');
 
-    // Les points sont horaires ; on n'affiche que quelques repères lisibles.
-    const labelStep = Math.max(1, Math.ceil((points.length - 1) / 5));
-    const labelIndexes = [];
-    for (let index = 0; index < points.length; index += labelStep) labelIndexes.push(index);
-    if (labelIndexes[labelIndexes.length - 1] !== points.length - 1) labelIndexes.push(points.length - 1);
+    // Lignes verticales : 1 h fine, 12 h moyenne, 24 h épaisse.
+    const xSpacing = plotW / Math.max(1, points.length - 1);
+    const majorEvery = Math.max(1, Math.round(24 / model.stepHours));
+    const mediumEvery = Math.max(1, Math.round(12 / model.stepHours));
+    const xGrid = [];
+    points.forEach((point, index) => {
+      const major = index % majorEvery === 0;
+      const medium = index % mediumEvery === 0;
+      if (!major && !medium && xSpacing < 3) return;
+      xGrid.push(
+        `<line class="kp-sales-grid-x ${major ? 'is-major' : medium ? 'is-medium' : 'is-minor'}" x1="${x(index).toFixed(
+          1
+        )}" y1="${pad.t}" x2="${x(index).toFixed(1)}" y2="${H - pad.b}"></line>`
+      );
+    });
+
+    // Repères lisibles : toutes les 6 h sur 1 jour, toutes les 24 h au-delà.
+    const labelEveryHours = range === '1d' ? 6 : 24;
+    const labelEveryPoints = Math.max(1, Math.round(labelEveryHours / model.stepHours));
+    const labelIndexes = new Set([0, points.length - 1]);
+    points.forEach((point, index) => {
+      if (index % labelEveryPoints === 0) labelIndexes.add(index);
+    });
     const labelOf = (at) => {
       const date = new Date(at);
       const hh = `${String(date.getHours()).padStart(2, '0')} h`;
@@ -6521,10 +6567,11 @@
       const day = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}`;
       return `${day} ${hh}`;
     };
-    const xLabels = labelIndexes
+    const xLabels = [...labelIndexes]
+      .sort((a, b) => a - b)
       .map((index) => {
         const point = points[index];
-        return `<text class="kp-sales-axis" x="${x(index).toFixed(1)}" y="${H - 7}" text-anchor="middle">${esc(
+        return `<text class="kp-sales-axis" x="${x(index).toFixed(1)}" y="${H - 9}" text-anchor="middle">${esc(
           labelOf(point.at)
         )}</text>`;
       })
@@ -6549,8 +6596,10 @@
           <span><b>${fmt(count)}</b><small>ventes</small></span>
           <span><b>${fmt(matched)}</b><small>immédiates</small></span>
         </div>
-        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Net des ventes cumulé par heure">
-          ${grid}
+        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Chakra gagné par heure">
+          ${yGrid}
+          ${xGrid}
+          ${yText}
           <path class="kp-sales-line is-sales" d="${line}"></path>
           <circle class="kp-sales-dot is-sales" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
             points[points.length - 1].value
@@ -6560,7 +6609,9 @@
         <div class="kp-sales-legend">
           <span><i class="is-sales"></i>Vente <b>◆ ${fmt(net)}</b></span>
         </div>
-        <div class="kp-sales-note">Net estimé des annonces créées via Kyareeh+ · cumul par heure.</div>
+        <div class="kp-sales-note">Chakra gagné par heure${
+          model.stepHours > 1 ? ` (tranches de ${fmt(model.stepHours)} h)` : ''
+        } · net estimé.</div>
       </section>`;
   }
 

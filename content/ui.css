@@ -1973,10 +1973,38 @@ img.kp-avatar {
   stroke-width: 1;
 }
 
+.kp-sales-grid.is-minor,
+.kp-sales-grid-x.is-minor {
+  stroke: rgba(255, 255, 255, 0.028);
+  stroke-width: 0.7;
+}
+
+.kp-sales-grid.is-medium,
+.kp-sales-grid-x.is-medium {
+  stroke: rgba(255, 255, 255, 0.075);
+  stroke-width: 1;
+}
+
+.kp-sales-grid.is-major,
+.kp-sales-grid-x.is-major {
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-width: 1.4;
+}
+
+.kp-sales-grid-x {
+  stroke: rgba(255, 255, 255, 0.05);
+  stroke-width: 0.8;
+}
+
 .kp-sales-axis {
   fill: var(--kp-muted);
   font-size: 8px;
   font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.kp-sales-axis.is-major {
+  fill: var(--kp-text);
+  font-weight: 600;
 }
 
 .kp-sales-line {

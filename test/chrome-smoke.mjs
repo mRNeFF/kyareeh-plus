@@ -697,9 +697,13 @@ async function visualPass() {
        })()`
     );
     check(
-      'Graphique : période 1 jour et axe en heures',
-      chartDay.range === '1d' && chartDay.lines === 1 && /\d{2} h/.test(chartDay.labels),
-      `${chartDay.range} · ${chartDay.labels.replace(/\s+/g, ' ').slice(0, 90)}`
+      'Graphique : période 1 jour, axe en heures et valeurs chakra',
+      chartDay.range === '1d' &&
+        chartDay.lines === 1 &&
+        /\d{2} h/.test(chartDay.labels) &&
+        chartDay.labels.includes('◆ 50') &&
+        chartDay.labels.includes('◆ 100'),
+      `${chartDay.range} · ${chartDay.labels.replace(/\s+/g, ' ').slice(0, 120)}`
     );
     await evaluate(
       cdp,

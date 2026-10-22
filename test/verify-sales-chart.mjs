@@ -44,15 +44,16 @@ const day = api.salesChartSeries(log, now, '1d');
 check('1 jour = 24 points horaires', day.points.length === 24, String(day.points.length));
 check('1 jour : net de la fenêtre', day.net === 150, String(day.net));
 check('1 jour : deux ventes', day.count === 2, String(day.count));
-check('1 jour : cumul final', day.points[23].value === 150, String(day.points[23].value));
-check('1 jour : maximum', day.max === 150, String(day.max));
-check('1 jour : entrée de la veille exclue', day.points[23].value !== 175);
+check('1 jour : maximum horaire', day.max === 100, String(day.max));
+check('1 jour : somme des tranches = net', day.points.reduce((sum, point) => sum + point.value, 0) === 150);
+check('1 jour : courbe non cumulative', day.points[23].value === 0, String(day.points[23].value));
+check('1 jour : entrée de la veille exclue', day.points.reduce((sum, point) => sum + point.value, 0) !== 175);
 
 const week = api.salesChartSeries(log, now, '7d');
 check('7 jours = 168 points horaires', week.points.length === 168, String(week.points.length));
 check('7 jours : net de la fenêtre', week.net === 175, String(week.net));
-check('7 jours : cumul final', week.points[167].value === 175, String(week.points[167].value));
-check('7 jours : maximum', week.max === 175, String(week.max));
+check('7 jours : maximum horaire', week.max === 100, String(week.max));
+check('7 jours : somme des tranches = net', week.points.reduce((sum, point) => sum + point.value, 0) === 175);
 check(
   'courbe unique, plus de séries auto/manuel',
   week.points.every((point) => !('auto' in point) && !('manual' in point))
@@ -61,8 +62,8 @@ check(
 const all = api.salesChartSeries(log, now, 'total');
 check('total : départ à la première vente', all.points.length === 247, String(all.points.length));
 check('total : net complet', all.net === 1174, String(all.net));
-check('total : cumul final', all.points[all.points.length - 1].value === 1174, String(all.points[all.points.length - 1].value));
-check('total : maximum', all.max === 1174, String(all.max));
+check('total : maximum horaire', all.max === 999, String(all.max));
+check('total : somme des tranches = net', all.points.reduce((sum, point) => sum + point.value, 0) === 1174);
 check('total : quatre ventes', all.count === 4, String(all.count));
 check('total : pas de division en jours', all.stepHours === 1, String(all.stepHours));
 

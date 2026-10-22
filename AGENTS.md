@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.3.3** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.3.4** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `210e84a`
@@ -25,7 +25,7 @@ npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
 npm run verify:chrome       # 49 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 43 contrôles
 node test/verify-autosell.mjs    # 50 contrôles (sélection pure + stratégies + ordre + ventes actives)
-node test/verify-sales-chart.mjs # 26 contrôles (cumuls horaires 1 j / 7 j / total)
+node test/verify-sales-chart.mjs # 27 contrôles (tranches horaires 1 j / 7 j / total)
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
 node test/verify-duel-engine.mjs # règles du moteur de duel
@@ -150,7 +150,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | Onglet | Contenu |
 |---|---|
 | **Compte** | Valeur du compte, ressources, top cartes, valeur par rareté, séries complètes, recherche d'un autre joueur (valorisation exacte). |
-| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (section **Ventes actives** : nom, quantité, prix unitaire/total, état et temps restant, bordure de rareté, cliquable vers la fiche marché sans prix recommandé, relue au démarrage, après une vente immédiate et en fin de cycle ; doublons uniquement, dernière copie conservée, **exemplaires déjà en vente réservés**, **Mythiques exclues par défaut**, **Légendaires en double incluses automatiquement**, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse sur le prix unitaire**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, refus explicite si le tri est impossible, arrêt d'urgence). Les prix manquants sont lus **en un lot** (`/api/me/collection/prices`), sans scan marché carte par carte. En bas, **graphique local** du net cumulé **par heure** avec menu **1 jour / 7 jours / Total** et **une seule courbe « Vente »**, total des ventes et ventes immédiates sur la période. |
+| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (section **Ventes actives** : nom, quantité, prix unitaire/total, état et temps restant, bordure de rareté, cliquable vers la fiche marché sans prix recommandé, relue au démarrage, après une vente immédiate et en fin de cycle ; doublons uniquement, dernière copie conservée, **exemplaires déjà en vente réservés**, **Mythiques exclues par défaut**, **Légendaires en double incluses automatiquement**, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse sur le prix unitaire**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, refus explicite si le tri est impossible, arrêt d'urgence). Les prix manquants sont lus **en un lot** (`/api/me/collection/prices`), sans scan marché carte par carte. En bas, **graphique local** du **chakra gagné par heure** (grille 50/100/1000 chakra, heures/12 h/24 h) avec menu **1 jour / 7 jours / Total** et **une seule courbe « Vente »**, total des ventes et ventes immédiates sur la période. |
 | **Marché** | Deux vues internes : **Marché global** (recherche serveur, une ligne par carte, prix fixe/enchère le plus bas, achat immédiat, dépliant des ventes) et **Bons plans** (scan sous la médiane, tri, pages, seuil). Mes annonces actives en bas. |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
