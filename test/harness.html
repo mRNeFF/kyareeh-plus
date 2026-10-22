@@ -193,7 +193,7 @@
       const COLLECTION = [
         { characterId: 127691, qty: 2, listable: 1 },
         { characterId: 10668, qty: 4, listable: 3 },
-        { characterId: 282077, qty: 3, listable: 2 },
+        { characterId: 282077, qty: 4, listable: 3 },
         { characterId: 21122, qty: 1, listable: 0 },
         { characterId: 999001, qty: 2, listable: 1 },
         { characterId: 999002, qty: 1, listable: 1 },
@@ -574,6 +574,13 @@
         }
 
         if (url.includes('/api/market/listings') && String(init?.method || 'GET').toUpperCase() === 'POST') {
+          if (window.__kyaraPriceTooLowOnce) {
+            window.__kyaraPriceTooLowOnce = false;
+            return new Response(JSON.stringify({ code: 'price_too_low', message: 'Prix trop bas' }), {
+              status: 400,
+              headers: { 'content-type': 'application/json' }
+            });
+          }
           const body = JSON.parse(init?.body || '{}');
           const characterId = Number(body.characterId);
           const row = MARKET_STATE.collection.find((item) => Number(item.characterId) === characterId);
@@ -602,6 +609,7 @@
           };
           MARKET_STATE.listings.unshift(listing);
           log('   -> listing créé: ' + (init?.body || ''));
+          if (window.__kyaraNoListingId) return json({ ok: true, matched: false });
           return json({ ok: true, id: listing.id, listing, matched: false });
         }
 

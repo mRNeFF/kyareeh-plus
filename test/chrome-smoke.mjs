@@ -540,6 +540,8 @@ async function visualPass() {
       sessionId,
       `(() => {
          window.__kyaraNoPrices = false;
+         window.__kyaraNoListingId = true;
+         window.__kyaraPriceTooLowOnce = true;
          window.__kyaraPlus.state.autoSell.priceScanAt = 0;
          document.getElementById('log').textContent = '';
          return true;
@@ -592,6 +594,7 @@ async function visualPass() {
            created: a.created,
            cycles: a.cycles,
            log: a.log.length,
+           logText: a.log.map((entry) => entry.text).join(' | '),
            characterId: a.lastPlan?.[0]?.characterId,
            plan: (a.lastPlan || []).map((row) => String(row.characterId)),
            active: window.__kyaraPlus.autoSellActiveEntries().length,
@@ -623,6 +626,11 @@ async function visualPass() {
       'Vente auto : aucune annonce active existante relancée',
       !auto.plan.some((id) => ['21122', '45628', '999002'].includes(id)),
       auto.plan.join(',')
+    );
+    check(
+      'Vente auto : prix trop bas corrigé automatiquement',
+      /refusé \(trop bas\)/.test(auto.logText) && /✓/.test(auto.logText),
+      auto.logText.replace(/\s+/g, ' ').slice(-180)
     );
     check(
       'Vente auto : les nouvelles annonces comptent dans les 10 places',

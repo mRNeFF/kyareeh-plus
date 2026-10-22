@@ -156,6 +156,7 @@
     market_locked: "Le marché n'est pas encore débloqué sur ce compte.",
     not_listable: "Cette carte n'est pas listable (verrouillée ou déjà en vente).",
     invalid_price: 'Prix invalide.',
+    price_too_low: 'Prix inférieur au minimum autorisé par le marché.',
     too_many_listings: 'Limite d’annonces actives atteinte.',
     chakra: 'Pas assez de chakra pour les frais de dépôt.',
     rate_limited: 'Trop de requêtes : patiente quelques secondes.',
@@ -3073,13 +3074,27 @@
   function autoSellPendingListings() {
     const a = state.autoSell;
     const server = autoSellListingRows(state.mine);
+    const serverQty = autoSellActiveQtyByKey(server);
     const ids = new Set();
     for (const listing of server) {
       for (const id of autoSellListingIds(listing)) ids.add(id);
     }
     return (Array.isArray(a.pendingListings) ? a.pendingListings : []).filter((listing) => {
       if (!listing || Date.now() - Number(listing.at || 0) > 20 * 60000) return false;
-      return !autoSellListingIds(listing).some((id) => ids.has(id));
+      if (autoSellListingIds(listing).some((id) => ids.has(id))) return false;
+      // Même si le site renvoie un autre identifiant, le nombre d'annonces
+      // actives de cette carte permet de reconnaître l'annonce déjà indexée.
+      const baseline = Math.max(0, Number(listing.baseline) || 0);
+      const current = autoSellActiveQtyFor(
+        { characterId: listing.characterId, name: listing.character?.name },
+        serverQty
+      );
+      if (current >= baseline + 1) return false;
+      // L'annonce a disparu (vendue ou refusée) : on libère la réservation,
+      // uniquement après une relecture serveur postérieure à sa création.
+      const refreshedSince = Number(a.listingsAt) >= Number(listing.at || 0);
+      if (refreshedSince && current < baseline && Date.now() - Number(listing.at || 0) > 60000) return false;
+      return true;
     });
   }
 
@@ -3215,18 +3230,38 @@
         }
 
         try {
-          const buyout = saleType === 'auction' ? buyoutPriceFor(row.price, buyoutPct) : null;
-          const posted = await api('/api/market/listings', {
-            method: 'POST',
-            timeout: 20000,
-            body: {
-              characterId: row.characterId,
-              type: saleType,
-              price: row.price,
-              buyoutPrice: buyout,
-              durationHours: duration
+          let salePrice = Math.max(1, Math.round(Number(row.price) || 1));
+          let posted = null;
+          for (let attempt = 0; ; attempt += 1) {
+            try {
+              const buyout = saleType === 'auction' ? buyoutPriceFor(salePrice, buyoutPct) : null;
+              posted = await api('/api/market/listings', {
+                method: 'POST',
+                timeout: 20000,
+                body: {
+                  characterId: row.characterId,
+                  type: saleType,
+                  price: salePrice,
+                  buyoutPrice: buyout,
+                  durationHours: duration
+                }
+              });
+              break;
+            } catch (err) {
+              const code = String(err?.code || '');
+              const message = String(err?.message || '');
+              const tooLow = code === 'price_too_low' || /trop bas|too low|minimum/i.test(message);
+              if (!tooLow || attempt >= 4) throw err;
+              const floor = Math.max(1, Math.round(Number(row.floor) || recycleFloor(row.rarity) || 1));
+              const nextPrice = Math.max(salePrice + 10, floor, Math.ceil(salePrice * 3));
+              log(`↻ ${row.name} · prix ◆ ${fmt(salePrice)} refusé (trop bas) · nouvel essai ◆ ${fmt(nextPrice)}`, 'info');
+              salePrice = nextPrice;
             }
-          });
+          }
+          const label =
+            saleType === 'auction' ? `enchère dès ◆ ${fmt(salePrice)}` : `prix fixe ◆ ${fmt(salePrice)}`;
+          // Le plan reflète le prix réellement accepté (utile après un retry).
+          row.price = salePrice;
           result.created += 1;
           result.posted = posted;
           if (posted?.matched) result.matched += 1;
@@ -3234,8 +3269,8 @@
             source,
             name: row.name,
             rarity: row.rarity,
-            price: row.price,
-            net: Math.max(0, Number(row.price) - feeOf(row.price) - taxOf(row.price)),
+            price: salePrice,
+            net: Math.max(0, Number(salePrice) - feeOf(salePrice) - taxOf(salePrice)),
             matched: Boolean(posted?.matched)
           });
           log(`✓ ${row.name} · ${label}${posted?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
@@ -3387,6 +3422,16 @@
     return (min + Math.random() * (max - min)) * 1000;
   }
 
+  /**
+   * Remplissage : tant qu'il reste des places, on plafonne le délai à 8 s pour
+   * atteindre les 10 annonces sans attendre la plage anti-flag complète.
+   */
+  function autoSellGapMs() {
+    const base = autoSellRandomDelayMs();
+    if (listingSlots().remaining > 0) return Math.min(base, 8000);
+    return base;
+  }
+
   /** Message lisible quand le tri ne peut pas être fait sans inventer un prix. */
   function autoSellSortError(withoutPrice, total) {
     return `Tri impossible : aucun prix de vente connu pour ${fmt(withoutPrice)} doublon(s) sur ${fmt(
@@ -3505,7 +3550,7 @@
   }
 
   /** Mémorise une annonce créée par Kyareeh+ tant que le site ne la renvoie pas. */
-  function autoSellRememberListing(row, posted, type, duration) {
+  function autoSellRememberListing(row, posted, type, duration, baseline = 0) {
     const a = state.autoSell;
     const characterId = apiId(row.characterId ?? row.id);
     if (characterId == null || characterId === '') return;
@@ -3525,6 +3570,9 @@
       qty: 1,
       status: 'active',
       pending: true,
+      // Quantité active avant ce POST : permet de reconnaître l'annonce côté
+      // site même si l'API ne renvoie pas le même identifiant.
+      baseline: Math.max(0, Number(baseline) || 0),
       at: Date.now(),
       endsAt: new Date(Date.now() + Math.max(1, Number(duration) || 12) * 3600000).toISOString()
     });
@@ -3605,7 +3653,7 @@
         duration: autoSellDuration(),
         buyoutPct: s.buyoutPct,
         dryRun: true,
-        gap: autoSellRandomDelayMs,
+        gap: autoSellGapMs,
         source: 'auto',
         log: autoSellLog,
         shouldStop: () => !a.running || a.stop
@@ -3643,7 +3691,7 @@
         duration: autoSellDuration(),
         buyoutPct: s.buyoutPct,
         dryRun: false,
-        gap: autoSellRandomDelayMs,
+        gap: autoSellGapMs,
         source: 'auto',
         log: autoSellLog,
         shouldStop: () => !a.running || a.stop
@@ -3657,7 +3705,7 @@
         if (!result.matched) {
           // L'annonce est active immédiatement : on la bloque localement pour
           // ne pas la relancer avant que /api/me/market ne la renvoie.
-          autoSellRememberListing(single, result.posted, type, autoSellDuration());
+          autoSellRememberListing(single, result.posted, type, autoSellDuration(), single.activeQty);
           needSync = true;
         }
       }
@@ -3869,6 +3917,22 @@
     }
   }
 
+  /** Vérifie une place libre sans relire toute la collection (une requête). */
+  async function autoSellCheckFreeSlot() {
+    const a = state.autoSell;
+    try {
+      const mine = await api('/api/me/market', { timeout: 20000 });
+      if (!autoSellHasListings(mine)) return false;
+      state.mine = mine;
+      a.listingsAt = Date.now();
+      a.listingsError = null;
+      render();
+      return listingSlots().remaining > 0;
+    } catch {
+      return false;
+    }
+  }
+
   async function autoSellLoop() {
     const a = state.autoSell;
     const gen = ++a.gen;
@@ -3913,10 +3977,21 @@
         break;
       }
 
-      const wait = autoSellRefreshDelayMs();
-      // En test, le refresh vaut 0 : on garde une petite pause pour ne pas
-      // boucler en rafale sur l'API.
-      const pause = wait > 0 ? wait : result.plan.length ? 250 : 2000;
+      const full = listingSlots().remaining <= 0;
+      const baseWait = autoSellRefreshDelayMs();
+      // Tant qu'il reste des places et qu'on vient de vendre, on retente plus
+      // vite pour remplir les 10. Une fois plein, on garde le refresh long mais
+      // on surveille une vente toutes les 30 s pour remettre une annonce vite.
+      const pause =
+        baseWait > 0
+          ? full
+            ? baseWait
+            : result.plan.length
+              ? Math.min(baseWait, 60000)
+              : baseWait
+          : result.plan.length
+            ? 250
+            : 2000;
       a.nextAt = Date.now() + pause;
       a.status = result.error
         ? result.error
@@ -3926,7 +4001,19 @@
             ? 'Simulation · aucun doublon vendable'
             : 'Aucun doublon vendable · attente';
       render();
-      await autoSellWait(pause, alive);
+      let elapsed = 0;
+      while (alive() && elapsed < pause) {
+        const chunk = Math.min(30000, pause - elapsed);
+        await autoSellWait(chunk, alive);
+        elapsed += chunk;
+        if (!alive() || elapsed >= pause) break;
+        if (full && (await autoSellCheckFreeSlot())) {
+          a.nextAt = 0;
+          a.status = 'Place libre · reprise du remplissage';
+          render();
+          break;
+        }
+      }
     }
   }
 
@@ -9816,7 +9903,14 @@
           lastSales: cached.lastSales,
           lastAt: cached.lastAt
         },
-        card: { id: key, name: row.name, rarity: row.rarity, floor: row.floor },
+        card: {
+          id: key,
+          name: row.name,
+          rarity: row.rarity,
+          // Le plancher de recyclage doit être connu même quand l'appelant
+          // n'a pas encore préparé la ligne (vente auto, estimation…).
+          floor: row.floor ?? recycleFloor(row.rarity)
+        },
         mine: mineRow ?? sellRowOf(key),
         listings: marketItems.length ? { items: marketItems } : null,
         book: state.buyOrders[key] ? { bids: [{ price: state.buyOrders[key].price }] } : null
@@ -9825,7 +9919,7 @@
     if (analysis?.recommend) return { ...analysis.recommend, estimated: false };
 
     // Pas de données de marché : les trois stratégies gardent le prix estimé.
-    const floor = Math.max(1, Math.round(row.floor ?? 1));
+    const floor = Math.max(1, Math.round(row.floor ?? recycleFloor(row.rarity) ?? 1));
     const price = Math.max(floor, Math.round(row.price ?? row.median ?? floor));
     const stub = (id, label) => ({
       id,
