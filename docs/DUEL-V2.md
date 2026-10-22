@@ -89,6 +89,10 @@ remplaçant vivant automatique. Version de protocole `v: 2`.
 
 ## 3. Application duel détachable (chantier C)
 
+> **Mise à jour :** le détachement propre au duel a été retiré. Le bouton « Détacher » ouvre désormais
+> **tout le panneau** (+Tools et +Duel) dans la fenêtre Global (`panel/panel.html`) ; le duel y est
+> affiché par la même iframe. Le texte ci-dessous décrit la conception d’origine.
+
 Le duel quitte `content/ui.js` et devient une **page d'extension autonome** :
 `duel/duel.html`, `duel/duel-app.js`, `duel/duel.css`, chargeant `content/duel-data.js`,
 `duel-rules.js`, `duel-engine.js`, `duel-net.js`, `duel/duel-fx.js`.

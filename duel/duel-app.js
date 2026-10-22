@@ -1,7 +1,8 @@
 /* Kyara Duel — application autonome (chantier C, docs/DUEL-V2.md §3).
  *
- * Page d'extension `duel/duel.html`, affichée dans le panneau (iframe, `?embed=1`) ou dans sa
- * propre fenêtre (« Détacher »). Consomme :
+ * Page d'extension `duel/duel.html`, affichée dans le panneau (iframe, `?embed=1`) — y compris
+ * dans la fenêtre détachée du panneau complet (le « Détacher » est celui du panneau, pas du duel).
+ * Consomme :
  *   - window.KYARA_DUEL_DATA   (content/duel-data.js)
  *   - window.KYARA_DUEL_RULES  (content/duel-rules.js)
  *   - window.KYARA_DUEL_ENGINE (content/duel-engine.js, API v2 : submit / pendingPlayers / viewFor)
@@ -21,7 +22,6 @@
 
   const ext = (typeof browser !== 'undefined' && browser) || (typeof chrome !== 'undefined' && chrome) || null;
   const HAS_EXT_STORAGE = Boolean(ext && ext.storage && ext.storage.local);
-  const HAS_RUNTIME = Boolean(ext && ext.runtime && typeof ext.runtime.sendMessage === 'function');
   const PARAMS = new URLSearchParams(location.search);
   const EMBED = PARAMS.has('embed');
   const REDUCED = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -30,7 +30,6 @@
   const SOUND_KEY = 'kyareeh.sound.v1';
   const PROFILE_KEY = 'kyareeh.duel.profile';
   const SESSION_KEY = 'kyareeh.duel.session';
-  const WINDOW_KEY = 'kyareeh.duel.window';
   const FALLBACK_STORE = 'kp-harness-store';
 
   const DECK_SIZE = 5;
@@ -1394,9 +1393,7 @@
     sound:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
     mute:
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16.5 9.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
-    attach:
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-8 8M10 6H5a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="rotate(180 12 12)"/></svg>'
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16.5 9.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'
   };
 
   function renderTop() {
@@ -1421,21 +1418,11 @@
           app.profile.test ? ' <em>test</em>' : ''
         }</span>`
       : '<span class="kd-who is-missing" title="Ouvre le panneau Kyareeh+ sur kyara.games pour transmettre ta collection">Profil absent</span>';
-    const attach =
-      !EMBED && (HAS_RUNTIME || window.opener)
-        ? `<button class="kd-iconbtn is-text" type="button" data-act="attach" title="Fermer cette fenêtre et revenir au panneau">${ICONS.attach}<span>Rattacher</span></button>`
-        : '';
-    const detachDuel =
-      EMBED && HAS_RUNTIME
-        ? `<button class="kd-iconbtn is-text" type="button" data-act="detach" title="Ouvrir le duel dans sa propre fenêtre"><span>Détacher</span></button>`
-        : '';
     top.innerHTML = `
       <div class="kd-brand"><span class="kd-mark" aria-hidden="true"></span><b>Kyara Duel</b></div>
       <nav class="kd-tabs">${tabs}</nav>
       <div class="kd-tools">
         ${profile}
-        ${detachDuel}
-        ${attach}
       </div>`;
   }
 
@@ -2180,16 +2167,6 @@
         }
         break;
       }
-      case 'attach':
-        attach();
-        break;
-      case 'detach':
-        if (EMBED && window.parent !== window) {
-          window.parent.postMessage({ type: 'kp-duel-detach-request' }, '*');
-        } else if (HAS_RUNTIME) {
-          ext.runtime.sendMessage({ type: 'kp-duel-detach' });
-        }
-        break;
       case 'card':
       case 'info': {
         const id = el.getAttribute('data-id');
@@ -2420,25 +2397,6 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* Fenêtre détachée                                                    */
-  /* ------------------------------------------------------------------ */
-
-  async function attach() {
-    savePractice(app.match);
-    if (HAS_RUNTIME) {
-      try {
-        const res = await ext.runtime.sendMessage({ type: 'kp-duel-attach' });
-        if (res && res.ok) return; // le fond ferme cette fenêtre
-      } catch {
-        /* repli : fermeture directe */
-      }
-    } else {
-      await store.remove(WINDOW_KEY);
-    }
-    window.close();
-  }
-
-  /* ------------------------------------------------------------------ */
   /* Démarrage                                                           */
   /* ------------------------------------------------------------------ */
 
@@ -2463,12 +2421,8 @@
     root.addEventListener('change', onChange);
     document.addEventListener('keydown', onKey);
     setInterval(tick, 1000);
-    // Sauvegarde de l'entraînement en cours (Détacher / Rattacher, rechargement).
+    // Sauvegarde de l'entraînement en cours (Détacher / Rattacher du panneau, rechargement).
     window.addEventListener('pagehide', () => savePractice(app.match));
-    if (!EMBED && !HAS_RUNTIME) {
-      // Fenêtre ouverte par le harness : le panneau doit savoir qu'elle se ferme.
-      window.addEventListener('pagehide', () => store.remove(WINDOW_KEY));
-    }
     render();
     if (resumed) {
       notify('Partie d’entraînement reprise.');
