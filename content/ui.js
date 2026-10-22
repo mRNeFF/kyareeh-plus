@@ -3605,10 +3605,7 @@
 
     let error = null;
     let errorKind = null;
-    if (slots.remaining <= 0) {
-      errorKind = 'slots';
-      error = `Aucune place d’annonce libre (${fmt(slots.active)}/${fmt(slots.max)}).`;
-    } else if (!duplicates.length) {
+    if (!duplicates.length) {
       if (reserved > 0) {
         errorKind = 'active';
         error = `Les ${fmt(reserved)} exemplaire(s) en double sont déjà en vente.`;
@@ -3616,6 +3613,10 @@
         errorKind = 'empty';
         error = 'Aucun doublon : la vente auto conserve toujours une copie de chaque carte.';
       }
+    } else if (slots.remaining <= 0) {
+      // File pleine : ce n'est pas une erreur, même si toutes les copies sont
+      // déjà en vente. La boucle attend qu'une vente libère une place.
+      errorKind = 'full';
     } else if (!candidates.length) {
       if (withoutPrice > 0) {
         errorKind = 'price';
@@ -4096,17 +4097,22 @@
             ? 250
             : 2000;
       a.nextAt = Date.now() + pause;
+      const slotState = listingSlots();
       a.status = result.error
         ? result.error
-        : result.plan.length
-          ? `Cycle ${a.cycles} · ${fmt(a.created)} annonce(s) · ${fmt(a.matched)} vente(s) immédiate(s)`
-          : state.settings.autoSellDryRun
-            ? 'Simulation · aucun doublon vendable'
-            : 'Aucun doublon vendable · attente';
+        : full
+          ? `File pleine (${fmt(slotState.active)}/${fmt(slotState.max)}) · attente d’une vente`
+          : result.plan.length
+            ? `Cycle ${a.cycles} · ${fmt(a.created)} annonce(s) · ${fmt(a.matched)} vente(s) immédiate(s)`
+            : state.settings.autoSellDryRun
+              ? 'Simulation · aucun doublon vendable'
+              : 'Aucun doublon vendable · attente';
       render();
       let elapsed = 0;
       while (alive() && elapsed < pause) {
-        const chunk = Math.min(30000, pause - elapsed);
+        // File pleine : on surveille une vente toutes les 5 s pour remettre
+        // immédiatement une annonce dès qu'une place se libère.
+        const chunk = Math.min(full ? 5000 : 30000, pause - elapsed);
         await autoSellWait(chunk, alive);
         elapsed += chunk;
         if (!alive() || elapsed >= pause) break;

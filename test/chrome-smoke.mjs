@@ -651,6 +651,62 @@ async function visualPass() {
       auto.active === 3 + auto.created && auto.slots.active === auto.active,
       `${auto.active} active(s) · ${auto.slots.active}/${auto.slots.max}`
     );
+
+    // Démarrage volontaire à 10/10 : la boucle doit surveiller une vente.
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="autosell-start"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () => evaluate(cdp, sessionId, `window.__kyaraPlus.state.autoSell.armed === true`),
+      { label: 'armement à 10/10', timeout: 5000 }
+    );
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="autosell-start"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () => evaluate(cdp, sessionId, `window.__kyaraPlus.state.autoSell.running === true`),
+      { label: 'démarrage à 10/10', timeout: 15000 }
+    );
+    await waitFor(
+      () => evaluate(cdp, sessionId, `/File pleine/.test(window.__kyaraPlus.state.autoSell.status || '')`),
+      { label: 'surveillance 10/10', timeout: 15000 }
+    );
+    const fullStart = await evaluate(
+      cdp,
+      sessionId,
+      `(() => ({
+         running: window.__kyaraPlus.state.autoSell.running,
+         status: window.__kyaraPlus.state.autoSell.status || '',
+         slots: window.__kyaraPlus.listingSlots()
+       }))()`
+    );
+    check(
+      'Vente auto : démarre même à 10/10 et surveille une vente',
+      fullStart.running && fullStart.slots.remaining === 0 && /File pleine/.test(fullStart.status),
+      `${fullStart.slots.active}/${fullStart.slots.max} · ${fullStart.status}`
+    );
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="autosell-stop"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () => evaluate(cdp, sessionId, `window.__kyaraPlus.state.autoSell.running === false`),
+      { label: 'arrêt après test 10/10', timeout: 5000 }
+    );
     const autoApiLog = await evaluate(cdp, sessionId, `document.getElementById('log').textContent || ''`);
     const autoRequests = (autoApiLog.match(/API (?:GET|POST)/g) || []).length;
     const autoMarketScans = (autoApiLog.match(/API GET \/api\/market\/listings\?characterId=/g) || []).length;
