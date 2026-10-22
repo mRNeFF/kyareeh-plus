@@ -3997,13 +3997,13 @@ img.kp-avatar {
 }
 
 .kp-listed-card {
-  border-color: #3a3f4e;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent), var(--kp-bg-2);
+  border-color: color-mix(in srgb, var(--rc, #3a3f4e) 62%, var(--kp-line));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--rc, #3a3f4e) 9%, transparent), transparent), var(--kp-bg-2);
 }
 
 .kp-listed-card:hover {
-  border-color: var(--kp-accent);
-  box-shadow: 0 0 14px rgba(255, 77, 46, 0.16);
+  border-color: color-mix(in srgb, var(--rc, var(--kp-accent)) 85%, #fff);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--rc, var(--kp-accent)) 30%, transparent);
 }
 
 .kp-input,
@@ -4099,15 +4099,6 @@ img.kp-avatar {
   border-color: var(--kp-accent);
   background: var(--kp-bg-3);
   color: var(--kp-text);
-}
-
-.kp-panel.is-duel .kp-brand,
-.kp-panel.is-duel .kp-head-actions {
-  display: none;
-}
-
-.kp-panel.is-duel .kp-head {
-  padding-bottom: 6px;
 }
 
 .kp-tabs {

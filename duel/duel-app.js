@@ -1425,11 +1425,16 @@
       !EMBED && (HAS_RUNTIME || window.opener)
         ? `<button class="kd-iconbtn is-text" type="button" data-act="attach" title="Fermer cette fenêtre et revenir au panneau">${ICONS.attach}<span>Rattacher</span></button>`
         : '';
+    const detachDuel =
+      EMBED && HAS_RUNTIME
+        ? `<button class="kd-iconbtn is-text" type="button" data-act="detach" title="Ouvrir le duel dans sa propre fenêtre"><span>Détacher</span></button>`
+        : '';
     top.innerHTML = `
       <div class="kd-brand"><span class="kd-mark" aria-hidden="true"></span><b>Kyara Duel</b></div>
       <nav class="kd-tabs">${tabs}</nav>
       <div class="kd-tools">
         ${profile}
+        ${detachDuel}
         ${attach}
       </div>`;
   }
@@ -2177,6 +2182,13 @@
       }
       case 'attach':
         attach();
+        break;
+      case 'detach':
+        if (EMBED && window.parent !== window) {
+          window.parent.postMessage({ type: 'kp-duel-detach-request' }, '*');
+        } else if (HAS_RUNTIME) {
+          ext.runtime.sendMessage({ type: 'kp-duel-detach' });
+        }
         break;
       case 'card':
       case 'info': {

@@ -362,9 +362,15 @@ async function visualPass() {
            max: Boolean(root.querySelector('[data-autosell-max]')),
            estimate: root.querySelector('.kp-autosell-estimate')?.innerText || '',
            detach: Boolean(root.querySelector('.kp-duel-detach')),
+           detachAct: root.querySelector('.kp-duel-detach')?.getAttribute('data-act') || '',
            sound: Boolean(root.querySelector('#kp-sound-btn') && root.querySelector('#kp-sound-range')),
            delay: window.__kyaraPlus.state.settings.autoSellDelayMinSec,
-           delayMax: window.__kyaraPlus.state.settings.autoSellDelayMaxSec
+           delayMax: window.__kyaraPlus.state.settings.autoSellDelayMaxSec,
+           refreshMin: window.__kyaraPlus.state.settings.autoSellRefreshMinMin,
+           refreshMax: window.__kyaraPlus.state.settings.autoSellRefreshMaxMin,
+           order: Array.from(root.querySelectorAll('[data-autosell-order] option')).map((o) => o.value),
+           duration: Array.from(root.querySelectorAll('[data-autosell-duration] option')).map((o) => o.value),
+           rarity: root.querySelector('.kp-listed-card')?.getAttribute('style') || ''
          };
        })()`
     );
@@ -375,7 +381,11 @@ async function visualPass() {
       autoUi.estimate
     );
     check('Délai anti-flag 5–60 s', autoUi.delay === 5 && autoUi.delayMax === 60, `${autoUi.delay}–${autoUi.delayMax} s`);
-    check('Bouton Détacher disponible dans +Tools', autoUi.detach === true);
+    check('Refresh aléatoire 7–10 min', autoUi.refreshMin === 7 && autoUi.refreshMax === 10, `${autoUi.refreshMin}–${autoUi.refreshMax} min`);
+    check('Ordre de vente réglable', autoUi.order.includes('price_desc') && autoUi.order.includes('price_asc'), autoUi.order.join(','));
+    check('Durée annonce 12/24/48 h', ['12', '24', '48'].every((h) => autoUi.duration.includes(h)), autoUi.duration.join(','));
+    check('Bordure de rareté sur les cartes en vente', autoUi.rarity.includes('--rc:'), autoUi.rarity);
+    check('Bouton Détacher Global disponible', autoUi.detach === true && autoUi.detachAct === 'panel-detach');
     check('Son global disponible', autoUi.sound === true);
     const soundState = await evaluate(
       cdp,
@@ -461,6 +471,8 @@ async function visualPass() {
       `(() => {
          window.__kyaraPlus.state.settings.autoSellDelayMinSec = 0;
          window.__kyaraPlus.state.settings.autoSellDelayMaxSec = 0;
+         window.__kyaraPlus.state.settings.autoSellRefreshMinMin = 0;
+         window.__kyaraPlus.state.settings.autoSellRefreshMaxMin = 0;
          return true;
        })()`
     );
@@ -686,6 +698,25 @@ async function extensionPass() {
     );
     const popupState = JSON.parse(popup);
     check('Popup ouverte avec la version', String(popupState.version ?? '').includes(expected), popup);
+
+    const { targetId: panelTarget } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${id}/panel/panel.html#kyareeh-panel`
+    });
+    const panelSession = await attach(cdp, panelTarget);
+    const panelMounted = await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          panelSession,
+          `(() => {
+             const root = document.querySelector('#kyara-plus-root');
+             const shadow = root?.shadowRoot;
+             return Boolean(shadow?.querySelector('.kp-panel') && shadow.querySelectorAll('#kp-tabs button').length >= 8);
+           })()`
+        ),
+      { label: 'fenêtre Global autonome', timeout: 15000 }
+    );
+    check('Fenêtre Global autonome montée', panelMounted === true);
 
     const reply = await evaluate(
       cdp,

@@ -38,7 +38,7 @@ const ARTIFACTS = join(ROOT, 'web-ext-artifacts');
 const MIN_CHROME = '116';
 
 /** Dossiers copiés tels quels dans le paquet (mêmes fichiers que le zip AMO). */
-const COPY_DIRS = ['background', 'content', 'popup', 'icons'];
+const COPY_DIRS = ['background', 'content', 'popup', 'icons', 'panel'];
 
 function fail(message) {
   console.error(`\n✗ ${message}\n`);

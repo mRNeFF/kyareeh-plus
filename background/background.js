@@ -121,6 +121,78 @@ function scheduleReload(tabId) {
   }, 100);
 }
 
+/** Fenêtre Global détachée : une copie du panneau dans sa propre fenêtre. */
+async function detachPanel() {
+  try {
+    const win = await ext.windows.create({
+      url: `${ext.runtime.getURL('panel/panel.html')}#kyareeh-panel`,
+      type: 'popup',
+      width: 1100,
+      height: 820
+    });
+    return { ok: true, id: win?.id ?? null };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
+
+/**
+ * Relais API pour la fenêtre Global autonome : elle n'a pas la session
+ * kyara.games, donc elle passe par un onglet du site resté ouvert.
+ */
+async function relayApi(msg) {
+  const path = String(msg.path || '');
+  if (!path.startsWith('/api/')) return { ok: false, status: 0, error: 'Chemin API invalide.' };
+  try {
+    const tabs = await ext.tabs.query({ url: 'https://kyara.games/*' });
+    const tab = tabs.find((candidate) => candidate.active) || tabs[0];
+    if (!tab || tab.id == null) {
+      return {
+        ok: false,
+        status: 0,
+        error: 'Ouvre kyara.games dans un onglet pour que la fenêtre Global puisse lire les données.'
+      };
+    }
+    const res = await ext.tabs.sendMessage(tab.id, {
+      type: 'kp-api-request',
+      path,
+      method: msg.method || 'GET',
+      body: msg.body,
+      timeout: msg.timeout
+    });
+    return res || { ok: false, status: 0, error: 'Réponse vide de l’onglet Kyara.' };
+  } catch (err) {
+    return { ok: false, status: 0, error: String((err && err.message) || err) };
+  }
+}
+
+/** Rechargement demandé depuis un onglet Global : on rafraîchit tous les onglets. */
+async function reloadAllTabs() {
+  let count = 0;
+  try {
+    const tabs = await ext.tabs.query({ url: 'https://kyara.games/*' });
+    for (const tab of tabs) {
+      if (tab?.id == null) continue;
+      try {
+        await ext.tabs.reload(tab.id);
+        count += 1;
+      } catch {
+        /* onglet fermé */
+      }
+    }
+  } catch {
+    /* API tabs indisponible */
+  }
+  setTimeout(() => {
+    try {
+      ext.runtime.reload();
+    } catch {
+      /* ignore */
+    }
+  }, 400);
+  return { ok: true, count };
+}
+
 try {
   ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || typeof msg !== 'object') return;
@@ -130,6 +202,21 @@ try {
       sendResponse({ ok: true, version: ext.runtime.getManifest().version, tab: tabId });
       scheduleReload(tabId);
       return;
+    }
+
+    if (msg.type === 'kp-reload-all') {
+      reloadAllTabs().then(sendResponse);
+      return true;
+    }
+
+    if (msg.type === 'kp-panel-detach') {
+      detachPanel().then(sendResponse);
+      return true;
+    }
+
+    if (msg.type === 'kp-api') {
+      relayApi(msg).then(sendResponse);
+      return true;
     }
 
     if (msg.type === 'kp-manifest-version') {

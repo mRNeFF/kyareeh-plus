@@ -36,6 +36,7 @@
   const SALES_KEY = 'kyareeh.sales.v1';
   const SALES_MAX = 2000;
   const SOUND_KEY = 'kyareeh.sound.v1';
+  const UI_KEY = 'kyareeh.ui.v1';
   // Les comptes suivis sont relus au bout de 12 h (ou à la demande).
   const STAT_CACHE_MS = 12 * 3600 * 1000;
   const STAT_MAX_ACCOUNTS = 20;
@@ -72,8 +73,11 @@
     // Vente automatique : uniquement les doublons, jamais la dernière copie.
     autoSellType: 'fixed',
     autoSellStrategy: 'balanced',
+    autoSellOrder: 'price_desc',
     autoSellDelayMinSec: 5,
     autoSellDelayMaxSec: 60,
+    autoSellRefreshMinMin: 7,
+    autoSellRefreshMaxMin: 10,
     autoSellIncludeML: false,
     autoSellDryRun: false
   };
@@ -450,13 +454,21 @@
         } else if (msg.type === 'kp-reload') {
           sendResponse({ ok: true });
           setTimeout(reloadExtension, 120);
-        } else if (msg.type === 'kp-status') {          sendResponse({
+        } else if (msg.type === 'kp-status') {
+          sendResponse({
             ok: true,
             ready: state.ready,
             version: state.version,
             user: state.user?.pseudo ?? null,
             value: computeStats(ownedRows()).total
           });
+        } else if (msg.type === 'kp-api-request') {
+          api(msg.path, { method: msg.method, body: msg.body, timeout: msg.timeout })
+            .then((data) => sendResponse({ ok: true, data }))
+            .catch((err) =>
+              sendResponse({ ok: false, status: err?.status || 0, error: friendlyError(err) })
+            );
+          return true;
         }
       });
     } catch {
@@ -469,6 +481,7 @@
 
   function toggle(force) {
     state.open = typeof force === 'boolean' ? force : !state.open;
+    persistUiSoon();
     render();
   }
 
@@ -482,7 +495,7 @@
     // runtime.reload() n'est pas disponible dans un content script : on passe par le fond,
     // qui rafraîchit aussi cet onglet avant de couper l'extension.
     // (Un location.reload() lancé d'ici ne s'exécuterait jamais : le contexte est détruit.)
-    const ask = ext.runtime.sendMessage({ type: 'kp-reload-extension' });
+    const ask = ext.runtime.sendMessage({ type: 'kp-reload-all' });
     Promise.resolve(ask)
       .then((res) => {
         if (!res || !res.ok) throw new Error('refusé');
@@ -810,6 +823,15 @@
     state.settings.autoSellStrategy = ['quick', 'balanced', 'max'].includes(state.settings.autoSellStrategy)
       ? state.settings.autoSellStrategy
       : 'balanced';
+    state.settings.autoSellOrder = state.settings.autoSellOrder === 'price_asc' ? 'price_asc' : 'price_desc';
+    state.settings.autoSellRefreshMinMin = Math.min(
+      60,
+      Math.max(1, Math.round(Number(state.settings.autoSellRefreshMinMin) || 7))
+    );
+    state.settings.autoSellRefreshMaxMin = Math.min(
+      60,
+      Math.max(state.settings.autoSellRefreshMinMin, Math.round(Number(state.settings.autoSellRefreshMaxMin) || 10))
+    );
     state.settings.autoSellDelayMinSec = Math.min(
       300,
       Math.max(5, Math.round(Number(state.settings.autoSellDelayMinSec) || 5))
@@ -873,6 +895,9 @@
     }
     await loadSalesLog();
     await loadSoundPrefs();
+    await loadUiPrefs();
+    // Fenêtre Global détachée : le panneau s'ouvre automatiquement.
+    if (location.hash.includes('kyareeh-panel')) state.open = true;
     await mount();
     await loadData();
     await loadAutoLog();
@@ -1380,6 +1405,8 @@
    */
   function autoSellSelect(rows, options = {}) {
     const includeML = Boolean(options.includeML);
+    const ascending = options.order === 'price_asc';
+    const sign = ascending ? 1 : -1;
     return (Array.isArray(rows) ? rows : [])
       .map((row) => ({ ...row, autoQty: autoSellSpare(row) }))
       .filter((row) => {
@@ -1393,8 +1420,8 @@
       })
       .sort(
         (a, b) =>
-          Number(b.price) * b.autoQty - Number(a.price) * a.autoQty ||
-          Number(b.price) - Number(a.price) ||
+          sign * (Number(a.price) * a.autoQty - Number(b.price) * b.autoQty) ||
+          sign * (Number(a.price) - Number(b.price)) ||
           String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr')
       );
   }
@@ -1765,6 +1792,36 @@
       view.refreshing = false;
       render();
     }
+  }
+
+  let uiSaveTimer = null;
+
+  /** Onglets Global synchronisés : ouverture et onglet actif partagés. */
+  function applyUiPrefs(raw) {
+    if (!raw || typeof raw !== 'object') return;
+    if (typeof raw.open === 'boolean') state.open = raw.open;
+    if (typeof raw.tab === 'string' && raw.tab) state.tab = raw.tab;
+    render();
+  }
+
+  async function loadUiPrefs() {
+    applyUiPrefs(await storageGet(UI_KEY, null));
+    try {
+      ext.storage.onChanged.addListener((changes, area) => {
+        if (area && area !== 'local') return;
+        if (changes && changes[UI_KEY]) applyUiPrefs(changes[UI_KEY].newValue);
+      });
+    } catch {
+      /* pas d'écoute : chaque onglet garde son état */
+    }
+  }
+
+  function persistUiSoon() {
+    if (uiSaveTimer) clearTimeout(uiSaveTimer);
+    uiSaveTimer = setTimeout(() => {
+      uiSaveTimer = null;
+      storageSet(UI_KEY, { open: state.open, tab: state.tab, at: Date.now() });
+    }, 250);
   }
 
   let saleAudioCtx = null;
@@ -3017,6 +3074,16 @@
       : cfg.durations[0] ?? 12;
   }
 
+  /** Refresh de la vente auto : aléatoire entre les minutes réglées (7–10 min par défaut). */
+  function autoSellRefreshDelayMs() {
+    const rawMin = Number(state.settings.autoSellRefreshMinMin);
+    const rawMax = Number(state.settings.autoSellRefreshMaxMin);
+    if (!(rawMin > 0) || !(rawMax > 0)) return 0; // tests automatisés uniquement
+    const min = Math.min(60, Math.max(1, rawMin));
+    const max = Math.min(60, Math.max(min, rawMax));
+    return (min + Math.random() * (max - min)) * 60000;
+  }
+
   /** Délai anti-flag entre deux ventes : aléatoire dans la plage réglée. */
   function autoSellRandomDelayMs() {
     const rawMin = Number(state.settings.autoSellDelayMinSec);
@@ -3059,7 +3126,8 @@
       floor: recycleFloor(row.rarity)
     }));
     const candidates = autoSellSelect(priced, {
-      includeML: Boolean(s.autoSellIncludeML)
+      includeML: Boolean(s.autoSellIncludeML),
+      order: s.autoSellOrder
     });
     const plan = autoSellBuildPlan(candidates, { slots: slots.remaining });
     const withoutPrice = priced.filter(
@@ -3263,8 +3331,7 @@
         break;
       }
 
-      const idle = Math.max(autoSellRandomDelayMs(), 60 * 1000);
-      const wait = result.plan.length ? autoSellRandomDelayMs() : idle;
+      const wait = autoSellRefreshDelayMs();
       a.nextAt = Date.now() + wait;
       a.status = result.plan.length
         ? `Cycle ${a.cycles} · ${fmt(a.created)} annonce(s) · ${fmt(a.matched)} vente(s) immédiate(s)`
@@ -3493,6 +3560,11 @@
     }
   }
 
+  async function panelDetach() {
+    const res = await duelSendMessage({ type: 'kp-panel-detach' });
+    if (!res || !res.ok) notify('Impossible d’ouvrir la fenêtre Global.');
+  }
+
   async function duelDetach() {
     const duel = duelState();
     if (duel.busy) return;
@@ -3578,6 +3650,9 @@
       duel.frameFailed = false;
       duelHostEl?.querySelector('.kp-duel-failed')?.remove();
     }
+    if (event.data && event.data.type === 'kp-duel-detach-request') {
+      duelDetach();
+    }
   }
 
   function detachedCardHtml() {
@@ -3603,9 +3678,8 @@
           `<button class="kp-mode ${duel.mode === id ? 'is-active' : ''}" type="button" data-act="mode" data-mode="${id}">${label}</button>`
       )
       .join('');
-    const detach = !duel.detached
-      ? '<button class="kp-mode kp-duel-detach" type="button" data-act="duel-detach" title="Ouvrir le duel dans sa propre fenêtre">⧉ Détacher</button>'
-      : '';
+    const detach =
+      '<button class="kp-mode kp-duel-detach" type="button" data-act="panel-detach" title="Ouvrir la fenêtre Global dans sa propre fenêtre">⧉ Détacher</button>';
     ui.modes.innerHTML = buttons + detach;
   }
 
@@ -5562,7 +5636,10 @@
   function autoSellEstimate() {
     const strategy = state.settings.autoSellStrategy;
     const priced = sellRows().map((row) => ({ ...row, price: autoSellPrice(row, strategy) }));
-    const candidates = autoSellSelect(priced, { includeML: Boolean(state.settings.autoSellIncludeML) });
+    const candidates = autoSellSelect(priced, {
+      includeML: Boolean(state.settings.autoSellIncludeML),
+      order: state.settings.autoSellOrder
+    });
     let total = 0;
     let copies = 0;
     for (const row of candidates) {
@@ -5632,6 +5709,24 @@
               <option value="quick" ${s.autoSellStrategy === 'quick' ? 'selected' : ''}>Vente rapide</option>
               <option value="balanced" ${s.autoSellStrategy === 'balanced' ? 'selected' : ''}>Équilibrée</option>
               <option value="max" ${s.autoSellStrategy === 'max' ? 'selected' : ''}>Prix maximal</option>
+            </select>
+          </label>
+          <label>
+            <span>Ordre</span>
+            <select class="kp-select" data-autosell-order ${a.running ? 'disabled' : ''}>
+              <option value="price_desc" ${s.autoSellOrder === 'price_desc' ? 'selected' : ''}>Plus cher → moins cher</option>
+              <option value="price_asc" ${s.autoSellOrder === 'price_asc' ? 'selected' : ''}>Moins cher → plus cher</option>
+            </select>
+          </label>
+          <label>
+            <span>Durée annonce</span>
+            <select class="kp-select" data-autosell-duration ${a.running ? 'disabled' : ''}>
+              ${[12, 24, 48]
+                .map(
+                  (h) =>
+                    `<option value="${h}" ${Number(s.durationHours) === h ? 'selected' : ''}>${h} h</option>`
+                )
+                .join('')}
             </select>
           </label>
         </div>
@@ -5721,7 +5816,7 @@
             const left = listingTimeLeft(listing);
             const price = listing.finalPrice ?? listing.currentBid ?? listing.price;
             const id = String(listing.characterId ?? card?.id ?? '');
-            return `<button class="kp-listed-card" type="button" data-act="sell-detail" data-id="${esc(
+            return `<button class="kp-listed-card" type="button" style="--rc:${esc(info.color)}" data-act="sell-detail" data-id="${esc(
               id
             )}" data-hide-recommend="1" title="Voir l'étude de marché de cette carte">
               <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
@@ -8021,6 +8116,14 @@
           <input class="kp-input" type="number" min="5" max="300" step="1" data-setting="autoSellDelayMaxSec" value="${state.settings.autoSellDelayMaxSec}">
         </label>
         <label class="kp-field">
+          <span>Vente auto — refresh min<small>Minutes entre deux relectures (auto-open en parallèle)</small></span>
+          <input class="kp-input" type="number" min="1" max="60" step="1" data-setting="autoSellRefreshMinMin" value="${state.settings.autoSellRefreshMinMin}">
+        </label>
+        <label class="kp-field">
+          <span>Vente auto — refresh max<small>Plage aléatoire de relecture</small></span>
+          <input class="kp-input" type="number" min="1" max="60" step="1" data-setting="autoSellRefreshMaxMin" value="${state.settings.autoSellRefreshMaxMin}">
+        </label>
+        <label class="kp-field">
           <span>Annonces max / lot<small>Garde-fou sur la vente en masse</small></span>
           <input class="kp-input" type="number" min="1" max="60" data-setting="maxBatch" value="${state.settings.maxBatch}">
         </label>
@@ -9292,6 +9395,9 @@
         render();
         break;
       }
+      case 'panel-detach':
+        panelDetach();
+        break;
       case 'duel-detach':
         duelDetach();
         break;
@@ -9354,6 +9460,7 @@
         ) {
           loadSellMarket(false);
         }
+        persistUiSoon();
         render();
         break;
       case 'open-site':
@@ -9876,9 +9983,11 @@
     // --- Vente auto : réglages (jamais modifiables pendant la boucle) ---
     const autoType = target.closest('[data-autosell-type]');
     const autoStrategy = target.closest('[data-autosell-strategy]');
+    const autoOrder = target.closest('[data-autosell-order]');
+    const autoDuration = target.closest('[data-autosell-duration]');
     const autoIncludeML = target.closest('[data-autosell-include-ml]');
     const autoDryRun = target.closest('[data-autosell-dryrun]');
-    if (autoType || autoStrategy || autoIncludeML || autoDryRun) {
+    if (autoType || autoStrategy || autoOrder || autoDuration || autoIncludeML || autoDryRun) {
       if (state.autoSell.running) return;
       state.autoSell.armed = false;
       if (autoType) state.settings.autoSellType = autoType.value === 'auction' ? 'auction' : 'fixed';
@@ -9886,6 +9995,11 @@
         state.settings.autoSellStrategy = ['quick', 'balanced', 'max'].includes(autoStrategy.value)
           ? autoStrategy.value
           : 'balanced';
+      }
+      if (autoOrder) state.settings.autoSellOrder = autoOrder.value === 'price_asc' ? 'price_asc' : 'price_desc';
+      if (autoDuration) {
+        const hours = Number(autoDuration.value);
+        if ([12, 24, 48].includes(hours)) state.settings.durationHours = hours;
       }
       if (autoIncludeML) state.settings.autoSellIncludeML = Boolean(autoIncludeML.checked);
       if (autoDryRun) state.settings.autoSellDryRun = Boolean(autoDryRun.checked);
@@ -9929,6 +10043,20 @@
         state.settings.autoSellDelayMinSec = Math.min(
           state.settings.autoSellDelayMinSec,
           state.settings.autoSellDelayMaxSec
+        );
+      }
+      if (key === 'autoSellRefreshMinMin') {
+        state.settings.autoSellRefreshMinMin = Math.min(60, Math.max(1, Math.round(Number(value) || 7)));
+        state.settings.autoSellRefreshMaxMin = Math.max(
+          state.settings.autoSellRefreshMinMin,
+          state.settings.autoSellRefreshMaxMin
+        );
+      }
+      if (key === 'autoSellRefreshMaxMin') {
+        state.settings.autoSellRefreshMaxMin = Math.min(60, Math.max(1, Math.round(Number(value) || 10)));
+        state.settings.autoSellRefreshMinMin = Math.min(
+          state.settings.autoSellRefreshMinMin,
+          state.settings.autoSellRefreshMaxMin
         );
       }
       persistSettings();

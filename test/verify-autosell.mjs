@@ -54,6 +54,8 @@ const base = [
 const selected = api.autoSellSelect(base, {});
 check('tri par valeur du lot', selected[0]?.id === 'b' && selected[1]?.id === 'c', selected.map((r) => r.id).join(','));
 check('autoQty exposé', selected[0]?.autoQty === 1);
+const ascending = api.autoSellSelect(base, { order: 'price_asc' });
+check('ordre croissant', ascending[0]?.id === 'a' && ascending[2]?.id === 'b', ascending.map((r) => r.id).join(','));
 
 check('pinned exclu', api.autoSellSelect([row({ pinned: true })], {}).length === 0);
 check('revente bloquée exclue', api.autoSellSelect([row({ sellBlock: 'resale_lock' })], {}).length === 0);

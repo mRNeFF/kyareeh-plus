@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.2.3** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.3.0** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `f39d6d1`
@@ -22,9 +22,9 @@ npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
-npm run verify:chrome       # 30 contrôles dans un Chrome headless réel
+npm run verify:chrome       # 35 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 43 contrôles
-node test/verify-autosell.mjs    # 25 contrôles (sélection pure + stratégies)
+node test/verify-autosell.mjs    # 26 contrôles (sélection pure + stratégies + ordre)
 node test/verify-sales-chart.mjs # 13 contrôles (cumuls du graphique de ventes)
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
@@ -58,6 +58,7 @@ l'extension depuis la console ou un navigateur automatisé.
 | `content/duel-rules.js` | Livre de règles affiché dans l'onglet Règles (copie : `docs/REGLES-DUEL.md`). |
 | `content/duel-net.js` | Client WebSocket du relais (protocole v2, reconnexion par jeton). |
 | `duel/` | Application du duel (page d'extension) : `duel-app.js`, `duel.css`, `duel-fx.js` (sons/particules/ultime), `fx-demo.html`. Intégrée au panneau par iframe ou détachée en fenêtre. |
+| `panel/` | Fenêtre **Global autonome** (`panel.html`, `panel.css`, `panel-boot.js`) : monte `content/ui.js` sans site web et relaie les appels `/api/…` vers un onglet kyara.games ouvert. |
 | `relay/` | Serveur Node autoritatif des salons en ligne (Railway). Exclu du zip AMO. |
 | `docs/DUEL-SPEC.md`, `docs/DUEL-V2.md` | Contrats du duel (v1, puis v2 : combat 1 contre 1, application détachable, effets). |
 | `background/background.js` | Service worker minimal (messages popup ↔ onglet). |
@@ -147,13 +148,13 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | Onglet | Contenu |
 |---|---|
 | **Compte** | Valeur du compte, ressources, top cartes, valeur par rareté, séries complètes, recherche d'un autre joueur (valorisation exacte). |
-| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (liste illustrée des annonces actives cliquable vers la fiche marché sans prix recommandé, doublons uniquement, dernière copie conservée, M/L exclues par défaut, stratégie rapide/équilibrée/max, **estimation des gains**, délai anti-flag 5–60 s, aperçu + confirmation, arrêt d'urgence). En bas, **graphique local** du net cumulé sur 7 jours (auto/manuelle), total des ventes et ventes immédiates. |
+| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (liste illustrée des annonces actives bordées à la couleur de rareté, cliquable vers la fiche marché sans prix recommandé ; doublons uniquement, dernière copie conservée, M/L exclues par défaut, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, arrêt d'urgence). En bas, **graphique local** du net cumulé sur 7 jours (auto/manuelle), total des ventes et ventes immédiates. |
 | **Marché** | Deux vues internes : **Marché global** (recherche serveur, une ligne par carte, prix fixe/enchère le plus bas, achat immédiat, dépliant des ventes) et **Bons plans** (scan sous la médiane, tri, pages, seuil). Mes annonces actives en bas. |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
 | **Stat** | Classement de comptes suivis (recherche manuelle + import auto des amis) sur 10 métriques. Menu déroulant du critère, tableau réduit à ce critère, camembert à droite avec tous les comptes et 50 couleurs max, rangs ex æquo, rang site sous le pseudo, détail par compte. |
-| **Réglages** | Cache des prix, délais, décote, type de vente, **délai anti-flag de la vente auto (min/max 5–300 s)**, anti-AFK. Le **son global** (volume + mute) est dans l’en-tête. Plus de boutons de mise à jour. |
-| **+Duel** | Application du duel en iframe ou fenêtre détachée. Le **son est piloté par la fenêtre Global** (clé `kyareeh.sound.v1`, synchro par `storage.onChanged`) ; le bouton **Détacher** est aussi disponible dans +Tools. |
+| **Réglages** | Cache des prix, délais, décote, type de vente, **délai anti-flag de la vente auto (min/max 5–300 s)**, **refresh aléatoire (min/max 1–60 min, 7–10 par défaut)**, anti-AFK. Le **son global** (volume + mute) est dans l’en-tête. Plus de boutons de mise à jour. |
+| **+Duel** | Application du duel en iframe ou fenêtre détachée. Le **son est piloté par la fenêtre Global** (clé `kyareeh.sound.v1`, synchro par `storage.onChanged`). L’en-tête Global est permanent et synchronisé entre les onglets (`kyareeh.ui.v1`) ; le bouton **Détacher** ouvre `panel/panel.html` (page d’extension seule, sans site) et reste disponible dans +Tools comme dans +Duel. Les données de cette page passent par un relais background vers un onglet kyara.games ouvert. |
 | **Debug** | Version du code, version chargée par le navigateur, rechargement de l'extension, requêtes récentes, clés du bootstrap, diagnostic copiable. |
 
 ## 8. Limites connues / dette
