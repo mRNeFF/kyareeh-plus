@@ -294,6 +294,7 @@
     // Vente auto des doublons : pas de reprise après rechargement, par sécurité.
     autoSell: {
       armed: false,
+      starting: false,
       running: false,
       stop: false,
       gen: 0,
@@ -307,6 +308,13 @@
       nextAt: 0,
       lastError: null,
       preview: null,
+      lastPlan: [],
+      // Annonces actives lues sur le site + celles créées pendant le cycle.
+      listingsAt: 0,
+      listingsError: null,
+      pendingListings: [],
+      refreshing: false,
+      lastPick: null,
       log: []
     },
     reloadArmed: false,
@@ -1386,44 +1394,192 @@
 
   /* AUTOSELL:BEGIN — sélection pure des doublons, testée par verify-autosell.mjs */
   /**
-   * Nombre d'exemplaires réellement « en trop » : on garde toujours une copie.
-   * `listable` inclut la dernière copie ; on ne peut donc pas l'utiliser tel quel.
+   * Toutes les annonces connues de `/api/me/market`, quel que soit le nom du
+   * tableau renvoyé par le site (listings, activeListings, items…).
+   * Aucune donnée inventée : un objet sans tableau d'annonces renvoie [].
    */
-  function autoSellSpare(row) {
+  function autoSellListingRows(mine) {
+    if (Array.isArray(mine)) return mine.filter((item) => item && typeof item === 'object');
+    if (!mine || typeof mine !== 'object') return [];
+    const candidates = [
+      mine.listings,
+      mine.activeListings,
+      mine.active,
+      mine.items,
+      mine.data?.listings,
+      mine.data?.activeListings,
+      mine.data?.items,
+      mine.data,
+      mine.market?.listings,
+      mine.market
+    ];
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate)) {
+        return candidate.filter((item) => item && typeof item === 'object');
+      }
+      if (candidate && Array.isArray(candidate.items)) {
+        return candidate.items.filter((item) => item && typeof item === 'object');
+      }
+    }
+    return [];
+  }
+
+  /** Vrai si la réponse contient bien une liste d'annonces (même vide). */
+  function autoSellHasListings(mine) {
+    if (Array.isArray(mine)) return true;
+    if (!mine || typeof mine !== 'object') return false;
+    for (const key of ['listings', 'activeListings', 'active', 'items']) {
+      if (Array.isArray(mine[key])) return true;
+      if (mine[key] && Array.isArray(mine[key].items)) return true;
+    }
+    if (mine.data) return autoSellHasListings(mine.data);
+    if (mine.market) return autoSellHasListings(mine.market);
+    return false;
+  }
+
+  function autoSellListingStatus(listing) {
+    return String(listing?.status ?? '').trim().toLowerCase();
+  }
+
+  /** Une annonce active occupe une place et ne doit jamais être remise en vente. */
+  function autoSellListingIsActive(listing, now = Date.now()) {
+    if (!listing || typeof listing !== 'object') return false;
+    const status = autoSellListingStatus(listing);
+    if (['sold', 'expired', 'cancelled', 'canceled', 'ended', 'completed', 'filled'].includes(status)) {
+      return false;
+    }
+    if (status && !['active', 'live', 'listed', 'open', 'pending'].includes(status)) return false;
+    const rawEnd = listing.endsAt ?? listing.expiresAt ?? null;
+    const end = rawEnd == null ? NaN : Date.parse(rawEnd);
+    if (Number.isFinite(end) && end <= now) return false;
+    return true;
+  }
+
+  function autoSellListingQty(listing) {
+    const raw = listing?.qty ?? listing?.quantity ?? listing?.copies ?? listing?.amount ?? 1;
+    const qty = Math.round(Number(raw));
+    return Number.isFinite(qty) && qty > 0 ? qty : 1;
+  }
+
+  function autoSellListingPrice(listing) {
+    const auction = String(listing?.type ?? '').toLowerCase() === 'auction';
+    const raw = auction
+      ? listing?.currentBid ?? listing?.price ?? listing?.finalPrice
+      : listing?.finalPrice ?? listing?.price ?? listing?.currentBid;
+    const price = Number(raw);
+    return Number.isFinite(price) && price >= 0 ? price : null;
+  }
+
+  function autoSellListingTotal(listing, qty = autoSellListingQty(listing)) {
+    const raw = listing?.totalPrice ?? listing?.total;
+    const total = Number(raw);
+    if (Number.isFinite(total) && total >= 0) return total;
+    const unit = autoSellListingPrice(listing);
+    return unit == null ? null : unit * qty;
+  }
+
+  function autoSellListingIds(listing) {
+    return [listing?.id, listing?.listingId]
+      .filter((value) => value != null && String(value))
+      .map(String);
+  }
+
+  /**
+   * Quantité déjà engagée par carte. Les identifiants et les noms sont indexés
+   * séparément, puis le maximum est retenu pour ne pas compter deux fois une
+   * même annonce qui porte à la fois `characterId` et `character.name`.
+   */
+  function autoSellActiveQtyByKey(listings, now = Date.now()) {
+    const byId = new Map();
+    const byName = new Map();
+    for (const listing of Array.isArray(listings) ? listings : []) {
+      if (!autoSellListingIsActive(listing, now)) continue;
+      const qty = autoSellListingQty(listing);
+      const id = listing?.characterId ?? listing?.character?.id ?? listing?.cardId ?? listing?.card?.id;
+      if (id != null && String(id)) {
+        const key = String(id);
+        byId.set(key, (byId.get(key) ?? 0) + qty);
+        continue;
+      }
+      const name = listing?.character?.name ?? listing?.name ?? listing?.card?.name;
+      if (name) {
+        const key = String(name).trim().toLowerCase();
+        byName.set(key, (byName.get(key) ?? 0) + qty);
+      }
+    }
+    return { byId, byName };
+  }
+
+  function autoSellActiveQtyFor(row, activeQtyByKey) {
+    if (!row || !activeQtyByKey) return 0;
+    const id = row.characterId ?? row.rawId ?? row.id;
+    const fromId = id == null ? 0 : activeQtyByKey.byId.get(String(id)) ?? 0;
+    const fromName = row.name ? activeQtyByKey.byName.get(String(row.name).trim().toLowerCase()) ?? 0 : 0;
+    return Math.max(0, fromId, fromName);
+  }
+
+  /**
+   * Nombre d'exemplaires réellement « en trop » : on garde toujours une copie
+   * et on réserve celles qui sont déjà en vente. `listable` inclut la dernière
+   * copie ; on ne peut donc pas l'utiliser tel quel.
+   */
+  function autoSellSpare(row, activeQty = 0) {
     if (!row) return 0;
     const qty = Math.max(0, Number(row.qty) || 0);
     if (qty <= 1) return 0;
+    const reserved = Math.max(0, Math.floor(Number(activeQty) || 0));
     const locked = Math.max(0, Number(row.lockedQty) || 0);
     const rawListable = row.listable == null ? qty - locked : Number(row.listable);
     const listable = Number.isFinite(rawListable) ? Math.max(0, rawListable) : qty - locked;
-    return Math.max(0, Math.min(qty - 1, listable));
+    // On ne peut ni vendre la dernière copie ni revendre une copie déjà en ligne.
+    const available = Math.max(0, qty - 1 - reserved);
+    return Math.max(0, Math.min(available, listable));
+  }
+
+  /**
+   * Une ligne peut-elle être vendue maintenant ? `price` est contrôlé séparément
+   * (`requirePrice`) pour pouvoir compter les doublons sans prix connu.
+   */
+  function autoSellEligible(row, options = {}) {
+    if (!row) return false;
+    const autoQty = Number.isFinite(Number(row.autoQty))
+      ? Number(row.autoQty)
+      : autoSellSpare(row, row.activeQty);
+    if (autoQty <= 0) return false;
+    if (row.pinned) return false;
+    if (row.sellBlock || row.block) return false;
+    if (!options.includeML && ['M', 'L'].includes(String(row.rarity || '').toUpperCase())) return false;
+
+    if (options.requirePrice !== false) {
+      if (row.price == null || row.price === '') return false;
+      const price = Number(row.price);
+      if (!Number.isFinite(price) || price <= 0) return false;
+    }
+    return true;
   }
 
   /**
    * Filtre les lignes de vente pour ne garder que les doublons sûrs.
    * `price` doit déjà être résolu par l'appelant (null = pas de prix connu).
+   * Le tri porte sur le **prix unitaire**, jamais sur le total du lot : un lot
+   * de 2 cartes à 12 ne doit pas passer devant une carte à 100.
    */
   function autoSellSelect(rows, options = {}) {
-    const includeML = Boolean(options.includeML);
     const ascending = options.order === 'price_asc';
     const sign = ascending ? 1 : -1;
     return (Array.isArray(rows) ? rows : [])
-      .map((row) => ({ ...row, autoQty: autoSellSpare(row) }))
-      .filter((row) => {
-        if (!row || row.autoQty <= 0) return false;
-        if (row.pinned) return false;
-        if (row.sellBlock || row.block) return false;
-        if (!includeML && ['M', 'L'].includes(String(row.rarity || '').toUpperCase())) return false;
-        if (row.price == null || row.price === '') return false;
-        const price = Number(row.price);
-        return Number.isFinite(price) && price > 0;
-      })
-      .sort(
-        (a, b) =>
-          sign * (Number(a.price) * a.autoQty - Number(b.price) * b.autoQty) ||
-          sign * (Number(a.price) - Number(b.price)) ||
-          String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr')
-      );
+      .map((row) => ({ ...row, autoQty: autoSellSpare(row, row.activeQty) }))
+      .filter((row) => autoSellEligible(row, options))
+      .sort((a, b) => {
+        const priceA = Number(a.price);
+        const priceB = Number(b.price);
+        const unit = sign * (priceA - priceB);
+        if (unit) return unit;
+        // À prix égal, le lot qui rapporte le plus passe devant.
+        const total = sign * (priceA * a.autoQty - priceB * b.autoQty);
+        if (total) return total;
+        return String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr');
+      });
   }
 
   /** Prix d'une stratégie de vente, sans jamais retomber sur un prix inventé. */
@@ -2812,15 +2968,40 @@
     return { copies, gross, fees, tax, net: Math.max(0, gross - fees - tax) };
   }
 
+  /**
+   * Annonces actives connues : celles du site, plus celles que Kyareeh+ vient
+   * de créer et que `/api/me/market` n'a pas encore indexées. Une annonce
+   * encore en attente de confirmation ne doit jamais être relancée.
+   */
+  function autoSellPendingListings() {
+    const a = state.autoSell;
+    const server = autoSellListingRows(state.mine);
+    const ids = new Set();
+    for (const listing of server) {
+      for (const id of autoSellListingIds(listing)) ids.add(id);
+    }
+    return (Array.isArray(a.pendingListings) ? a.pendingListings : []).filter((listing) => {
+      if (!listing || Date.now() - Number(listing.at || 0) > 20 * 60000) return false;
+      return !autoSellListingIds(listing).some((id) => ids.has(id));
+    });
+  }
+
+  function autoSellListings() {
+    return [...autoSellListingRows(state.mine), ...autoSellPendingListings()];
+  }
+
+  function autoSellActiveEntries() {
+    return autoSellListings().filter((listing) => autoSellListingIsActive(listing));
+  }
+
   function activeListings() {
-    const mine = state.mine;
-    const list = Array.isArray(mine?.listings) ? mine.listings : Array.isArray(mine) ? mine : [];
-    return list.filter((l) => !l.status || l.status === 'active').length;
+    return autoSellActiveEntries().length;
   }
 
   /**
    * Emplacements d'annonce restants. Le site plafonne les annonces actives
-   * (10 par défaut) ; chaque exemplaire mis en vente occupe une place.
+   * (10 par défaut) ; chaque annonce active occupe une place, y compris celles
+   * créées par Kyareeh+ pas encore visibles côté site.
    */
   function listingSlots() {
     const cfg = getCfg();
@@ -2916,7 +3097,7 @@
     const log = typeof options.log === 'function' ? options.log : () => {};
     const shouldStop = typeof options.shouldStop === 'function' ? options.shouldStop : () => false;
     const source = options.source === 'auto' ? 'auto' : 'manual';
-    const result = { created: 0, matched: 0, errors: 0, simulated: 0, stopped: null };
+    const result = { created: 0, matched: 0, errors: 0, simulated: 0, stopped: null, posted: null };
 
     let consecutiveErrors = 0;
     for (const row of plan) {
@@ -2950,6 +3131,7 @@
             }
           });
           result.created += 1;
+          result.posted = posted;
           if (posted?.matched) result.matched += 1;
           recordSale({
             source,
@@ -2976,7 +3158,7 @@
           }
         }
 
-        await sleep(Math.max(0, Number(gap()) || gapMs));
+        await sleep(Math.max(0, Number(gap()) || 0));
       }
     }
     return result;
@@ -3051,20 +3233,36 @@
     render();
   }
 
-  /** Relit la collection et les annonces actives avant/après un cycle. */
+  /**
+   * Relit la collection **et** les ventes actives du site. Les annonces sont
+   * obligatoires : sans elles, l'automatisation pourrait remettre en vente une
+   * carte déjà engagée. L'appelant reçoit une erreur explicite dans ce cas.
+   */
   async function autoSellRefresh() {
-    const [me, coll, mine] = await Promise.all([
-      api('/api/me', { timeout: 20000 }).catch(() => null),
-      api('/api/me/collection?lean=1', { timeout: 25000 }),
-      api('/api/me/market', { timeout: 20000 }).catch(() => null)
-    ]);
-    const list = Array.isArray(coll) ? coll : Array.isArray(coll?.items) ? coll.items : null;
-    if (!list) throw new Error('Collection illisible');
-    if (me && typeof me === 'object') mergeUser(me);
-    state.collection = list;
-    if (mine && typeof mine === 'object') state.mine = mine;
-    state.lastSync = Date.now();
-    state.sellView.lastRefresh = Date.now();
+    const a = state.autoSell;
+    let mine;
+    try {
+      const [me, coll, response] = await Promise.all([
+        api('/api/me', { timeout: 20000 }).catch(() => null),
+        api('/api/me/collection?lean=1', { timeout: 25000 }),
+        api('/api/me/market', { timeout: 20000 })
+      ]);
+      mine = response;
+      const list = Array.isArray(coll) ? coll : Array.isArray(coll?.items) ? coll.items : null;
+      if (!list) throw new Error('Collection illisible');
+      if (!autoSellHasListings(mine)) throw new Error('Ventes actives illisibles : /api/me/market ne renvoie aucune liste d’annonces.');
+      if (me && typeof me === 'object') mergeUser(me);
+      state.collection = list;
+      state.mine = mine;
+      state.lastSync = Date.now();
+      state.sellView.lastRefresh = Date.now();
+      a.listingsAt = Date.now();
+      a.listingsError = null;
+    } catch (err) {
+      const message = friendlyError(err);
+      a.listingsError = message;
+      throw err instanceof Error ? err : new Error(message);
+    }
   }
 
   function autoSellDuration() {
@@ -3095,22 +3293,45 @@
     return (min + Math.random() * (max - min)) * 1000;
   }
 
+  /** Message lisible quand le tri ne peut pas être fait sans inventer un prix. */
+  function autoSellSortError(withoutPrice, total) {
+    return `Tri impossible : aucun prix de vente connu pour ${fmt(withoutPrice)} doublon(s) sur ${fmt(
+      total
+    )}. Ouvre le marché ou relance le calcul des prix avant de démarrer.`;
+  }
+
   /**
-   * Un cycle : relit la collection, prix uniquement les doublons, respecte les
-   * places d'annonce, puis crée les annonces. `preview` ne poste rien.
+   * Prépare un cycle sans rien poster : relit la collection et les ventes
+   * actives, met à jour les prix manquants, puis classe les doublons selon le
+   * tri actif. Avant chaque vente, l'appelant rappelle cette fonction.
    */
-  async function autoSellCycle({ dryRun = false, preview = false } = {}) {
+  async function autoSellPrepare() {
     const a = state.autoSell;
     const s = state.settings;
-    const type = s.autoSellType === 'auction' ? 'auction' : 'fixed';
-
-    a.status = preview ? 'Calcul de l’aperçu…' : 'Lecture de la collection…';
+    a.status = 'Lecture de la collection et des ventes actives…';
     render();
     await autoSellRefresh();
 
     const slots = listingSlots();
-    const all = sellRows();
-    const duplicateIds = all.filter((row) => autoSellSpare(row) > 0).map((row) => String(row.id));
+    const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
+    const all = sellRows().map((row) => ({
+      ...row,
+      activeQty: autoSellActiveQtyFor(row, activeQtyByKey)
+    }));
+    const allDuplicates = all.filter((row) => row.qty > 1);
+    const duplicates = allDuplicates.filter((row) => autoSellSpare(row, row.activeQty) > 0);
+    const reserved = all.reduce(
+      (sum, row) => sum + (row.qty > 1 ? Math.min(Number(row.activeQty) || 0, row.qty - 1) : 0),
+      0
+    );
+    const options = {
+      includeML: Boolean(s.autoSellIncludeML),
+      order: s.autoSellOrder
+    };
+    const eligible = duplicates.filter((row) =>
+      autoSellEligible(row, { ...options, requirePrice: false })
+    );
+    const duplicateIds = eligible.map((row) => String(row.id));
     const unscanned = duplicateIds.filter((id) => !state.marketScanned.has(id));
     if (unscanned.length) {
       a.status = `Lecture du marché (${Math.min(60, unscanned.length)}/${unscanned.length})…`;
@@ -3125,84 +3346,236 @@
       price: autoSellPrice(row, s.autoSellStrategy),
       floor: recycleFloor(row.rarity)
     }));
-    const candidates = autoSellSelect(priced, {
-      includeML: Boolean(s.autoSellIncludeML),
-      order: s.autoSellOrder
-    });
-    const plan = autoSellBuildPlan(candidates, { slots: slots.remaining });
+    const candidates = autoSellSelect(priced, options);
     const withoutPrice = priced.filter(
       (row) =>
-        autoSellSpare(row) > 0 &&
-        row.price == null &&
-        (s.autoSellIncludeML || !['M', 'L'].includes(String(row.rarity || '').toUpperCase()))
+        autoSellEligible(row, { ...options, requirePrice: false }) &&
+        !(Number(row.price) > 0)
     ).length;
+    const plan = autoSellBuildPlan(candidates, { slots: slots.remaining });
 
-    if (preview) {
-      a.preview = { at: Date.now(), plan, slots, candidates: candidates.length, withoutPrice };
-      a.status = plan.length
-        ? `Aperçu · ${fmt(plan.length)} annonce(s) prévue(s)`
-        : slots.remaining <= 0
-          ? 'Aucune place d’annonce libre'
-          : 'Aucun doublon vendable';
-      autoSellLog(
-        `${a.status}${withoutPrice ? ` · ${fmt(withoutPrice)} doublon(s) sans prix ignoré(s)` : ''}`,
-        plan.length ? 'info' : 'err'
-      );
-      render();
-      return { plan, created: 0, matched: 0, errors: 0, simulated: 0, fatal: null, preview: true };
-    }
-
-    if (!plan.length) {
-      a.cycles += 1;
-      a.status =
-        slots.remaining <= 0
-          ? 'Aucune place d’annonce libre'
-          : duplicateIds.length
-            ? 'Aucun doublon avec un prix connu'
-            : 'Aucun doublon';
-      a.lastPlan = [];
-      render();
-      return { plan: [], created: 0, matched: 0, errors: 0, simulated: 0, fatal: null };
-    }
-
-    a.status = dryRun
-      ? `Simulation de ${fmt(plan.length)} annonce(s)…`
-      : `Mise en vente de ${fmt(plan.length)} annonce(s)…`;
-    render();
-
-    const result = await runSalePlan(plan, {
-      type,
-      duration: autoSellDuration(),
-      buyoutPct: state.settings.buyoutPct,
-      dryRun,
-      gap: autoSellRandomDelayMs,
-      source: 'auto',
-      log: autoSellLog,
-      shouldStop: () => !a.running || a.stop
-    });
-
-    a.cycles += 1;
-    a.created += result.created;
-    a.matched += result.matched;
-    a.errors += result.errors;
-    a.lastPlan = plan;
-    a.preview = null;
-
-    if (!dryRun) {
-      try {
-        await autoSellRefresh();
-      } catch {
-        return { ...result, plan, fatal: 'Collection illisible après la vente : arrêt de la vente auto.' };
+    let error = null;
+    let errorKind = null;
+    if (slots.remaining <= 0) {
+      errorKind = 'slots';
+      error = `Aucune place d’annonce libre (${fmt(slots.active)}/${fmt(slots.max)}).`;
+    } else if (!duplicates.length) {
+      if (reserved > 0) {
+        errorKind = 'active';
+        error = `Les ${fmt(reserved)} exemplaire(s) en double sont déjà en vente.`;
+      } else {
+        errorKind = 'empty';
+        error = 'Aucun doublon : la vente auto conserve toujours une copie de chaque carte.';
+      }
+    } else if (!candidates.length) {
+      if (withoutPrice > 0) {
+        errorKind = 'price';
+        error = autoSellSortError(withoutPrice, Math.max(eligible.length, duplicates.length));
+      } else {
+        errorKind = 'empty';
+        error = 'Aucun doublon éligible : vérifie les blocages de revente et les cartes M/L.';
       }
     }
 
-    if (result.stopped === 'errors') {
-      return { ...result, plan, fatal: 'Arrêt après 3 erreurs consécutives.' };
+    return { slots, all, duplicates, eligible, reserved, candidates, plan, withoutPrice, error, errorKind };
+  }
+
+  /** Mémorise une annonce créée par Kyareeh+ tant que le site ne la renvoie pas. */
+  function autoSellRememberListing(row, posted, type, duration) {
+    const a = state.autoSell;
+    const characterId = apiId(row.characterId ?? row.id);
+    if (characterId == null || characterId === '') return;
+    const id = posted?.listing?.id ?? posted?.id ?? posted?.listingId ?? `local-${Date.now()}-${a.pendingListings.length}`;
+    if (a.pendingListings.some((listing) => String(listing.id) === String(id))) return;
+    a.pendingListings.push({
+      id,
+      characterId,
+      character: {
+        id: characterId,
+        name: row.name,
+        rarity: row.rarity,
+        image: row.image
+      },
+      type,
+      price: row.price,
+      qty: 1,
+      status: 'active',
+      pending: true,
+      at: Date.now(),
+      endsAt: new Date(Date.now() + Math.max(1, Number(duration) || 12) * 3600000).toISOString()
+    });
+  }
+
+  /**
+   * Un cycle : relit les données, puis vend **une annonce à la fois**. Après
+   * chaque vente, la collection et les ventes actives sont relues et le
+   * meilleur candidat est choisi à nouveau. `preview` ne poste rien.
+   */
+  async function autoSellCycle({ dryRun = false, preview = false } = {}) {
+    const a = state.autoSell;
+    const s = state.settings;
+    const type = s.autoSellType === 'auction' ? 'auction' : 'fixed';
+
+    let prep;
+    try {
+      prep = await autoSellPrepare();
+    } catch (err) {
+      const message = friendlyError(err);
+      a.lastError = message;
+      a.status = message;
+      a.preview = null;
+      autoSellLog(message, 'err');
+      return {
+        plan: [],
+        created: 0,
+        matched: 0,
+        errors: 0,
+        simulated: 0,
+        fatal: message,
+        error: message,
+        errorKind: 'listings'
+      };
     }
-    if (result.stopped === 'auth') {
-      return { ...result, plan, fatal: 'Session expirée ou limite API : arrêt de la vente auto.' };
+
+    if (prep.error) {
+      a.lastError = prep.error;
+      a.status = prep.error;
+      a.preview = null;
+      autoSellLog(prep.error, 'err');
+      return {
+        plan: [],
+        created: 0,
+        matched: 0,
+        errors: 0,
+        simulated: 0,
+        fatal: prep.errorKind === 'price' || prep.errorKind === 'listings' ? prep.error : null,
+        error: prep.error,
+        errorKind: prep.errorKind
+      };
     }
-    return { ...result, plan, fatal: null };
+
+    if (preview) {
+      a.preview = {
+        at: Date.now(),
+        plan: prep.plan,
+        slots: prep.slots,
+        candidates: prep.candidates.length,
+        withoutPrice: prep.withoutPrice
+      };
+      a.status = `Aperçu · ${fmt(prep.plan.length)} annonce(s) prévue(s)`;
+      autoSellLog(
+        `${a.status}${prep.withoutPrice ? ` · ${fmt(prep.withoutPrice)} doublon(s) sans prix ignoré(s)` : ''}`,
+        'info'
+      );
+      render();
+      return { plan: prep.plan, created: 0, matched: 0, errors: 0, simulated: 0, fatal: null, preview: true };
+    }
+
+    if (dryRun) {
+      a.status = `Simulation de ${fmt(prep.plan.length)} annonce(s)…`;
+      render();
+      const result = await runSalePlan(prep.plan, {
+        type,
+        duration: autoSellDuration(),
+        buyoutPct: s.buyoutPct,
+        dryRun: true,
+        gap: autoSellRandomDelayMs,
+        source: 'auto',
+        log: autoSellLog,
+        shouldStop: () => !a.running || a.stop
+      });
+      a.cycles += 1;
+      a.created += result.created;
+      a.matched += result.matched;
+      a.errors += result.errors;
+      a.lastPlan = prep.plan;
+      a.preview = null;
+      render();
+      return { ...result, plan: prep.plan, fatal: null };
+    }
+
+    const totals = { created: 0, matched: 0, errors: 0, simulated: 0 };
+    const plan = [];
+    let fatal = null;
+    let current = prep;
+    while (a.running && !a.stop) {
+      if (!current.candidates.length) break;
+      if (current.slots.remaining <= 0) break;
+
+      // Rechoisit la meilleure carte sur les données fraîches, pas sur le plan initial.
+      const pick = current.candidates[0];
+      const single = { ...pick, qty: 1 };
+      a.lastPick = single;
+      a.status = `Meilleure carte · ${single.name} · ◆ ${fmt(single.price)} · ${fmt(
+        current.slots.remaining
+      )} place(s) libre(s)`;
+      render();
+
+      const result = await runSalePlan([single], {
+        type,
+        duration: autoSellDuration(),
+        buyoutPct: s.buyoutPct,
+        dryRun: false,
+        gap: autoSellRandomDelayMs,
+        source: 'auto',
+        log: autoSellLog,
+        shouldStop: () => !a.running || a.stop
+      });
+      totals.created += result.created;
+      totals.matched += result.matched;
+      totals.errors += result.errors;
+
+      if (result.created) {
+        plan.push(single);
+        if (!result.matched) {
+          // L'annonce est active immédiatement : on la bloque localement pour
+          // ne pas la relancer avant que /api/me/market ne la renvoie.
+          autoSellRememberListing(single, result.posted, type, autoSellDuration());
+        }
+      }
+
+      if (result.stopped) break;
+      if (!result.created) break;
+      if (!a.running || a.stop) break;
+
+      try {
+        current = await autoSellPrepare();
+      } catch (err) {
+        fatal = friendlyError(err);
+        break;
+      }
+      if (current.error) {
+        if (current.errorKind === 'price' || current.errorKind === 'listings') {
+          fatal = current.error;
+        }
+        break;
+      }
+    }
+
+    if (!fatal) {
+      try {
+        await autoSellRefresh();
+      } catch (err) {
+        fatal = `Ventes actives illisibles après la vente : ${friendlyError(err)}`;
+      }
+    }
+
+    a.cycles += 1;
+    a.created += totals.created;
+    a.matched += totals.matched;
+    a.errors += totals.errors;
+    a.lastPlan = plan;
+    a.preview = null;
+
+    const result = { ...totals, plan, fatal };
+    if (fatal) return result;
+    if (plan.length) {
+      a.status = `Cycle ${a.cycles} · ${fmt(totals.created)} annonce(s) · ${fmt(
+        totals.matched
+      )} vente(s) immédiate(s)`;
+    }
+    render();
+    return result;
   }
 
   function armAutoSell() {
@@ -3221,7 +3594,8 @@
 
   async function autoSellPreview() {
     const a = state.autoSell;
-    if (a.running) return;
+    if (a.running || a.starting) return;
+    a.starting = true;
     a.preview = null;
     a.status = 'Calcul de l’aperçu…';
     render();
@@ -3231,12 +3605,51 @@
       a.lastError = friendlyError(err);
       a.status = 'Aperçu impossible';
       autoSellLog(`Aperçu impossible · ${a.lastError}`, 'err');
+    } finally {
+      a.starting = false;
+      render();
+    }
+  }
+
+  /** Relit uniquement les ventes actives, pour le bouton Actualiser de la section. */
+  async function autoSellRefreshListings() {
+    const a = state.autoSell;
+    if (a.refreshing || a.running || a.starting) return;
+    a.refreshing = true;
+    a.status = 'Actualisation des ventes actives…';
+    render();
+    try {
+      await autoSellRefresh();
+      a.status = `Ventes actives actualisées · ${fmt(activeListings())} en ligne`;
+      a.lastError = null;
+    } catch (err) {
+      a.lastError = friendlyError(err);
+      a.status = a.lastError;
+      autoSellLog(a.lastError, 'err');
+    } finally {
+      a.refreshing = false;
+      render();
+    }
+  }
+
+  /** Synchronisation silencieuse de la section quand l'onglet Vente auto est ouvert. */
+  async function autoSellSyncListings() {
+    const a = state.autoSell;
+    if (a.refreshing || a.starting || a.running || state.sell) return;
+    a.refreshing = true;
+    try {
+      await autoSellRefresh();
+    } catch (err) {
+      a.listingsError = friendlyError(err);
+    } finally {
+      a.refreshing = false;
+      render();
     }
   }
 
   async function startAutoSell() {
     const a = state.autoSell;
-    if (a.running) return;
+    if (a.running || a.starting) return;
     if (!state.user) {
       notify('Connecte-toi à Kyara pour lancer la vente auto.');
       return;
@@ -3245,7 +3658,42 @@
       notify('Ferme la fenêtre de vente manuelle avant de lancer la vente auto.');
       return;
     }
+
+    const gen = ++a.gen;
     a.armed = false;
+    a.starting = true;
+    a.running = false;
+    a.stop = false;
+    a.status = 'Vérification des ventes actives et des prix…';
+    a.lastError = null;
+    a.preview = null;
+    a.lastPlan = [];
+    a.lastPick = null;
+    a.log = [];
+    render();
+
+    let prep;
+    try {
+      prep = await autoSellPrepare();
+    } catch (err) {
+      prep = { error: friendlyError(err), errorKind: 'listings' };
+    }
+
+    // Arrêt demandé pendant la vérification : la génération a changé.
+    if (!a.starting || a.gen !== gen) return;
+    a.starting = false;
+
+    if (prep.error) {
+      a.running = false;
+      a.stop = true;
+      a.lastError = prep.error;
+      a.status = prep.error;
+      autoSellLog(`Démarrage impossible · ${prep.error}`, 'err');
+      notify(prep.error);
+      render();
+      return;
+    }
+
     a.running = true;
     a.stop = false;
     a.gen += 1;
@@ -3259,13 +3707,13 @@
     a.nextAt = 0;
     a.lastError = null;
     a.preview = null;
-    a.log = [];
     autoSellLog('Vente auto démarrée · doublons uniquement, dernière copie conservée');
     persistSettings();
     render();
     autoSellLoop().catch((err) => {
       a.running = false;
       a.stop = true;
+      a.starting = false;
       a.lastError = friendlyError(err);
       a.status = 'Erreur inattendue';
       autoSellLog(`Erreur inattendue · ${a.lastError}`, 'err');
@@ -3275,8 +3723,9 @@
 
   function stopAutoSell(reason = 'Vente auto arrêtée') {
     const a = state.autoSell;
-    if (!a.running && !a.armed) return;
+    if (!a.running && !a.armed && !a.starting) return;
     a.armed = false;
+    a.starting = false;
     a.running = false;
     a.stop = true;
     a.gen += 1;
@@ -3333,11 +3782,13 @@
 
       const wait = autoSellRefreshDelayMs();
       a.nextAt = Date.now() + wait;
-      a.status = result.plan.length
-        ? `Cycle ${a.cycles} · ${fmt(a.created)} annonce(s) · ${fmt(a.matched)} vente(s) immédiate(s)`
-        : state.settings.autoSellDryRun
-          ? 'Simulation · aucun doublon vendable'
-          : 'Aucun doublon vendable · attente';
+      a.status = result.error
+        ? result.error
+        : result.plan.length
+          ? `Cycle ${a.cycles} · ${fmt(a.created)} annonce(s) · ${fmt(a.matched)} vente(s) immédiate(s)`
+          : state.settings.autoSellDryRun
+            ? 'Simulation · aucun doublon vendable'
+            : 'Aucun doublon vendable · attente';
       render();
       await autoSellWait(wait, alive);
     }
@@ -5632,10 +6083,15 @@
       </div>`;
   }
 
-  /** Valeur totale des doublons selon la stratégie choisie (recalculée à chaque rendu). */
+  /** Valeur totale des doublons **disponibles** selon la stratégie choisie. */
   function autoSellEstimate() {
     const strategy = state.settings.autoSellStrategy;
-    const priced = sellRows().map((row) => ({ ...row, price: autoSellPrice(row, strategy) }));
+    const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
+    const priced = sellRows().map((row) => ({
+      ...row,
+      activeQty: autoSellActiveQtyFor(row, activeQtyByKey),
+      price: autoSellPrice(row, strategy)
+    }));
     const candidates = autoSellSelect(priced, {
       includeML: Boolean(state.settings.autoSellIncludeML),
       order: state.settings.autoSellOrder
@@ -5653,27 +6109,44 @@
     const a = state.autoSell;
     const s = state.settings;
     const estimate = autoSellEstimate();
+    const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
+    const rows = all.map((row) => ({
+      ...row,
+      activeQty: autoSellActiveQtyFor(row, activeQtyByKey)
+    }));
+    const options = {
+      includeML: Boolean(s.autoSellIncludeML)
+    };
     const strategyLabel =
       { quick: 'Vente rapide', balanced: 'Équilibrée', max: 'Prix maximal' }[s.autoSellStrategy] ?? 'Équilibrée';
-    const dupes = all.filter((row) => row.qty > 1).length;
-    const spare = all.reduce((sum, row) => sum + autoSellSpare(row), 0);
-    const withoutPrice = all.filter(
+    const dupes = rows.filter((row) => row.qty > 1).length;
+    const spare = rows.reduce((sum, row) => sum + autoSellSpare(row, row.activeQty), 0);
+    const eligibleSpare = rows.reduce(
+      (sum, row) =>
+        sum + (autoSellEligible(row, { ...options, requirePrice: false }) ? autoSellSpare(row, row.activeQty) : 0),
+      0
+    );
+    const withoutPrice = rows.filter(
       (row) =>
-        autoSellSpare(row) > 0 &&
-        (s.autoSellIncludeML || !['M', 'L'].includes(String(row.rarity || '').toUpperCase())) &&
+        autoSellEligible(row, { ...options, requirePrice: false }) &&
         autoSellPrice(row, s.autoSellStrategy) == null
     ).length;
-    const mlSpare = all
+    const mlSpare = rows
       .filter((row) => ['M', 'L'].includes(String(row.rarity || '').toUpperCase()))
-      .reduce((sum, row) => sum + autoSellSpare(row), 0);
-    const stateLabel = a.running
-      ? 'en cours'
-      : a.armed
-        ? 'à confirmer'
-        : 'arrêtée';
+      .reduce((sum, row) => sum + autoSellSpare(row, row.activeQty), 0);
+    const stateLabel = a.starting
+      ? 'vérification'
+      : a.running
+        ? 'en cours'
+        : a.armed
+          ? 'à confirmer'
+          : 'arrêtée';
+    const locked = a.running || a.starting;
     const log = a.log.slice(-8);
     return `
-      <section class="kp-autosell ${a.running ? 'is-running' : ''} ${a.armed ? 'is-armed' : ''}">
+      <section class="kp-autosell ${a.running ? 'is-running' : ''} ${a.armed ? 'is-armed' : ''} ${
+        a.starting ? 'is-starting' : ''
+      }">
         <div class="kp-autosell-head">
           <div class="kp-autosell-title">
             <span class="kp-autosell-dot"></span>
@@ -5685,8 +6158,9 @@
         <div class="kp-autosell-stats">
           <span><b>${fmt(dupes)}</b> carte(s) en double</span>
           <span><b>${fmt(spare)}</b> exemplaire(s) en trop</span>
-          <span><b>${fmt(spare - (s.autoSellIncludeML ? 0 : mlSpare))}</b> éligible(s)</span>
-          <span><b>${slots.remaining}</b> place(s) libre(s)</span>
+          <span><b>${fmt(eligibleSpare)}</b> éligible(s)</span>
+          <span><b>${fmt(slots.active)}</b> vente(s) active(s)</span>
+          <span><b>${fmt(slots.remaining)}</b> place(s) libre(s)</span>
         </div>
         ${
           a.status
@@ -5698,14 +6172,14 @@
         <div class="kp-autosell-grid">
           <label>
             <span>Type</span>
-            <select class="kp-select" data-autosell-type ${a.running ? 'disabled' : ''}>
+            <select class="kp-select" data-autosell-type ${locked ? 'disabled' : ''}>
               <option value="fixed" ${s.autoSellType === 'fixed' ? 'selected' : ''}>Prix fixe</option>
               <option value="auction" ${s.autoSellType === 'auction' ? 'selected' : ''}>Enchère</option>
             </select>
           </label>
           <label>
             <span>Stratégie</span>
-            <select class="kp-select" data-autosell-strategy ${a.running ? 'disabled' : ''}>
+            <select class="kp-select" data-autosell-strategy ${locked ? 'disabled' : ''}>
               <option value="quick" ${s.autoSellStrategy === 'quick' ? 'selected' : ''}>Vente rapide</option>
               <option value="balanced" ${s.autoSellStrategy === 'balanced' ? 'selected' : ''}>Équilibrée</option>
               <option value="max" ${s.autoSellStrategy === 'max' ? 'selected' : ''}>Prix maximal</option>
@@ -5713,14 +6187,14 @@
           </label>
           <label>
             <span>Ordre</span>
-            <select class="kp-select" data-autosell-order ${a.running ? 'disabled' : ''}>
+            <select class="kp-select" data-autosell-order ${locked ? 'disabled' : ''}>
               <option value="price_desc" ${s.autoSellOrder === 'price_desc' ? 'selected' : ''}>Plus cher → moins cher</option>
               <option value="price_asc" ${s.autoSellOrder === 'price_asc' ? 'selected' : ''}>Moins cher → plus cher</option>
             </select>
           </label>
           <label>
             <span>Durée annonce</span>
-            <select class="kp-select" data-autosell-duration ${a.running ? 'disabled' : ''}>
+            <select class="kp-select" data-autosell-duration ${locked ? 'disabled' : ''}>
               ${[12, 24, 48]
                 .map(
                   (h) =>
@@ -5733,32 +6207,34 @@
         <div class="kp-autosell-estimate">
           <span>Gain estimé · ${strategyLabel}</span>
           <b>◆ ${fmt(estimate.total)}</b>
-          <small>${fmt(estimate.copies)} doublon(s) · ${fmt(estimate.cards)} carte(s)</small>
+          <small>${fmt(estimate.copies)} doublon(s) disponible(s) · ${fmt(estimate.cards)} carte(s)</small>
         </div>
         <div class="kp-autosell-opts">
           <label class="kp-check">
-            <input type="checkbox" data-autosell-include-ml ${s.autoSellIncludeML ? 'checked' : ''} ${a.running ? 'disabled' : ''}>
+            <input type="checkbox" data-autosell-include-ml ${s.autoSellIncludeML ? 'checked' : ''} ${locked ? 'disabled' : ''}>
             Inclure M/L <em>${s.autoSellIncludeML ? '· dangereux' : '· exclues par défaut'}</em>
           </label>
           <label class="kp-check">
-            <input type="checkbox" data-autosell-dryrun ${s.autoSellDryRun ? 'checked' : ''} ${a.running ? 'disabled' : ''}>
+            <input type="checkbox" data-autosell-dryrun ${s.autoSellDryRun ? 'checked' : ''} ${locked ? 'disabled' : ''}>
             Simulation
           </label>
           <span class="kp-autosell-note">${fmt(withoutPrice)} sans prix · ${fmt(mlSpare)} M/L</span>
         </div>
         <div class="kp-autosell-actions">
-          <button class="kp-btn" type="button" data-act="autosell-preview" ${a.running ? 'disabled' : ''}>Aperçu</button>
-          <button class="kp-btn is-primary" type="button" data-act="autosell-start" ${a.running ? 'disabled' : ''}>
-            ${a.armed ? 'Confirmer le démarrage' : 'Démarrer'}
+          <button class="kp-btn" type="button" data-act="autosell-preview" ${locked ? 'disabled' : ''}>Aperçu</button>
+          <button class="kp-btn is-primary" type="button" data-act="autosell-start" ${locked ? 'disabled' : ''}>
+            ${a.starting ? 'Vérification…' : a.armed ? 'Confirmer le démarrage' : 'Démarrer'}
           </button>
-          <button class="kp-btn" type="button" data-act="autosell-stop" ${a.running ? '' : 'disabled'}>Arrêter</button>
+          <button class="kp-btn" type="button" data-act="autosell-stop" ${a.running || a.starting ? '' : 'disabled'}>Arrêter</button>
           ${a.armed ? '<button class="kp-btn" type="button" data-act="autosell-cancel">Annuler</button>' : ''}
         </div>
         ${
           a.armed
             ? `<div class="kp-autosell-confirm">
                  <b>Confirmer la vente auto ?</b>
-                 <span>${fmt(spare)} exemplaire(s) en trop · ◆ ${fmt(estimate.total)} estimés · ${slots.remaining} place(s) libre(s) · ${
+                 <span>${fmt(eligibleSpare)} exemplaire(s) disponible(s) · ◆ ${fmt(
+                   estimate.total
+                 )} estimés · ${slots.remaining} place(s) libre(s) · ${
                    s.autoSellIncludeML ? 'M/L incluses' : 'M/L exclues'
                  } · dernière copie conservée.</span>
                </div>`
@@ -5793,37 +6269,79 @@
       </section>`;
   }
 
-  /** Cartes actuellement en vente, avec images, juste sous les sous-onglets. */
+  /** Libellé d'état d'une annonce active (ou en attente de confirmation). */
+  function autoSellListingLabel(listing) {
+    if (listing?.pending) return 'Confirmation en cours';
+    const status = autoSellListingStatus(listing);
+    if (status === 'sold') return 'Vendue';
+    if (status === 'expired') return 'Terminée';
+    if (status === 'cancelled' || status === 'canceled') return 'Annulée';
+    if (status === 'pending') return 'En attente';
+    if (String(listing?.type || '').toLowerCase() === 'auction') return 'Enchère active';
+    return 'En vente';
+  }
+
+  /**
+   * Ventes actives : nom, quantité, prix unitaire et total, état. La liste est
+   * relue au démarrage de l'auto-vente, après chaque vente et via Actualiser.
+   */
   function listedCardsBlock() {
-    const mineAll = Array.isArray(state.mine?.listings)
-      ? state.mine.listings
-      : Array.isArray(state.mine)
-        ? state.mine
-        : [];
-    const mine = mineAll.filter((listing) => !listing.status || listing.status === 'active');
-    if (!mine.length) {
-      return `<section class="kp-listed"><div class="kp-listed-head"><b>En vente</b><span>0</span></div><div class="kp-listed-empty">Aucune annonce active.</div></section>`;
+    const a = state.autoSell;
+    const slots = listingSlots();
+    const active = autoSellActiveEntries();
+    if (!active.length) {
+      return `<section class="kp-listed">
+        <div class="kp-listed-head">
+          <b>Ventes actives</b>
+          <span>0 annonce · ${fmt(slots.active)}/${fmt(slots.max)} place(s) occupée(s)
+            <button class="kp-listed-refresh" type="button" data-act="autosell-refresh-listings" ${
+              a.refreshing || a.running || a.starting ? 'disabled' : ''
+            }>${a.refreshing ? '…' : 'Actualiser'}</button>
+          </span>
+        </div>
+        <div class="kp-listed-empty">${
+          a.listingsError
+            ? `Ventes actives illisibles : ${esc(a.listingsError)}`
+            : 'Aucune vente active pour le moment.'
+        }</div>
+      </section>`;
     }
     return `<section class="kp-listed">
-      <div class="kp-listed-head"><b>En vente</b><span>${fmt(mine.length)} annonce(s)</span></div>
+      <div class="kp-listed-head">
+        <b>Ventes actives</b>
+        <span>${fmt(active.length)} annonce(s) · ${fmt(slots.active)}/${fmt(slots.max)} place(s) occupée(s)
+          <button class="kp-listed-refresh" type="button" data-act="autosell-refresh-listings" ${
+            a.refreshing || a.running || a.starting ? 'disabled' : ''
+          }>${a.refreshing ? '…' : 'Actualiser'}</button>
+        </span>
+      </div>
       <div class="kp-listed-grid">
-        ${mine
+        ${active
           .slice(0, 20)
           .map((listing) => {
             const card = listing.character ?? state.characters.get(String(listing.characterId)) ?? null;
             const info = rarityInfo(card?.rarity);
-            const type = listing.type === 'auction' ? 'enchère' : 'fixe';
+            const type = String(listing.type || '').toLowerCase() === 'auction' ? 'enchère' : 'prix fixe';
+            const qty = autoSellListingQty(listing);
+            const unit = autoSellListingPrice(listing);
+            const total = autoSellListingTotal(listing, qty);
             const left = listingTimeLeft(listing);
-            const price = listing.finalPrice ?? listing.currentBid ?? listing.price;
             const id = String(listing.characterId ?? card?.id ?? '');
-            return `<button class="kp-listed-card" type="button" style="--rc:${esc(info.color)}" data-act="sell-detail" data-id="${esc(
-              id
-            )}" data-hide-recommend="1" title="Voir l'étude de marché de cette carte">
+            const stateText = autoSellListingLabel(listing);
+            const pending = Boolean(listing.pending);
+            return `<button class="kp-listed-card ${pending ? 'is-pending' : ''}" type="button" style="--rc:${esc(
+              info.color
+            )}" data-act="sell-detail" data-id="${esc(id)}" data-hide-recommend="1" title="Voir l'étude de marché de cette carte">
               <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
               <span class="kp-listed-info">
                 <b>${esc(card?.name ?? `Carte #${listing.characterId ?? '?'}`)}</b>
-                <small>${esc(info.label)} · ${type}${left ? ` · ${esc(left)}` : ''}</small>
-                <em>◆ ${fmt(price)}</em>
+                <small>${esc(info.label)} · ${type} · ×${fmt(qty)}</small>
+                <em>◆ ${fmt(unit)}${
+                  qty > 1 && total != null ? ` <i>· total ◆ ${fmt(total)}</i>` : ''
+                }</em>
+                <span class="kp-listed-state ${pending ? 'is-pending' : ''}">${esc(stateText)}${
+                  left ? ` · ${esc(left)}` : ''
+                }</span>
               </span>
             </button>`;
           })
@@ -6049,12 +6567,8 @@
   }
 
   function marketMyListings() {
-    const mineAll = Array.isArray(state.mine?.listings)
-      ? state.mine.listings
-      : Array.isArray(state.mine)
-        ? state.mine
-        : [];
-    const mine = mineAll.filter((l) => !l.status || l.status === 'active');
+    const mineAll = autoSellListings();
+    const mine = mineAll.filter((l) => autoSellListingIsActive(l));
     const mineOther = mineAll.length - mine.length;
     if (!mine.length) return '';
     return `<div class="kp-section">
@@ -9496,6 +10010,14 @@
         state.sellView.mode = mode;
         state.sellView.limit = 40;
         render();
+        if (
+          mode === 'auto' &&
+          !state.autoSell.running &&
+          !state.autoSell.starting &&
+          Date.now() - Number(state.autoSell.listingsAt || 0) > 30000
+        ) {
+          autoSellRefreshListings();
+        }
         break;
       }
       case 'sell-rarity': {
@@ -9634,6 +10156,9 @@
         break;
       case 'autosell-preview':
         autoSellPreview();
+        break;
+      case 'autosell-refresh-listings':
+        autoSellRefreshListings();
         break;
       case 'autosell-start':
         if (state.autoSell.armed) startAutoSell();
@@ -10319,6 +10844,10 @@
       autoLog,
       autoSellPreview,
       autoSellCycle,
+      autoSellRefresh,
+      autoSellRefreshListings,
+      autoSellActiveEntries,
+      autoSellListings,
       startAutoSell,
       stopAutoSell,
       armAutoSell,
@@ -10365,6 +10894,19 @@
   setInterval(() => {
     if (state.open && state.tab === 'sell') updateLockBadges();
   }, 30000);
+
+  // Ventes actives : synchronisation silencieuse quand l'onglet Vente auto est ouvert.
+  setInterval(() => {
+    if (
+      state.open &&
+      state.user &&
+      state.tab === 'sell' &&
+      state.sellView.mode === 'auto' &&
+      document.visibilityState === 'visible'
+    ) {
+      autoSellSyncListings();
+    }
+  }, 60000);
 
   setInterval(() => {
     if (

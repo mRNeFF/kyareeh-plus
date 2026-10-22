@@ -218,6 +218,17 @@
         }
       ];
 
+      // État mutable du marché : les POST de la vente auto doivent réellement
+      // apparaître dans /api/me/market et retirer une copie listable.
+      const MARKET_STATE = {
+        collection: COLLECTION.map((row) => ({ ...row })),
+        listings: [
+          { id: 'mine-1', characterId: 21122, character: CHARACTERS[3], type: 'fixed', price: 9, status: 'active', qty: 1, endsAt: new Date(Date.now() + 8 * 3600e3).toISOString() },
+          { id: 'mine-2', characterId: 45628, character: CHARACTERS[7], type: 'auction', price: 5, currentBid: 7, bidCount: 2, status: 'active', qty: 1, endsAt: new Date(Date.now() + 3 * 3600e3).toISOString() },
+          { id: 'mine-3', characterId: 999002, character: CHARACTERS[5], type: 'fixed', price: 25, status: 'active', qty: 1, endsAt: new Date(Date.now() + 6 * 3600e3).toISOString() }
+        ]
+      };
+
       const CONFIG = {
         catalogSize: 6736,
         freePacks: { max: 10 },
@@ -288,21 +299,14 @@
           // (deck en ligne complet possible dans le harness).
           if (new URLSearchParams(location.search).has('duel') && window.KYARA_DUEL_DATA) {
             const mythics = window.KYARA_DUEL_DATA.champions.filter((c) => c.rarity === 'M').slice(0, 8);
-            return json([...COLLECTION, ...mythics.map((c) => ({ characterId: c.id, qty: 1, listable: 0 }))]);
+            return json([...MARKET_STATE.collection, ...mythics.map((c) => ({ characterId: c.id, qty: 1, listable: 0 }))]);
           }
-          return json(COLLECTION);
+          return json(MARKET_STATE.collection);
         }
         if (url.includes('/api/characters')) return json(CHARACTERS);
         if (url.includes('/api/config')) return json(CONFIG);
         if (url.includes('/api/me/market')) {
-          return json({
-            listings: [
-              { id: 'mine-1', characterId: 10668, character: CHARACTERS[1], type: 'fixed', price: 42, status: 'active', endsAt: new Date(Date.now() + 8 * 3600e3).toISOString() },
-              { id: 'mine-2', characterId: 282077, character: CHARACTERS[2], type: 'auction', price: 5, currentBid: 7, bidCount: 2, status: 'active', endsAt: new Date(Date.now() + 3 * 3600e3).toISOString() },
-              { id: 'mine-3', characterId: 21122, character: CHARACTERS[3], type: 'fixed', price: 9, status: 'sold', endsAt: new Date(Date.now() - 3600e3).toISOString() }
-            ],
-            buyOrders: []
-          });
+          return json({ listings: MARKET_STATE.listings, buyOrders: [] });
         }
         if (url.includes('/api/trades/owned/')) {
           const id = decodeURIComponent(url.split('/api/trades/owned/')[1].split(/[?#]/)[0]);
@@ -559,8 +563,35 @@
         }
 
         if (url.includes('/api/market/listings') && String(init?.method || 'GET').toUpperCase() === 'POST') {
+          const body = JSON.parse(init?.body || '{}');
+          const characterId = Number(body.characterId);
+          const row = MARKET_STATE.collection.find((item) => Number(item.characterId) === characterId);
+          const active = MARKET_STATE.listings.filter((item) => item.status === 'active').length;
+          const fail = (code, message) =>
+            new Response(JSON.stringify({ code, message }), {
+              status: 400,
+              headers: { 'content-type': 'application/json' }
+            });
+          if (active >= 10) return fail('too_many_listings', 'Limite d’annonces actives atteinte.');
+          if (!row || Number(row.listable ?? Math.max(0, row.qty - 1)) <= 0) {
+            return fail('not_listable', 'Cette carte n’est pas listable.');
+          }
+          row.listable = Math.max(0, Number(row.listable ?? Math.max(0, row.qty - 1)) - 1);
+          const card = CHARACTERS.find((item) => Number(item.id) === characterId) || null;
+          const listing = {
+            id: 'auto-' + Date.now() + '-' + MARKET_STATE.listings.length,
+            characterId,
+            character: card,
+            type: body.type === 'auction' ? 'auction' : 'fixed',
+            price: Number(body.price),
+            buyoutPrice: body.buyoutPrice ?? null,
+            status: 'active',
+            qty: 1,
+            endsAt: new Date(Date.now() + (Number(body.durationHours) || 12) * 3600e3).toISOString()
+          };
+          MARKET_STATE.listings.unshift(listing);
           log('   -> listing créé: ' + (init?.body || ''));
-          return json({ ok: true, id: 'new-listing-' + Date.now() });
+          return json({ ok: true, id: listing.id, listing, matched: false });
         }
 
         if (url.includes('/api/market/listings')) {

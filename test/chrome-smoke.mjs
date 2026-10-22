@@ -339,6 +339,24 @@ async function visualPass() {
       listedInfo.count > 0,
       `${listedInfo.count} carte(s) · mine=${listedInfo.mine} · active=${listedInfo.active}`
     );
+    check(
+      'Ventes actives : trois annonces visibles au démarrage',
+      listedInfo.active === 3 && listedInfo.count === 3 && listedInfo.mine === 3,
+      `${listedInfo.count} carte(s) · mine=${listedInfo.mine} · active=${listedInfo.active}`
+    );
+    const listedText = await evaluate(
+      cdp,
+      sessionId,
+      `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('.kp-listed')?.innerText || ''`
+    );
+    check(
+      'Ventes actives : nom, quantité, prix et état',
+      listedText.toLowerCase().includes('ventes actives') &&
+        listedText.includes('×1') &&
+        listedText.includes('◆') &&
+        /en vente|enchère active|confirmation/i.test(listedText),
+      listedText.replace(/\s+/g, ' ').slice(0, 220)
+    );
     const listedShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
     writeFileSync(join(SHOTS, 'chrome-vente-auto-top.png'), Buffer.from(listedShot.data, 'base64'));
     const strategyValues = await evaluate(
@@ -464,6 +482,54 @@ async function visualPass() {
     );
     check('Aperçu vente auto sans POST', preview.plan > 0, `${preview.plan} annonce(s) · ${preview.status}`);
 
+    // Aucun prix connu : le tri ne peut pas être fait, le démarrage doit être refusé.
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const state = window.__kyaraPlus.state;
+         state.prices = {};
+         state.fixedLow = {};
+         state.fixedHigh = {};
+         state.auctionBuyout = {};
+         state.lowest = {};
+         state.marketScanned.clear();
+         for (const id of ['10668', '282077']) state.marketScanned.add(id);
+         window.__kyaraPlus.render();
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="autosell-start"]')?.click();
+         root.querySelector('[data-act="autosell-start"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          sessionId,
+          `(() => {
+             const a = window.__kyaraPlus.state.autoSell;
+             return a.starting === false && Boolean(a.lastError);
+           })()`
+        ),
+      { label: 'refus du démarrage sans prix', timeout: 20000 }
+    );
+    const blockedStart = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const a = window.__kyaraPlus.state.autoSell;
+         return { running: a.running, armed: a.armed, error: a.lastError || '' };
+       })()`
+    );
+    check(
+      'Vente auto : démarrage refusé si le tri est impossible',
+      blockedStart.running === false && blockedStart.armed === false && /tri impossible/i.test(blockedStart.error),
+      JSON.stringify(blockedStart)
+    );
+    // Les prix seront relus normalement au démarrage réel.
+    await evaluate(cdp, sessionId, `window.__kyaraPlus.state.marketScanned.clear()`);
+
     // Tests uniquement : délai nul pour ne pas attendre 5–60 s entre les ventes.
     await evaluate(
       cdp,
@@ -510,7 +576,10 @@ async function visualPass() {
            created: a.created,
            cycles: a.cycles,
            log: a.log.length,
-           characterId: a.lastPlan?.[0]?.characterId
+           characterId: a.lastPlan?.[0]?.characterId,
+           plan: (a.lastPlan || []).map((row) => String(row.characterId)),
+           active: window.__kyaraPlus.autoSellActiveEntries().length,
+           slots: window.__kyaraPlus.listingSlots()
          };
          const root = document.querySelector('#kyara-plus-root').shadowRoot;
          root.querySelector('[data-act="autosell-stop"]')?.click();
@@ -519,6 +588,21 @@ async function visualPass() {
     );
     check('Vente auto : annonces créées', auto.created > 0, `${auto.created} annonce(s) · ${auto.cycles} cycle(s)`);
     check('Vente auto : identifiant API présent', Number.isFinite(Number(auto.characterId)), String(auto.characterId));
+    check(
+      'Vente auto : la carte la plus chère passe en premier',
+      Number(auto.characterId) === 282077,
+      `première=${auto.characterId} · plan=${auto.plan.join(',')}`
+    );
+    check(
+      'Vente auto : aucune annonce active existante relancée',
+      !auto.plan.some((id) => ['21122', '45628', '999002'].includes(id)),
+      auto.plan.join(',')
+    );
+    check(
+      'Vente auto : les nouvelles annonces comptent dans les 10 places',
+      auto.active === 3 + auto.created && auto.slots.active === auto.active,
+      `${auto.active} active(s) · ${auto.slots.active}/${auto.slots.max}`
+    );
     const sales = await evaluate(
       cdp,
       sessionId,

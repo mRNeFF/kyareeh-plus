@@ -10,10 +10,10 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.3.0** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.3.1** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
-- Dernier commit de référence : `f39d6d1`
+- Dernier commit de référence : `68bed23`
 
 ## 2. Démarrage rapide
 
@@ -22,9 +22,9 @@ npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
-npm run verify:chrome       # 35 contrôles dans un Chrome headless réel
+npm run verify:chrome       # 41 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 43 contrôles
-node test/verify-autosell.mjs    # 26 contrôles (sélection pure + stratégies + ordre)
+node test/verify-autosell.mjs    # 50 contrôles (sélection pure + stratégies + ordre + ventes actives)
 node test/verify-sales-chart.mjs # 13 contrôles (cumuls du graphique de ventes)
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
@@ -148,7 +148,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | Onglet | Contenu |
 |---|---|
 | **Compte** | Valeur du compte, ressources, top cartes, valeur par rareté, séries complètes, recherche d'un autre joueur (valorisation exacte). |
-| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (liste illustrée des annonces actives bordées à la couleur de rareté, cliquable vers la fiche marché sans prix recommandé ; doublons uniquement, dernière copie conservée, M/L exclues par défaut, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, arrêt d'urgence). En bas, **graphique local** du net cumulé sur 7 jours (auto/manuelle), total des ventes et ventes immédiates. |
+| **Vente** | Deux sous-onglets : **Mes cartes** (filtres rareté/série/**Doublons**, tri, prix potentiel, blocage de revente 48 h, sélection plafonnée à 10 places, prix fixe/enchère, 3 stratégies, pastille « N poss. ») et **Vente auto** (section **Ventes actives** : nom, quantité, prix unitaire/total, état et temps restant, bordure de rareté, cliquable vers la fiche marché sans prix recommandé, relue au démarrage, après chaque vente et toutes les 60 s ; doublons uniquement, dernière copie conservée, **exemplaires déjà en vente réservés**, M/L exclues par défaut, stratégie rapide/équilibrée/max, **ordre plus cher → moins cher ou inverse sur le prix unitaire**, **durée 12/24/48 h**, **estimation des gains**, délai anti-flag 5–60 s, **refresh aléatoire 7–10 min**, aperçu + confirmation, refus explicite si le tri est impossible, arrêt d'urgence). En bas, **graphique local** du net cumulé sur 7 jours (auto/manuelle), total des ventes et ventes immédiates. |
 | **Marché** | Deux vues internes : **Marché global** (recherche serveur, une ligne par carte, prix fixe/enchère le plus bas, achat immédiat, dépliant des ventes) et **Bons plans** (scan sous la médiane, tri, pages, seuil). Mes annonces actives en bas. |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
