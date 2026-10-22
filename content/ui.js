@@ -10471,14 +10471,13 @@
       chart.W - chart.pad.r
     );
     const position = ((vx - chart.pad.l) / chart.plotW) * Math.max(1, chart.points.length - 1);
-    const i0 = Math.max(0, Math.min(chart.points.length - 1, Math.floor(position)));
-    const i1 = Math.min(chart.points.length - 1, i0 + 1);
-    const ratio = Math.max(0, Math.min(1, position - i0));
-    const p0 = chart.points[i0];
-    const p1 = chart.points[i1];
-    // Valeur exacte sur le segment, pas seulement au point le plus proche.
-    const value = p0.value + (p1.value - p0.value) * ratio;
-    const at = p0.at + (p1.at - p0.at) * ratio;
+    const index = Math.max(0, Math.min(chart.points.length - 1, Math.round(position)));
+    const point = chart.points[index];
+    // On affiche uniquement le résultat de la tranche horaire, jamais une
+    // interpolation au pixel : pas de décimales.
+    const value = Math.round(Number(point.value) || 0);
+    const at = point.at;
+    const snapX = chart.pad.l + (index / Math.max(1, chart.points.length - 1)) * chart.plotW;
     const cy = chart.H - chart.pad.b - (value / chart.yMax) * chart.plotH;
 
     const group = svg.querySelector('.kp-sales-hover');
@@ -10490,21 +10489,20 @@
     const bg = group.querySelector('.kp-sales-tip-bg');
     if (!line || !dot || !tip || !bg) return;
 
-    line.setAttribute('x1', vx.toFixed(1));
-    line.setAttribute('x2', vx.toFixed(1));
+    line.setAttribute('x1', snapX.toFixed(1));
+    line.setAttribute('x2', snapX.toFixed(1));
     line.setAttribute('y1', String(chart.pad.t));
     line.setAttribute('y2', String(chart.H - chart.pad.b));
-    dot.setAttribute('cx', vx.toFixed(1));
+    dot.setAttribute('cx', snapX.toFixed(1));
     dot.setAttribute('cy', cy.toFixed(1));
 
     const date = new Date(at);
     const hh = `${String(date.getHours()).padStart(2, '0')} h`;
     const day = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}`;
     const when = chart.range === '1d' ? hh : `${day} ${hh}`;
-    const display = Math.round(value * 10) / 10;
-    const text = `◆ ${display.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} · ${when}`;
+    const text = `◆ ${fmt(value)} · ${when}`;
     const width = Math.max(116, Math.min(chart.plotW, text.length * 6.4 + 18));
-    const tipX = Math.max(chart.pad.l, Math.min(vx - width / 2, chart.W - chart.pad.r - width));
+    const tipX = Math.max(chart.pad.l, Math.min(snapX - width / 2, chart.W - chart.pad.r - width));
     const tipY = Math.max(chart.pad.t + 2, cy - 32);
     bg.setAttribute('x', tipX.toFixed(1));
     bg.setAttribute('y', tipY.toFixed(1));

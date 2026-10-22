@@ -813,8 +813,8 @@ async function visualPass() {
        })()`
     );
     check(
-      'Graphique : valeur exacte au survol',
-      hover.visible && /◆/.test(hover.text) && /\d{2} h/.test(hover.text),
+      'Graphique : valeur de la tranche horaire au survol, sans décimale',
+      hover.visible && /◆/.test(hover.text) && /\d{2} h/.test(hover.text) && !hover.text.includes(','),
       hover.text
     );
     await evaluate(
