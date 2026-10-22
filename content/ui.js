@@ -458,6 +458,10 @@
 
     // Fenêtre détachée : le panneau remplit la fenêtre, sans bouton flottant.
     if (IS_PANEL && ui.fab) ui.fab.style.display = 'none';
+    if (IS_PANEL) {
+      applyPanelWindowScale();
+      window.addEventListener('resize', applyPanelWindowScale);
+    }
 
     shadow.addEventListener('click', onClick);
     shadow.addEventListener('change', onChange);
@@ -2712,15 +2716,14 @@
     const vol = Number.isFinite(volatility) ? volatility : null;
     const safe = (value) => Math.max(min, Math.round(value));
 
-    // 1) Vente rapide : uniquement basée sur la vente la plus basse du marché
-    //    (prix fixe ou achat immédiat d'enchère), −1 chakra pour passer devant.
-    //    Sans annonce exploitable, repli sur −10 % vs médiane.
+    // 1) Vente rapide : on se met exactement au prix de la vente la plus basse
+    //    (prix fixe ou achat immédiat d'enchère). Sans aucune des deux, on prend
+    //    la médiane. Aucune décote supplémentaire, aucun meilleur ordre.
     let quickRaw;
     if (lowest != null && lowest > 0) {
-      quickRaw = lowest > min ? lowest - 1 : lowest;
+      quickRaw = lowest;
     } else {
-      quickRaw = base * 0.9;
-      if (bestBid != null && bestBid > min) quickRaw = Math.max(quickRaw, Math.min(bestBid, base));
+      quickRaw = base;
     }
     const quick = safe(quickRaw);
 
@@ -2766,10 +2769,10 @@
         delay: liquidity === 'lent' ? 'délai incertain' : 'le plus rapide',
         reason:
           lowest != null
-            ? `vente la plus basse ◆ ${fmt(lowest)} · ${
-                quick < lowest ? '−1 chakra' : 'plancher de prix'
+            ? `vente la plus basse ◆ ${fmt(lowest)} · aligné${
+                quick > lowest ? ' (plancher)' : ''
               }`
-            : reason(quick, quick < base ? `−${Math.round(((base - quick) / base) * 100)} % vs médiane` : null)
+            : `médiane ◆ ${fmt(base)} · aucune vente fixe/immédiate`
       },
       balanced: {
         id: 'balanced',
@@ -3323,9 +3326,14 @@
               const code = String(err?.code || '');
               const message = String(err?.message || '');
               const tooLow = code === 'price_too_low' || /trop bas|too low|minimum/i.test(message);
-              if (!tooLow || attempt >= 4) throw err;
+              if (!tooLow || attempt >= 11) throw err;
               const floor = Math.max(1, Math.round(Number(row.floor) || recycleFloor(row.rarity) || 1));
-              const nextPrice = Math.max(salePrice + 10, floor, Math.ceil(salePrice * 3));
+              const minimum = message.match(/(?:minimum|min\.?)\s*:?\s*(\d+)/i);
+              const nextPrice = Math.max(
+                salePrice + 1,
+                floor,
+                minimum ? Number(minimum[1]) : Math.ceil(salePrice * 1.05)
+              );
               log(`↻ ${row.name} · prix ◆ ${fmt(salePrice)} refusé (trop bas) · nouvel essai ◆ ${fmt(nextPrice)}`, 'info');
               salePrice = nextPrice;
             }
@@ -4403,6 +4411,21 @@
     } catch {
       /* pas d'écoute possible : l'état est relu à chaque chargement de page */
     }
+  }
+
+  /** La fenêtre détachée peut être agrandie/maximisée : on grossit tout le
+   * panneau proportionnellement (polices comprises) via `zoom`, en compensant
+   * la largeur/hauteur pour qu'il remplisse exactement la fenêtre. */
+  function applyPanelWindowScale() {
+    if (!IS_PANEL || !ui?.panel) return;
+    if (!globalThis.CSS || typeof CSS.supports !== 'function' || !CSS.supports('zoom', '1.2')) return;
+    const scale = Math.max(
+      1,
+      Math.min(1.6, Math.min(window.innerWidth / 1100, window.innerHeight / 720))
+    );
+    ui.panel.style.zoom = String(scale);
+    ui.panel.style.width = `${window.innerWidth / scale}px`;
+    ui.panel.style.height = `${window.innerHeight / scale}px`;
   }
 
   /** Détacher (ou remettre au premier plan la fenêtre déjà ouverte). */

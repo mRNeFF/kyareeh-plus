@@ -168,7 +168,7 @@ check(
   `quick=${reco.quick.price} balanced=${reco.balanced.price} max=${reco.max.price}`
 );
 check('prix ≥ plancher de recyclage', reco.quick.price >= 40 && reco.balanced.price >= 40 && reco.max.price >= 40);
-check('vente rapide sous la concurrence', reco.quick.price < 150, `quick=${reco.quick.price}`);
+check('vente rapide au niveau de la concurrence', reco.quick.price <= 150, `quick=${reco.quick.price}`);
 check('justification chiffrée', /médiane/.test(reco.balanced.reason) && /vente/.test(reco.balanced.reason));
 check('net après frais', reco.balanced.net < reco.balanced.price);
 
@@ -182,10 +182,10 @@ const quickMarket = api.buildRecommendations({
   fixedHigh: 15,
   floor: 1
 });
-check('vente rapide = vente la plus basse − 1', quickMarket.quick.price === 19, String(quickMarket.quick.price));
+check('vente rapide = vente la plus basse', quickMarket.quick.price === 20, String(quickMarket.quick.price));
 check(
   'vente rapide ignore la médiane et le meilleur ordre',
-  quickMarket.quick.price < 20 && quickMarket.quick.price !== 50,
+  quickMarket.quick.price === 20 && quickMarket.quick.price !== 50,
   String(quickMarket.quick.price)
 );
 check(
@@ -200,7 +200,7 @@ const onlyBid = api.analyzeCard({
   card: { id: 'bid-only', floor: 1 }
 });
 check('une mise aux enchères n’est pas un prix de vente', onlyBid.lowest === null, String(onlyBid.lowest));
-check('repli vente rapide sans vente fixe/immédiate', onlyBid.recommend?.quick.price === 90, String(onlyBid.recommend?.quick.price));
+check('repli vente rapide sur la médiane', onlyBid.recommend?.quick.price === 100, String(onlyBid.recommend?.quick.price));
 
 const fixedAndBuyout = api.analyzeCard({
   prices: { median7d: 100, median30d: 100 },
@@ -213,7 +213,7 @@ const fixedAndBuyout = api.analyzeCard({
   card: { id: 'fixed-buyout', floor: 1 }
 });
 check('prix de référence = minimum fixe/achat immédiat', fixedAndBuyout.lowest === 15, String(fixedAndBuyout.lowest));
-check('vente rapide sous 15', fixedAndBuyout.recommend?.quick.price === 14, String(fixedAndBuyout.recommend?.quick.price));
+check('vente rapide au niveau de 15', fixedAndBuyout.recommend?.quick.price === 15, String(fixedAndBuyout.recommend?.quick.price));
 
 /* --- 7. Cas sans données --------------------------------------------- */
 

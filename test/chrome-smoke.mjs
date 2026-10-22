@@ -995,6 +995,7 @@ async function detachPass(cdp, id) {
     `(() => { const r = ${ROOT_JS}; const p = r.querySelector('.kp-panel'); const b = p.getBoundingClientRect();
        return { hidden: p.hidden, x: Math.round(b.left), y: Math.round(b.top), w: Math.round(b.width), h: Math.round(b.height), vw: innerWidth, vh: innerHeight,
                 fab: getComputedStyle(r.querySelector('.kp-fab')).display,
+                zoom: Number.parseFloat(p.style.zoom) || 1,
                 acts: [...r.querySelectorAll('#kp-modes [data-act]')].map((b) => b.dataset.act).join(',') }; })()`
   );
   check(
@@ -1003,6 +1004,11 @@ async function detachPass(cdp, id) {
     JSON.stringify(layout)
   );
   check('Fenêtre : « Rattacher » remplace « Détacher »', layout.acts === 'mode,mode,panel-attach', layout.acts);
+  check(
+    'Fenêtre : polices agrandies proportionnellement',
+    layout.zoom > 1,
+    `zoom=${layout.zoom}`
+  );
 
   const away = await siteAway(true);
   check(
