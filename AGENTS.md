@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.0.0** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.0.1** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `e269676`
@@ -22,7 +22,7 @@ npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
-npm run verify:chrome       # 69 contrôles dans un Chrome headless réel
+npm run verify:chrome       # 70 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 50 contrôles
 node test/verify-autosell.mjs    # 50 contrôles (sélection pure + stratégies + ordre + ventes actives)
 node test/verify-sales-chart.mjs # 27 contrôles (tranches horaires 1 j / 7 j / total)
@@ -173,8 +173,8 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 - `verify-odds.mjs` a **1 écart préexistant** (`season-2026-fall R`), antérieur à la 1.0.0.
 - **Anti-rafale** : toutes les requêtes `/api/…` passent par une file dans `content/ui.js` (une seule à la fois, 350 ms minimum entre deux départs). La vente auto lit les prix manquants en un lot et ne scanne plus tout l'inventaire ; en **Vente rapide**, elle lit un seul instantané marché pour la carte choisie. Elle ne relit collection + ventes actives qu'après une vente immédiate et une fois en fin de cycle, pas après chaque mise en vente.
 - **Paquet Chrome** : manifeste dérivé (`scripts/build-chrome.mjs`), aucun code transformé.
-  `icons/icon-128.png` suit la règle Chrome (illustration 96 px + 16 px de marge transparente)
-  et n'a pas d'original plus grand : à remplacer si un logo source réapparaît. Depuis Chrome 137, `--load-extension`
+  `icons/icon-*.png` et `icons/logo.svg` viennent du logo fourni par Axel (dégradé teal, tronc/feuilles) ;
+  l'icône 128 est incluse dans le manifeste. Depuis Chrome 137, `--load-extension`
   est ignoré dans les builds de marque ; `test/chrome-smoke.mjs` charge donc l'extension via
   CDP `Extensions.loadUnpacked` et travaille sur une copie autorisant `127.0.0.1:8787`.
 - Les textes qui nomment le navigateur ou sa page de réglages passent par `IS_GECKO` /

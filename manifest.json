@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Kyareeh+ (beta)",
-  "version": "2.0.0",
+  "name": "Kyareeh+",
+  "version": "2.0.1",
   "description": "Tableau de bord de compte, valorisation en chakra, vente et mise en enchère des doublons pour kyara.games.",
   "browser_specific_settings": {
     "gecko": {
@@ -62,13 +62,15 @@
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
       "48": "icons/icon-48.png",
-      "96": "icons/icon-96.png"
+      "96": "icons/icon-96.png",
+      "128": "icons/icon-128.png"
     }
   },
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
     "48": "icons/icon-48.png",
-    "96": "icons/icon-96.png"
+    "96": "icons/icon-96.png",
+    "128": "icons/icon-128.png"
   }
 }

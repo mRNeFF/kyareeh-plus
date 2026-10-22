@@ -324,6 +324,25 @@ async function visualPass() {
       sessionId,
       `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view')?.innerText || ''`
     );
+    const branding = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const logo = root.querySelector('.kp-logo img');
+         const fab = root.querySelector('.kp-fab-logo');
+         return {
+           logo: Boolean(logo && logo.complete && logo.naturalWidth > 0),
+           fab: Boolean(fab && fab.complete && fab.naturalWidth > 0),
+           src: logo?.getAttribute('src') || ''
+         };
+       })()`
+    );
+    check(
+      'Logo Kyareeh+ affiché dans l’en-tête et le bouton flottant',
+      branding.logo && branding.fab,
+      JSON.stringify(branding)
+    );
     check(
       'Panneau Vente auto présent',
       saleText.toLowerCase().includes('vente auto') &&

@@ -2,5 +2,6 @@ node_modules/
 web-ext-artifacts/
 dist/
 *.xpi
+.amo-upload-uuid
 .DS_Store
 Thumbs.db

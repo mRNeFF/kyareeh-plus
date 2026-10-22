@@ -30,6 +30,13 @@
       return '0.0.0';
     }
   })();
+  const LOGO_URL = (() => {
+    try {
+      return ext.runtime.getURL('icons/icon-128.png');
+    } catch {
+      return '/icons/icon-128.png';
+    }
+  })();
   const PRICE_KEY = 'kyaraplus.prices.v2';
   const SETTINGS_KEY = 'kyaraplus.settings.v2';
   const CHARS_KEY = 'kyaraplus.characters.v1';
@@ -407,13 +414,13 @@
     shadow.innerHTML = `
       <style>${css}</style>
       <button class="kp-fab" type="button" data-act="toggle" title="Kyareeh+ (Alt+K)">
-        <span class="kp-diamond">◆</span><span>Kyareeh+</span>
+        <img class="kp-fab-logo" src="${esc(LOGO_URL)}" alt=""><span>Kyareeh+</span>
       </button>
       <section class="kp-panel${IS_PANEL ? ' is-window' : ''}" hidden aria-label="Kyareeh+">
         <header class="kp-head">
           <nav class="kp-modes" id="kp-modes"></nav>
           <div class="kp-brand">
-            <span class="kp-logo">◆</span>
+            <span class="kp-logo"><img src="${esc(LOGO_URL)}" alt=""></span>
             <div><b>Kyareeh+</b><small>chakra &amp; doublons</small></div>
           </div>
           <div class="kp-head-actions">
