@@ -14,6 +14,9 @@
    * dérivé de manifest.json par scripts/build-chrome.mjs. Seuls les libellés qui
    * nomment le navigateur ou sa page de gestion changent. */
   const IS_GECKO = /firefox\//i.test(navigator.userAgent);
+  /* Le même fichier sert aussi à la page d'extension `panel/panel.html` : la fenêtre détachée
+   * (panneau complet dans sa propre fenêtre). Hors du site, pas de DOM Kyara ni de session. */
+  const IS_PANEL = /^(moz|chrome)-extension:$/.test(location.protocol);
   const BROWSER_NAME = IS_GECKO ? 'Firefox' : 'Chrome';
   const RELOAD_HINT = IS_GECKO
     ? 'Passe par about:debugging → « Recharger ».'
@@ -37,6 +40,7 @@
   const SALES_MAX = 2000;
   const SOUND_KEY = 'kyareeh.sound.v1';
   const UI_KEY = 'kyareeh.ui.v1';
+  const PANEL_WINDOW_KEY = 'kyareeh.panel.window';
   // Les comptes suivis sont relus au bout de 12 h (ou à la demande).
   const STAT_CACHE_MS = 12 * 3600 * 1000;
   const STAT_MAX_ACCOUNTS = 20;
@@ -161,7 +165,9 @@
     chakra: 'Pas assez de chakra pour les frais de dépôt.',
     rate_limited: 'Trop de requêtes : patiente quelques secondes.',
     guest_limit: 'Compte invité : connecte-toi avec Discord.',
-    same_device: 'Action refusée depuis le même appareil.'
+    same_device: 'Action refusée depuis le même appareil.',
+    no_kyara_tab: 'Aucun onglet kyara.games ouvert : ouvre le site dans un onglet (connecté), puis réessaie.',
+    kyara_tab_unready: 'L’onglet kyara.games ne répond pas : recharge-le (F5), puis réessaie.'
   };
 
   function friendlyError(err) {
@@ -172,6 +178,8 @@
   const state = {
     mounted: false,
     open: false,
+    // Panneau complet ouvert dans la fenêtre détachée (vu depuis la page du site).
+    panelAway: false,
     ready: false,
     loading: false,
     error: null,
@@ -396,7 +404,7 @@
       <button class="kp-fab" type="button" data-act="toggle" title="Kyareeh+ (Alt+K)">
         <span class="kp-diamond">◆</span><span>Kyareeh+</span>
       </button>
-      <section class="kp-panel" hidden aria-label="Kyareeh+">
+      <section class="kp-panel${IS_PANEL ? ' is-window' : ''}" hidden aria-label="Kyareeh+">
         <header class="kp-head">
           <nav class="kp-modes" id="kp-modes"></nav>
           <div class="kp-brand">
@@ -409,7 +417,7 @@
               <input class="kp-volume" id="kp-sound-range" type="range" min="0" max="100" step="5" value="70" data-role="sound-volume" aria-label="Volume global">
             </span>
             <button class="kp-icon-btn" type="button" data-act="refresh" title="Rafraîchir les données">⟳</button>
-            <button class="kp-icon-btn" type="button" data-act="close" title="Fermer">✕</button>
+            <button class="kp-icon-btn" type="button" data-act="close" title="${IS_PANEL ? 'Rattacher (fermer cette fenêtre)' : 'Fermer'}">✕</button>
           </div>
         </header>
         <div class="kp-stats" id="kp-stats"></div>
@@ -417,6 +425,7 @@
         <nav class="kp-tabs" id="kp-tabs"></nav>
         <div class="kp-view" id="kp-view"></div>
         <div class="kp-duel-slot" id="kp-duel-slot" hidden></div>
+        <div class="kp-away" id="kp-away" hidden></div>
         <footer class="kp-foot" id="kp-foot"></footer>
       </section>
       <div class="kp-modal" id="kp-modal" hidden>
@@ -434,12 +443,16 @@
       tabs: qs('#kp-tabs'),
       view: qs('#kp-view'),
       slot: qs('#kp-duel-slot'),
+      away: qs('#kp-away'),
       foot: qs('#kp-foot'),
       modal: qs('#kp-modal'),
       modalCard: qs('#kp-modal-card'),
       soundBtn: qs('#kp-sound-btn'),
       soundRange: qs('#kp-sound-range')
     };
+
+    // Fenêtre détachée : le panneau remplit la fenêtre, sans bouton flottant.
+    if (IS_PANEL && ui.fab) ui.fab.style.display = 'none';
 
     shadow.addEventListener('click', onClick);
     shadow.addEventListener('change', onChange);
@@ -492,6 +505,11 @@
   }
 
   function toggle(force) {
+    // Dans la fenêtre détachée, le panneau est toujours ouvert : « fermer » = rattacher.
+    if (IS_PANEL) {
+      if (force === false) panelAttach();
+      return;
+    }
     state.open = typeof force === 'boolean' ? force : !state.open;
     persistUiSoon();
     render();
@@ -964,15 +982,21 @@
     await loadSalesLog();
     await loadSoundPrefs();
     await loadUiPrefs();
-    // Fenêtre Global détachée : le panneau s'ouvre automatiquement.
-    if (location.hash.includes('kyareeh-panel')) state.open = true;
+    // Fenêtre détachée : le panneau est toujours ouvert (il remplit la fenêtre).
+    if (IS_PANEL) state.open = true;
+    // L'état de la fenêtre (aller-retour avec le fond) ne retarde pas le montage du panneau,
+    // mais doit être connu avant toute boucle (reprise de l'Auto-Open, relectures).
+    const panelWindowReady = loadPanelWindowState();
     await mount();
+    await panelWindowReady;
+    render();
     await loadData();
     await loadAutoLog();
     // L'onglet Stat est global : rien à collecter ici, il charge son analyse
     // à la première ouverture (ou après 12 h).
     startAutoRefreshLoop();
-    installAntiAfk();
+    // L'anti-AFK lit le DOM du site : il n'a de sens que dans l'onglet kyara.games.
+    if (!IS_PANEL) installAntiAfk();
     startAutoWatchdog();
     // Vérifie une fois au démarrage si une version plus récente existe sur GitHub.
     setTimeout(() => checkRemoteVersion(), 2500);
@@ -1001,6 +1025,9 @@
 
   /** L'auto-open ne s'arrête que sur demande : on le relance après un rechargement. */
   async function resumeAutoOpenIfNeeded(attempt = 1) {
+    // Une seule instance fait tourner la boucle : jamais la fenêtre au démarrage (c'est la page
+    // qui reprend), et jamais la page tant que le panneau est détaché.
+    if (IS_PANEL || state.panelAway) return;
     if (state.autoOpen.running) return;
     const saved = await storageGet(AUTO_ACTIVE_KEY, null);
     if (!saved || !saved.at) return;
@@ -1030,9 +1057,23 @@
     return cached?.items ?? null;
   }
 
+  // Codes du relais de la fenêtre détachée : aucun onglet du site, ou onglet sans content script.
+  const RELAY_CODES = ['no_kyara_tab', 'kyara_tab_unready'];
+  let relayRetryTimer = null;
+
+  /** Fenêtre détachée sans onglet du site : on réessaie seule dès qu'un onglet apparaît. */
+  function scheduleRelayRetry() {
+    if (relayRetryTimer) return;
+    relayRetryTimer = setTimeout(() => {
+      relayRetryTimer = null;
+      if (!state.loading && RELAY_CODES.includes(state.errorCode)) loadData();
+    }, 8000);
+  }
+
   async function loadData(opts = {}) {
     state.loading = true;
     state.error = null;
+    state.errorCode = null;
     render();
 
     try {
@@ -1095,6 +1136,8 @@
       }
     } catch (err) {
       state.error = err instanceof ApiError ? friendlyError(err) : String(err?.message || err);
+      state.errorCode = err instanceof ApiError ? err.code : null;
+      if (IS_PANEL && RELAY_CODES.includes(state.errorCode)) scheduleRelayRetry();
     } finally {
       state.loading = false;
       render();
@@ -1156,7 +1199,7 @@
   let autoRefreshTimer = null;
 
   async function autoRefreshTick(force = false) {
-    if (state.loading) return;
+    if (state.loading || state.panelAway) return;
     // On ne saute plus le tick quand l'onglet est en arrière-plan : c'est justement
     // la situation d'une nuit entière, et l'auto-open a besoin de voir arriver les boosters.
     if (!force && Date.now() - (state.lastAutoRefresh || 0) < 30 * 1000) return;
@@ -2050,16 +2093,21 @@
 
   let uiSaveTimer = null;
 
-  /** Onglets Global synchronisés : ouverture et onglet actif partagés. */
+  /** Onglets du site synchronisés : ouverture et onglet actif partagés. */
   function applyUiPrefs(raw) {
     if (!raw || typeof raw !== 'object') return;
-    if (typeof raw.open === 'boolean') state.open = raw.open;
+    // La fenêtre détachée est toujours ouverte : fermer le panneau de la page ne doit jamais
+    // la vider (c'était la panne « Détacher ne marche plus »).
+    if (!IS_PANEL && typeof raw.open === 'boolean') state.open = raw.open;
     if (typeof raw.tab === 'string' && raw.tab) state.tab = raw.tab;
     render();
   }
 
   async function loadUiPrefs() {
     applyUiPrefs(await storageGet(UI_KEY, null));
+    // La fenêtre détachée part de l'onglet actif de la page, puis vit sa vie : pas de synchro
+    // continue (elle écraserait l'onglet que l'on consulte dans l'une ou l'autre).
+    if (IS_PANEL) return;
     try {
       ext.storage.onChanged.addListener((changes, area) => {
         if (area && area !== 'local') return;
@@ -2071,6 +2119,7 @@
   }
 
   function persistUiSoon() {
+    if (IS_PANEL) return;
     if (uiSaveTimer) clearTimeout(uiSaveTimer);
     uiSaveTimer = setTimeout(() => {
       uiSaveTimer = null;
@@ -4039,10 +4088,20 @@
     // +Duel : l'application occupe toute la hauteur (pas de stats ni d'onglets au-dessus).
     ui.panel.classList.toggle('is-duel', duelState().mode === 'duel');
     ui.fab.classList.toggle('is-open', state.open);
+    ui.panel.classList.toggle('is-away', Boolean(state.panelAway));
     if (!state.open) {
       renderModal();
       return;
     }
+    if (state.panelAway) {
+      // Le panneau tourne dans la fenêtre détachée : ici, seulement la carte « Afficher / Rattacher ».
+      renderModes();
+      renderAway();
+      renderFooter();
+      renderModal();
+      return;
+    }
+    if (ui.away && !ui.away.hidden) ui.away.hidden = true;
 
     const view = ui.view;
     const tabAtRender = state.tab;
@@ -4066,8 +4125,28 @@
     }
   }
 
+  function renderAway() {
+    if (!ui?.away) return;
+    ui.view.hidden = true;
+    ui.slot.hidden = true;
+    ui.away.hidden = false;
+    if (!ui.away.firstElementChild) ui.away.innerHTML = awayCardHtml();
+  }
+
   function renderBanner() {
     if (!ui?.banner) return;
+
+    // 0) Fenêtre détachée sans onglet kyara.games exploitable : les données ne peuvent plus
+    //    être relues (celles déjà chargées restent affichées).
+    if (IS_PANEL && state.error && RELAY_CODES.includes(state.errorCode)) {
+      ui.banner.hidden = false;
+      ui.banner.classList.add('is-stale');
+      ui.banner.innerHTML = `
+        <span class="kp-banner-text">${esc(state.error)}</span>
+        <button class="kp-btn is-primary" type="button" data-act="open-site">Ouvrir kyara.games</button>
+      `;
+      return;
+    }
 
     // 1) Une version plus récente existe sur GitHub : information seule, sans
     //    bouton de téléchargement (la mise à jour se fait hors extension).
@@ -4146,15 +4225,15 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* +Duel : application autonome intégrée (iframe) ou détachée          */
+  /* +Duel : application autonome intégrée (iframe)                      */
   /* ------------------------------------------------------------------ */
   // Le duel vit dans `duel/duel.html` (docs/DUEL-V2.md §3). Ici : le mode +Duel affiche cette
-  // page dans une <iframe> (ressource web_accessible_resources), propose de la détacher dans
-  // sa propre fenêtre (via le script de fond) et publie le profil du joueur (pseudo + cartes
-  // possédées) dans storage.local, la page du duel n'ayant pas la session kyara.games.
+  // page dans une <iframe> (ressource web_accessible_resources sur le site ; page d'extension
+  // dans la fenêtre détachée) et publie le profil du joueur (pseudo + cartes possédées) dans
+  // storage.local, la page du duel n'ayant pas la session kyara.games. Le « Détacher » est celui
+  // du panneau complet (voir « Fenêtre détachée » plus bas) : il n'y en a qu'un.
 
   const DUEL_PROFILE_KEY = 'kyareeh.duel.profile';
-  const DUEL_WINDOW_KEY = 'kyareeh.duel.window';
   const DUEL_PROFILE_REFRESH_MS = 5 * 60 * 1000;
   const DUEL_FRAME_TIMEOUT_MS = 6000;
 
@@ -4166,7 +4245,7 @@
 
   function duelState() {
     if (!state.__duel) {
-      state.__duel = { mode: 'tools', detached: false, frameReady: false, frameFailed: false, busy: false };
+      state.__duel = { mode: 'tools', frameReady: false, frameFailed: false };
     }
     return state.__duel;
   }
@@ -4205,66 +4284,116 @@
     storageSet(DUEL_PROFILE_KEY, { name, owned, at: now });
   }
 
-  function duelSendMessage(message) {
+  /* ------------------------------------------------------------------ */
+  /* Fenêtre détachée : le panneau complet (+Tools et +Duel) à part       */
+  /* ------------------------------------------------------------------ */
+  // Le script de fond tient le registre de la fenêtre (une seule, clé PANEL_WINDOW_KEY). Tant
+  // qu'elle existe, la page affiche une carte « ouvert dans une fenêtre » et laisse à la fenêtre
+  // les boucles (Auto-Open, vente auto, relectures) ; l'anti-AFK, qui lit le DOM du site,
+  // reste dans l'onglet. À la fermeture de la fenêtre, la page reprend tout.
+
+  function bgSend(message) {
     try {
-      return Promise.resolve(ext.runtime.sendMessage(message)).catch(() => null);
+      const ask = Promise.resolve(ext.runtime.sendMessage(message)).catch(() => null);
+      return Promise.race([ask, new Promise((resolve) => setTimeout(() => resolve(null), 4000))]);
     } catch {
       return Promise.resolve(null);
     }
   }
 
-  function duelApplyWindowKey(value) {
-    const duel = duelState();
-    const detached = Boolean(value && typeof value === 'object' && value.id != null);
-    if (detached === duel.detached) return;
-    duel.detached = detached;
-    if (detached) destroyDuelFrame();
+  /** Reprend ce que la fenêtre a écrit dans le stockage pendant qu'elle avait la main. */
+  async function panelResync() {
+    try {
+      const saved = await storageGet(SETTINGS_KEY, null);
+      if (saved && typeof saved === 'object') Object.assign(state.settings, saved);
+      const cached = await storageGet(PRICE_KEY, null);
+      const prices = cached && typeof cached === 'object' ? cached.prices ?? cached : null;
+      if (prices && typeof prices === 'object') {
+        for (const [id, entry] of Object.entries(prices)) {
+          const mine = state.prices[id];
+          if (entry && typeof entry === 'object' && (!mine || Number(entry.at || 0) > Number(mine.at || 0))) {
+            state.prices[id] = entry;
+          }
+        }
+      }
+      await loadSalesLog();
+      await loadAutoLog();
+      startAutoRefreshLoop();
+    } catch {
+      /* on garde l'état en mémoire */
+    }
     render();
   }
 
-  async function loadDuelWindowState() {
-    duelApplyWindowKey(await storageGet(DUEL_WINDOW_KEY, null));
+  /** La fenêtre existe-t-elle ? (côté page uniquement : la fenêtre, elle, ne s'efface pas.) */
+  function panelApplyWindow(value) {
+    if (IS_PANEL) return;
+    const away = Boolean(value && typeof value === 'object' && value.id != null);
+    if (away === Boolean(state.panelAway)) return;
+    state.panelAway = away;
+    if (away) {
+      // Une seule application de duel vivante : celle de la fenêtre.
+      destroyDuelFrame();
+      render();
+      return;
+    }
+    render();
+    panelResync().then(() => {
+      resumeAutoOpenIfNeeded();
+      refreshLight();
+    });
+  }
+
+  async function loadPanelWindowState() {
+    if (IS_PANEL) return;
+    // Le fond vérifie que la fenêtre existe encore : la clé survit à un crash ou à un redémarrage.
+    const res = await bgSend({ type: 'kp-panel-state' });
+    state.panelAway = Boolean(res && res.ok && res.detached);
     try {
       ext.storage.onChanged.addListener((changes, area) => {
         if (area && area !== 'local') return;
-        if (changes && changes[DUEL_WINDOW_KEY]) duelApplyWindowKey(changes[DUEL_WINDOW_KEY].newValue);
+        if (changes && changes[PANEL_WINDOW_KEY]) panelApplyWindow(changes[PANEL_WINDOW_KEY].newValue);
       });
     } catch {
-      /* pas d'écoute possible : l'état se met à jour à chaque ouverture du mode */
+      /* pas d'écoute possible : l'état est relu à chaque chargement de page */
     }
   }
 
+  /** Détacher (ou remettre au premier plan la fenêtre déjà ouverte). */
   async function panelDetach() {
-    const res = await duelSendMessage({ type: 'kp-panel-detach' });
-    if (!res || !res.ok) notify('Impossible d’ouvrir la fenêtre Global.');
-  }
-
-  async function duelDetach() {
-    const duel = duelState();
-    if (duel.busy) return;
-    duel.busy = true;
-    // L'iframe est retirée d'abord : elle enregistre sa partie avant que la fenêtre ne s'ouvre.
-    duel.detached = true;
-    destroyDuelFrame();
-    render();
-    const res = await duelSendMessage({ type: 'kp-duel-detach' });
-    duel.busy = false;
-    if (!res || !res.ok) {
-      duel.detached = false;
-      notify('Impossible d’ouvrir la fenêtre du duel.');
+    if (IS_PANEL) return;
+    if (!state.panelAway && (state.autoOpen.running || state.autoSell?.running)) {
+      notify('Arrête d’abord Auto-Open et la vente auto : une seule instance doit les faire tourner.');
+      return;
     }
-    render();
+    const res = await bgSend({ type: 'kp-panel-detach' });
+    if (!res || !res.ok) {
+      notify('Impossible d’ouvrir la fenêtre Kyareeh+.');
+      return;
+    }
+    panelApplyWindow({ id: res.id });
   }
 
-  async function duelAttach() {
-    const duel = duelState();
-    if (duel.busy) return;
-    duel.busy = true;
-    const res = await duelSendMessage({ type: 'kp-duel-attach' });
-    duel.busy = false;
-    // Sans réponse du fond, on réaffiche quand même l'application dans le panneau.
-    if (!res || res.ok !== false) duel.detached = false;
-    render();
+  /** Rattacher : ferme la fenêtre ; la page reprend le panneau. */
+  async function panelAttach() {
+    const res = await bgSend({ type: 'kp-panel-attach' });
+    if (IS_PANEL) {
+      if (res && res.ok) return; // le fond ferme cette fenêtre
+      try {
+        const win = await ext.windows.getCurrent();
+        await ext.windows.remove(win.id);
+        return;
+      } catch {
+        /* repli : fermeture directe */
+      }
+      try {
+        window.close();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    panelApplyWindow(null);
   }
 
   function destroyDuelFrame() {
@@ -4308,8 +4437,8 @@
       const note = document.createElement('div');
       note.className = 'kp-duel-failed';
       note.innerHTML = `<b>Le duel intégré n’a pas répondu.</b>
-        <span>La page peut bloquer l’affichage dans le panneau. Ouvre-le dans sa propre fenêtre.</span>
-        <button class="kp-btn is-primary" type="button" data-act="duel-detach">Détacher le duel</button>`;
+        <span>La page peut bloquer l’affichage dans le panneau. Recharge-le, ou rafraîchis la page.</span>
+        <button class="kp-btn is-primary" type="button" data-act="duel-retry">Recharger le duel</button>`;
       duelHostEl.appendChild(note);
     }, DUEL_FRAME_TIMEOUT_MS);
     return duelHostEl;
@@ -4324,18 +4453,16 @@
       duel.frameFailed = false;
       duelHostEl?.querySelector('.kp-duel-failed')?.remove();
     }
-    if (event.data && event.data.type === 'kp-duel-detach-request') {
-      duelDetach();
-    }
   }
 
-  function detachedCardHtml() {
-    return `<div class="kp-duel-away">
-        <div class="kp-duel-away-card">
-          <span class="kp-duel-away-icon" aria-hidden="true">⧉</span>
-          <b>Duel ouvert dans une fenêtre</b>
-          <p>Le combat se joue dans sa propre fenêtre. Ferme-la, ou rattache-la ici pour reprendre dans le panneau.</p>
-          <button class="kp-btn is-primary" type="button" data-act="duel-attach">Rattacher</button>
+  function awayCardHtml() {
+    return `<div class="kp-away-card">
+        <span class="kp-away-icon" aria-hidden="true">⧉</span>
+        <b>Kyareeh+ est ouvert dans une fenêtre</b>
+        <p>Le panneau complet (+Tools et +Duel) tourne dans sa propre fenêtre, avec ses boucles (Auto-Open, vente auto). L’anti-AFK reste actif ici, dans l’onglet.</p>
+        <div class="kp-away-actions">
+          <button class="kp-btn is-primary" type="button" data-act="panel-focus">Afficher</button>
+          <button class="kp-btn" type="button" data-act="panel-attach">Rattacher</button>
         </div>
       </div>`;
   }
@@ -4352,8 +4479,14 @@
           `<button class="kp-mode ${duel.mode === id ? 'is-active' : ''}" type="button" data-act="mode" data-mode="${id}">${label}</button>`
       )
       .join('');
-    const detach =
-      '<button class="kp-mode kp-duel-detach" type="button" data-act="panel-detach" title="Ouvrir la fenêtre Global dans sa propre fenêtre">⧉ Détacher</button>';
+    ui.modes.hidden = Boolean(state.panelAway);
+    if (state.panelAway) {
+      ui.modes.innerHTML = '';
+      return;
+    }
+    const detach = IS_PANEL
+      ? '<button class="kp-mode kp-detach" type="button" data-act="panel-attach" title="Fermer cette fenêtre : le panneau de la page reprend la main">⧉ Rattacher</button>'
+      : '<button class="kp-mode kp-detach" type="button" data-act="panel-detach" title="Ouvrir Kyareeh+ (+Tools et +Duel) dans sa propre fenêtre">⧉ Détacher</button>';
     ui.modes.innerHTML = buttons + detach;
   }
 
@@ -4411,10 +4544,7 @@
     if (duel.mode === 'duel') {
       ui.view.hidden = true;
       ui.slot.hidden = false;
-      if (duel.detached) {
-        destroyDuelFrame();
-        ui.slot.innerHTML = detachedCardHtml();
-      } else if (!duelHostEl) {
+      if (!duelHostEl) {
         ui.slot.replaceChildren(duelHost());
       }
       return;
@@ -4447,6 +4577,18 @@
   }
 
   function errorHTML() {
+    if (RELAY_CODES.includes(state.errorCode)) {
+      return `
+      <div class="kp-empty">
+        <b>${state.errorCode === 'no_kyara_tab' ? 'Aucun onglet kyara.games ouvert' : 'L’onglet kyara.games ne répond pas'}</b>
+        ${esc(state.error || '')}<br>
+        Cette fenêtre lit tes données par un onglet du site : elle réessaie toute seule.
+        <div style="margin-top:14px">
+          <button class="kp-btn is-primary" type="button" data-act="open-site">Ouvrir kyara.games</button>
+          <button class="kp-btn" type="button" data-act="refresh">Réessayer</button>
+        </div>
+      </div>`;
+    }
     return `
       <div class="kp-empty">
         <b>Impossible de charger le compte</b>
@@ -8044,7 +8186,7 @@
   }
 
   function scanAfk() {
-    if (state.settings.antiAfk === false) return;
+    if (IS_PANEL || state.settings.antiAfk === false) return;
     if (afkTimer) return;
     // Le DOM du site bouge beaucoup : on limite les scans à un par seconde.
     const now = Date.now();
@@ -10209,13 +10351,15 @@
         break;
       }
       case 'panel-detach':
+      case 'panel-focus':
         panelDetach();
         break;
-      case 'duel-detach':
-        duelDetach();
+      case 'panel-attach':
+        panelAttach();
         break;
-      case 'duel-attach':
-        duelAttach();
+      case 'duel-retry':
+        destroyDuelFrame();
+        render();
         break;
       case 'toggle':
         toggle();
@@ -11191,7 +11335,6 @@
   }
 
   boot();
-  loadDuelWindowState();
   window.addEventListener('message', onDuelMessage);
 
   // Compte à rebours de l'auto-open : on ne touche qu'au texte, pas au panneau entier.
@@ -11207,6 +11350,7 @@
   setInterval(() => {
     if (
       state.open &&
+      !state.panelAway &&
       state.user &&
       !state.loading &&
       !state.priceRun.running &&

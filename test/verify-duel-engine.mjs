@@ -70,7 +70,7 @@ function duel(a, b, { seed = 1, rules, d = dataT, ben = FILL, benB = ben } = {})
     return [...L, ...pool.filter((n) => !L.includes(n))].slice(0, 5).map((n) => idOf(n, d));
   };
   return E.createMatch({
-    data: d, seed, rules: Object.assign({ speedLuck: 0, speedBand: 1, typeChart: 0, dyingStrike: 0 }, rules),
+    data: d, seed, rules: Object.assign({ speedLuck: 0, speedBand: 1, typeChart: 0, lateGuard: 0 }, rules),
     players: [{ id: 'a', name: 'Alice', deck: mk(a, ben) }, { id: 'b', name: 'Bob', deck: mk(b, benB) }]
   });
 }
@@ -399,6 +399,50 @@ function playOut(s, max = 4000) {
   for (let seed = 0; seed < 100; seed += 1) if (orderOf('V90', 'V70', { speedLuck: 100 }, seed).order[0] === 1) any += 1;
   check('speedLuck 100 % : ordre purement aléatoire', any > 25 && any < 75, String(any));
   check('speedLuck : raison « luck » annoncée', orderOf('V90', 'V70', { speedLuck: 100 }, 1).reason === 'luck');
+  // lateGuard : le champion qui agit en second se met en garde avant le coup du plus rapide.
+  const LG = (n) => ({ lateGuard: n });
+  check('lateGuard : valeur par défaut > 0', R.lateGuard > 0);
+  let s = ready(duel('V90', 'V70', { rules: LG(5) }));
+  let r = turn(s, 'attack', 'attack');
+  const lg = evs(r, 'guard');
+  check('lateGuard : seul le plus lent gagne la garde, avant le premier coup', lg.length === 1 && lg[0].side === 1 && lg[0].source === 'late' && lg[0].amount === 5 && r.events.indexOf(lg[0]) < r.events.indexOf(evs(r, 'move')[0]));
+  check('lateGuard : la garde absorbe le coup du plus rapide', evs(r, 'damage', 'V70')[0].absorbed === 5 && evs(r, 'damage', 'V70')[0].amount === 2 && act(r.state, 1).hp === 28);
+  check('lateGuard : le plus rapide, lui, n’en reçoit pas et encaisse tout', act(r.state, 0).hp === 30 - 7 + 0 || act(r.state, 0).hp === 30 - 7);
+  check('lateGuard : journal explicite', E.describeEvent(lg[0]).includes('en second') && E.describeEvent(lg[0]).includes('+5'));
+  r = turn(ready(duel('V90', 'V70', { rules: LG(0) })), 'attack', 'attack');
+  check('lateGuard 0 : aucune compensation', evs(r, 'guard').length === 0 && act(r.state, 1).hp === 23);
+  r = turn(ready(duel('V70', 'V90', { rules: LG(5) })), 'attack', 'attack');
+  check('lateGuard : suit l’ordre réel (camp 0 plus lent)', evs(r, 'guard').length === 1 && evs(r, 'guard')[0].side === 0);
+  r = turn(ready(duel('V90', 'V70', { rules: LG(5) })), 'attack', 'pass');
+  check('lateGuard : rien si le second passe', evs(r, 'guard').length === 0);
+  r = turn(ready(duel('V90', 'V70', { rules: LG(5) })), 'attack', 'sw:F1');
+  check('lateGuard : rien si le second change de champion', evs(r, 'guard').length === 0);
+  r = turn(ready(duel('V90', 'V70', { rules: LG(5) })), 'attack', 'support');
+  check('lateGuard : aussi pour un soutien (garde de plus)', evs(r, 'guard').filter((e) => e.source === 'late').length === 1);
+  r = turn(ready(duel('V90', 'V70', { rules: LG(5) })), 'pass', 'attack');
+  check('lateGuard : le plus rapide qui passe laisse la garde au lent qui attaque', evs(r, 'guard').length === 1 && evs(r, 'guard')[0].side === 1);
+  s = ready(duel('V90', 'V70', { rules: LG(30) }));
+  r = turn(s, 'attack', 'attack');
+  check('lateGuard : plafond de garde respecté', act(r.state, 1).guard <= R.guardCap && evs(r, 'guard')[0].amount === R.guardCap);
+  s = ready(duel('V90', 'V70', { rules: LG(5) }));
+  r = turn(s, 'pass', 'attack');
+  r = turn(ready(r.state), 'pass', 'pass');
+  check('lateGuard : la garde s’use comme les autres au tour suivant', act(r.state, 1).guard === 0);
+  // Égalité de vitesse : le second tiré au sort en profite aussi, et un seul des deux.
+  syn('Egal1', { speed: 75 });
+  syn('Egal2', { speed: 75 });
+  r = turn(ready(duel('Egal1', 'Egal2', { rules: LG(5), seed: 4 })), 'attack', 'attack');
+  check('lateGuard : égalité de vitesse, le second tiré au sort est protégé', evs(r, 'guard').length === 1 && evs(r, 'guard')[0].side === evs(r, 'turnOrder')[0].order[1]);
+  // Priorité (Subaru) : le plus rapide agit alors en second et se protège.
+  {
+    const pool = E.mythics(data);
+    const sub = pool.find((c) => c.name === 'Subaru Natsuki');
+    const fast = pool.filter((c) => c.speed > sub.speed + 3);
+    const slow = pool.filter((c) => c.speed < 75 && c.id !== sub.id);
+    const st = E.createMatch({ data, seed: 3, rules: LG(5), players: [{ name: 'S', deck: [sub, ...slow.slice(0, 4)].map((c) => c.id) }, { name: 'F', deck: fast.slice(0, 5).map((c) => c.id) }] });
+    const rr = turn(ready(st), 'attack', 'attack');
+    check('lateGuard : face à la priorité de Subaru, l’adversaire plus rapide agit en second et se protège', evs(rr, 'turnOrder')[0].reason === 'subaru' && evs(rr, 'guard').filter((e) => e.source === 'late').every((e) => e.side === 1) && evs(rr, 'guard').some((e) => e.source === 'late'));
+  }
 }
 
 // ─── 7. Types et efficacité ───────────────────────────────────────────────────────────────────
@@ -867,21 +911,91 @@ function playOut(s, max = 4000) {
   r = turn(s, 'pass', 'pass');
   check('les deux derniers K.O. ensemble : match nul', r.state.winner === 'draw' && r.state.phase === 'ended');
   check('match nul : journal', E.describeEvent(evs(r, 'end')[0]).startsWith('Match nul'));
-  // Dernier souffle (réglable).
+  // Un champion mis K.O. avant d'agir n'agit plus du tout ce tour-ci (plus de « dernier souffle »).
   syn('Duel2', { speed: 90, moves: [{ damage: 50 }] });
   syn('Duel3', { speed: 10, hp: 20, moves: [{ damage: 7 }] });
-  s = ready(duel('Duel2', 'Duel3', { rules: { dyingStrike: 0 } }));
+  check('plus de règle dyingStrike dans E.RULES', !('dyingStrike' in R));
+  s = ready(duel('Duel2', 'Duel3'));
   r = turn(s, 'attack', 'attack');
-  check('dyingStrike 0 : le K.O. avant d’agir perd sa capacité', evs(r, 'fail').length === 1 && act(r.state, 0).hp === 30);
-  s = ready(duel('Duel2', 'Duel3', { rules: { dyingStrike: 1 } }));
+  check('K.O. avant d’agir : la capacité du K.O. est annulée (« fail » ko)', evs(r, 'fail').length === 1 && evs(r, 'fail')[0].reason === 'ko' && evs(r, 'fail')[0].side === 1);
+  check('K.O. avant d’agir : une seule capacité jouée, le vainqueur est intact', evs(r, 'move').length === 1 && evs(r, 'move')[0].side === 0 && act(r.state, 0).hp === 30);
+  check('K.O. avant d’agir : aucun dégât subi par le camp rapide', evs(r, 'damage').every((e) => e.side === 1) && evs(r, 'status').length === 0);
+  check('K.O. avant d’agir : journal clair', E.describeEvent(evs(r, 'fail')[0]).includes('KO') && E.describeEvent(evs(r, 'fail')[0]).includes('n’a pas lieu'));
+  // Avec les règles par défaut (compensation du second incluse), même résultat si le coup reste létal.
+  s = ready(duel('Duel2', 'Duel3', { rules: { lateGuard: R.lateGuard } }));
   r = turn(s, 'attack', 'attack');
-  check('dyingStrike 1 : le champion K.O. joue quand même sa capacité', evs(r, 'fail').length === 0 && evs(r, 'move').length === 2 && evs(r, 'move')[1].dying === true && bench(r.state, 0, 'Duel2').hp === 30 - (7 + 2));
-  s = ready(duel('Duel2', 'Duel3', { rules: { dyingStrike: 1 } }));
-  r = turn(s, 'attack', 'pass');
-  check('dyingStrike 1 : un choix « passer » reste sans effet', evs(r, 'move').length === 1);
-  s = ready(duel('Duel2', 'Duel3', { rules: { dyingStrike: 1 } }));
+  check('règles par défaut : le K.O. avant d’agir ne joue toujours pas', evs(r, 'fail').length === 1 && evs(r, 'move').length === 1 && act(r.state, 0).hp === 30);
+  // Passer / changer : rien de plus (le changement a lieu avant, le coup frappe le nouvel actif).
+  r = turn(ready(duel('Duel2', 'Duel3')), 'attack', 'pass');
+  check('adversaire qui passe : une seule capacité', evs(r, 'move').length === 1 && evs(r, 'fail').length === 0);
+  s = ready(duel('Duel2', 'Duel3'));
   r = turn(s, 'attack', 'sw:F1');
-  check('dyingStrike 1 : un changement fait encaisser le coup au nouvel actif', evs(r, 'switch').length === 1 && evs(r, 'move')[0].target.name === 'F1' && !bench(r.state, 1, 'F1').alive && bench(r.state, 1, 'Duel3').hp === 20);
+  check('un changement fait encaisser le coup au nouvel actif, le rappelé n’agit pas', evs(r, 'switch').length === 1 && evs(r, 'move').length === 1 && evs(r, 'move')[0].target.name === 'F1' && !bench(r.state, 1, 'F1').alive && bench(r.state, 1, 'Duel3').hp === 20);
+  // Même quand la riposte aurait été létale : elle n'a pas lieu.
+  s = ready(duel('Duel2', 'Duel3'));
+  act(s, 0).hp = 3;
+  r = turn(s, 'attack', 'attack');
+  check('même quand la riposte aurait été létale : elle n’a pas lieu', act(r.state, 0).alive && act(r.state, 0).hp === 3 && !act(r.state, 1).alive && r.state.phase === 'replace');
+  // Hâte : le champion K.O. perd sa Hâte avec ses statuts ; un lanceur hâté qui tue au premier coup ne frappe pas deux fois.
+  s = ready(duel('Duel3', 'Duel2'));
+  act(s, 0).statuses.haste = 1;
+  r = turn(s, 'attack', 'attack');
+  check('Hâte : le champion K.O. avant d’agir n’utilise pas sa Hâte', evs(r, 'haste').length === 0 && evs(r, 'move').length === 1 && evs(r, 'fail').length === 1 && !act(r.state, 0).statuses.haste);
+  s = ready(duel('Duel2', 'Duel3'));
+  act(s, 0).statuses.haste = 1;
+  r = turn(s, 'attack', 'attack');
+  check('Hâte : un seul coup si le premier tue, et le K.O. ne riposte pas', evs(r, 'damage', 'Duel3').length === 1 && evs(r, 'damage', 'Duel3')[0].hit === 1 && evs(r, 'fail').length === 1 && act(r.state, 0).hp === 30);
+  // Action bonus (extraTurn) : un K.O. avant d'agir n'en profite pas ; une chute après avoir agi l'annule.
+  const only = (o) => Object.assign({ damage: 0, guard: 0 }, o);
+  syn('RejoueL', { speed: 10, hp: 30, moves: [{ damage: 3 }, {}, only({ extraTurn: true, damage: 2 })] });
+  s = ready(duel('Duel2', 'RejoueL'));
+  r = turn(s, 'attack', 'ultimate');
+  check('extraTurn : le K.O. avant d’agir ne gagne pas d’action bonus', evs(r, 'extraTurn').length === 0 && evs(r, 'fail').length === 1 && r.state.phase === 'replace' && r.state.bonus === false && !r.state.players[1].extra);
+  check('extraTurn : et son ultime n’est pas dépensé', bench(r.state, 1, 'RejoueL').ultimateUsed !== true && r.state.players[1].chakra === R.maxChakra);
+  syn('RejoueR', { speed: 90, hp: 30, moves: [{ damage: 3 }, {}, only({ extraTurn: true, damage: 2 })] });
+  syn('Frappe', { speed: 10, atk: 2, moves: [{ damage: 50 }] });
+  s = ready(duel('RejoueR', 'Frappe'));
+  act(s, 0).hp = 4;
+  r = turn(s, 'ultimate', 'attack');
+  check('extraTurn : abattu après avoir agi, l’action bonus est annulée', !act(r.state, 0).alive && r.state.bonus === false && r.state.phase === 'replace' && !r.state.players[0].extra);
+  // Deux actions bonus : le premier à jouer abat l'autre, dont l'action bonus n'a pas lieu.
+  syn('BonusA', { speed: 90, hp: 30, moves: [{ damage: 3 }, {}, only({ extraTurn: true, damage: 2 })] });
+  syn('BonusB', { speed: 80, hp: 30, moves: [{ damage: 3 }, {}, only({ extraTurn: true, damage: 2 })] });
+  s = ready(duel('BonusA', 'BonusB'));
+  act(s, 1).hp = 7;
+  r = turn(s, 'ultimate', 'ultimate');
+  check('deux extraTurn : les deux ont une action bonus', r.state.bonus === true && same(E.pendingPlayers(r.state), [0, 1]) && evs(r, 'extraTurn').length === 2);
+  const hpA = act(r.state, 0).hp;
+  const rb2 = turn(r.state, 'attack', 'attack');
+  check('action bonus : le plus rapide abat l’autre, dont l’action bonus échoue', evs(rb2, 'move').length === 1 && evs(rb2, 'move')[0].side === 0 && evs(rb2, 'fail').length === 1 && evs(rb2, 'fail')[0].side === 1 && act(rb2.state, 0).hp === hpA);
+  check('action bonus : phase de remplacement ensuite', rb2.state.phase === 'replace' && same(E.pendingPlayers(rb2.state), [1]));
+  // Invariant sur des duels complets de l'IA : jamais de « move » d'un champion déjà K.O. plus tôt dans le même tour.
+  {
+    let bad = 0;
+    const pool = E.mythics(data);
+    for (let seed = 1; seed <= 12; seed += 1) {
+      let st = E.createMatch({ data, seed, players: [{ name: 'A', deck: pool.slice(seed * 7, seed * 7 + 5).map((c) => c.id) }, { name: 'B', deck: pool.slice(seed * 11 + 3, seed * 11 + 8).map((c) => c.id) }] });
+      let n = 0;
+      while (st.phase !== 'ended' && n < 4000) {
+        let next = st;
+        const events = [];
+        for (const p of E.pendingPlayers(st)) {
+          const rr = E.submit(next, p, E.chooseAction(st, p));
+          next = rr.state;
+          events.push(...rr.events);
+        }
+        const down = new Set();
+        for (const e of events) {
+          if (e.type === 'turn') down.clear();
+          if (e.type === 'ko') down.add(e.side + ':' + e.index);
+          if (e.type === 'move' && down.has(e.side + ':' + e.index)) bad += 1;
+        }
+        st = next;
+        n += 1;
+      }
+    }
+    check('12 duels complets de l’IA : jamais de capacité jouée par un champion déjà K.O. dans le même tour', bad === 0, String(bad));
+  }
   // Fin par la limite de tours : % de PV restants.
   s = ready(duel('Pivot', 'Cible2', { rules: { maxTurns: 2, fatigueTurn: 0 } }));
   bench(s, 1, 'F1').hp = 10;
@@ -1290,7 +1404,7 @@ function playOut(s, max = 4000) {
       const line = E.describeEvent(e);
       types.set(e.type, (types.get(e.type) ?? 0) + 1);
       if (typeof line !== 'string' || /undefined|NaN|\[object/.test(line)) bad.push(`${e.type}: ${line}`);
-      if (line === '' && !['chosen', 'turnEnd'].includes(e.type)) bad.push(`${e.type} sans texte`);
+      if (line === '' && !['chosen', 'turnEnd'].includes(e.type) && !(e.type === 'turnOrder' && e.reason === 'single')) bad.push(`${e.type} sans texte`);
       if ('side' in e && 'index' in e && e.side >= 0) {
         champEvents += 1;
         if (e.name && e.champType && /^#[0-9a-f]{6}$/.test(e.color) && E.TYPES[e.champType].color === e.color) champOk += 1;
@@ -1335,6 +1449,7 @@ function playOut(s, max = 4000) {
     [`${R.supportCost} chakra`, 'coût du soutien'],
     [`+${R.atkBonusCap} ATQ`, 'plafond d’ATQ'],
     [`plafond de ${R.guardCap}`, 'plafond de garde'],
+    [`gagne ${R.lateGuard} garde`, 'garde du champion qui agit en second'],
     [`plafond de ${R.buffCap}`, 'plafond des préparés'],
     [`${R.hasteSecondHitPct} %`, 'second coup de Hâte'],
     [`×${fr(R.typeStrong)}`, 'efficacité forte'],
@@ -1353,7 +1468,7 @@ function playOut(s, max = 4000) {
   check('règles : coût de changement', text.includes(`${R.switchCost} chakra`) && R.switchCost === 0);
   for (const [t, def] of Object.entries(E.TYPES)) check(`règles : type ${t} avec sa couleur ${def.color}`, text.includes(t) && text.includes(def.color));
   for (const word of ['Poison', 'Malédiction', 'Faiblesse', 'Rage', 'Régénération', 'Hâte', 'Subaru', 'Ram', 'abandon', 'garde', 'invulnérab', 'sacrifi', 'ranim', 'rejoue', 'saute',
-    'banc', 'remplaç', 'changement', 'secret', 'simultané', 'vitesse', 'dernier souffle', 'nouvel actif', 'efficac', 'épuisement', 'entrée en jeu', 'Ram face à Rem']) {
+    'banc', 'remplaç', 'changement', 'secret', 'simultané', 'vitesse', 'agit en second', 'ne joue plus', 'nouvel actif', 'efficac', 'épuisement', 'entrée en jeu', 'Ram face à Rem']) {
     check(`règles : mentionne « ${word} »`, text.toLowerCase().includes(word.toLowerCase()));
   }
   check('règles : plus aucune trace du jeu alterné v1 (manche / 5 contre 5)', !/manche|arène 5 contre 5|joue un tour/i.test(text.replace('Ram face à Rem', '')));
@@ -1374,7 +1489,7 @@ function playOut(s, max = 4000) {
   };
   const pick = (a) => a[Math.floor(rnd() * a.length)];
   const variants = [
-    {}, { dyingStrike: 0 }, { benchDots: 1 }, { switchCost: 1 }, { typeChart: 0 }, { guardDecayPct: 0 }, { guardDecayPct: 50, benchGuardDecayPct: 50 },
+    {}, { lateGuard: 0 }, { lateGuard: 12 }, { benchDots: 1 }, { switchCost: 1 }, { typeChart: 0 }, { guardDecayPct: 0 }, { guardDecayPct: 50, benchGuardDecayPct: 50 },
     { speedBand: 8 }, { speedLuck: 50 }, { fatigueTurn: 0, maxTurns: 25 }, { maxChakra: 10, startChakra: 6, chakraPerTurn: 3 }, { damagePct: 150 }, { damagePct: 40, fatigueTurn: 10 }
   ];
   let steps = 0;

@@ -1,3 +1,6 @@
+/* Fenêtre détachée de Kyareeh+ (panel.html).
+ * Le panneau lui-même vit dans un Shadow DOM : sa mise en page plein écran est dans
+ * content/ui.css (`.kp-panel.is-window`), pas ici. Cette feuille ne règle que la page hôte. */
 html,
 body {
   height: 100%;
@@ -5,28 +8,4 @@ body {
   overflow: hidden;
   background: #0d0e13;
   color-scheme: dark;
-}
-
-#kyara-plus-root {
-  height: 100%;
-}
-
-/* Le panneau remplit la fenêtre détachée, sans bouton flottant ni marge. */
-.kp-fab {
-  display: none !important;
-}
-
-.kp-panel {
-  position: fixed !important;
-  inset: 0 !important;
-  width: 100vw !important;
-  max-width: none !important;
-  height: 100vh !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  box-shadow: none !important;
-}
-
-.kp-panel .kp-view {
-  padding-bottom: 18px;
 }

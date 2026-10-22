@@ -7,7 +7,11 @@
  *   2. le service worker répond aux messages (version du manifeste) ;
  *   3. le content script s'injecte et monte le panneau dans un Shadow DOM ;
  *   4. la popup s'ouvre et affiche la version ;
- *   5. le panneau (mode harness, sans compte) rend chaque onglet sans exception JS.
+ *   5. le panneau (mode harness, sans compte) rend chaque onglet sans exception JS ;
+ *   6. « Détacher » : le panneau complet s'ouvre dans sa propre fenêtre (panel/panel.html),
+ *      une seule instance, les données passent par le relais vers l'onglet du site, +Duel y
+ *      charge l'application du duel, fermer le panneau de la page ne vide pas la fenêtre,
+ *      « Rattacher » (depuis la fenêtre, depuis la page, ou fermeture manuelle) rend la main.
  *
  * Le harness local est servi par test/server.cjs ; le content script n'étant
  * autorisé que sur https://kyara.games/*, une copie de test du paquet ajoute
@@ -211,6 +215,14 @@ function makeTestPackage() {
   for (const war of manifest.web_accessible_resources ?? []) {
     war.matches = [...new Set([...(war.matches ?? []), local])];
   }
+  // Le relais de la fenêtre détachée cherche un onglet kyara.games : dans la copie de test,
+  // c'est l'onglet du serveur local (le paquet publié, lui, n'est pas modifié).
+  manifest.host_permissions = [...new Set([...(manifest.host_permissions ?? []), local])];
+  const bgPath = join(dir, 'background', 'background.js');
+  const bg = readFileSync(bgPath, 'utf8');
+  const patched = bg.replace("const KYARA_TABS = 'https://kyara.games/*';", `const KYARA_TABS = '${local}';`);
+  if (patched === bg) throw new Error('background.js : KYARA_TABS introuvable (copie de test)');
+  writeFileSync(bgPath, patched, 'utf8');
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   return dir;
 }
@@ -379,8 +391,8 @@ async function visualPass() {
            interval: Boolean(root.querySelector('[data-autosell-interval]')),
            max: Boolean(root.querySelector('[data-autosell-max]')),
            estimate: root.querySelector('.kp-autosell-estimate')?.innerText || '',
-           detach: Boolean(root.querySelector('.kp-duel-detach')),
-           detachAct: root.querySelector('.kp-duel-detach')?.getAttribute('data-act') || '',
+           detach: Boolean(root.querySelector('.kp-detach')),
+           detachAct: root.querySelector('.kp-detach')?.getAttribute('data-act') || '',
            sound: Boolean(root.querySelector('#kp-sound-btn') && root.querySelector('#kp-sound-range')),
            delay: window.__kyaraPlus.state.settings.autoSellDelayMinSec,
            delayMax: window.__kyaraPlus.state.settings.autoSellDelayMaxSec,
@@ -793,6 +805,227 @@ async function visualPass() {
   }
 }
 
+/* --- Détacher : le panneau complet dans sa propre fenêtre -------------- */
+
+/** Fenêtres/onglets qui affichent panel/panel.html. */
+async function panelPages(cdp, id) {
+  const { targetInfos } = await cdp.send('Target.getTargets');
+  return targetInfos.filter((t) => t.type === 'page' && t.url.startsWith(`chrome-extension://${id}/panel/panel.html`));
+}
+
+const ROOT_JS = `document.querySelector('#kyara-plus-root').shadowRoot`;
+
+async function detachPass(cdp, id) {
+  console.log('\n— Détacher : panneau complet dans sa fenêtre —');
+
+  /* Onglet « site » : une page servie par le serveur local, sans le harness (un seul panneau :
+   * celui du content script). Les requêtes /api/ du content script sont simulées par CDP. */
+  const API = {
+    '/api/me/bootstrap': { me: { id: 4242, pseudo: 'Testeur', chakra: 777, freePacks: 0 } },
+    '/api/me': { id: 4242, pseudo: 'Testeur', chakra: 777, freePacks: 0 },
+    '/api/me/collection': [],
+    '/api/characters': [],
+    '/api/config': {}
+  };
+  const apiHits = [];
+  const { targetId: siteTarget } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  const site = await attach(cdp, siteTarget);
+  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: 'http://127.0.0.1:8787/api/*' }] }, site);
+  const onPaused = (msg) => {
+    if (msg.method !== 'Fetch.requestPaused' || msg.sessionId !== site) return;
+    const { requestId, request } = msg.params;
+    const path = new URL(request.url).pathname;
+    apiHits.push(path);
+    const body = API[path];
+    cdp
+      .send(
+        'Fetch.fulfillRequest',
+        {
+          requestId,
+          responseCode: body === undefined ? 404 : 200,
+          responseHeaders: [{ name: 'content-type', value: 'application/json' }],
+          body: Buffer.from(JSON.stringify(body === undefined ? { error: 'not_found' } : body)).toString('base64')
+        },
+        site
+      )
+      .catch(() => {});
+  };
+  cdp.listeners.add(onPaused);
+  await cdp.send('Page.navigate', { url: 'http://127.0.0.1:8787/duel/fx-demo.html' }, site);
+  await waitFor(() => evaluate(cdp, site, `Boolean(${ROOT_JS}?.querySelector('.kp-panel'))`), {
+    label: 'panneau du content script (page du site)'
+  });
+  const siteJs = (expr) => evaluate(cdp, site, expr);
+  // Le panneau peut déjà être ouvert (état partagé kyareeh.ui.v1) : on ne bascule que s'il est fermé.
+  const openSitePanel = () =>
+    siteJs(`(() => { const r = ${ROOT_JS}; if (r.querySelector('.kp-panel').hidden) r.querySelector('.kp-fab').click(); return true; })()`);
+  await openSitePanel();
+
+  const before = await siteJs(
+    `(() => { const r = ${ROOT_JS}; return { open: !r.querySelector('.kp-panel').hidden, detach: r.querySelectorAll('[data-act="panel-detach"]').length }; })()`
+  );
+  check('Page : un seul bouton « Détacher » dans l’en-tête', before.open && before.detach === 1, JSON.stringify(before));
+
+  const winTargetOf = async () => (await panelPages(cdp, id))[0];
+  const detach = async () => {
+    await siteJs(`${ROOT_JS}.querySelector('[data-act="panel-detach"]').click(); true`);
+    return waitFor(winTargetOf, { label: 'fenêtre détachée', timeout: 15000 });
+  };
+  const siteAway = (away) =>
+    waitFor(
+      async () => {
+        const st = await siteJs(
+          `(() => { const r = ${ROOT_JS}; const a = r.querySelector('#kp-away'); return { away: !a.hidden, text: a.innerText, modes: r.querySelector('#kp-modes').hidden, view: r.querySelector('#kp-view').hidden, detach: r.querySelectorAll('[data-act="panel-detach"]').length }; })()`
+        );
+        return st.away === away ? st : false;
+      },
+      { label: away ? 'page : carte « ouvert dans une fenêtre »' : 'page : panneau repris', timeout: 12000 }
+    );
+
+  /* 1. Détacher */
+  const win = await detach();
+  const winSession = await attach(cdp, win.targetId);
+  const winJs = (expr) => evaluate(cdp, winSession, expr);
+  const hostWin = await cdp.send('Browser.getWindowForTarget', { targetId: win.targetId });
+  const siteWin = await cdp.send('Browser.getWindowForTarget', { targetId: siteTarget });
+  check('Détacher ouvre panel/panel.html dans une fenêtre à part', hostWin.windowId !== siteWin.windowId, win.url);
+
+  await waitFor(
+    () =>
+      winJs(
+        `(() => { const r = ${ROOT_JS}; return Boolean(r?.querySelector('.kp-panel') && r.querySelectorAll('#kp-tabs button').length >= 8 && /777/.test(r.querySelector('#kp-stats')?.innerText || '')); })()`
+      ),
+    { label: 'fenêtre : panneau monté avec les données du compte', timeout: 25000 }
+  );
+  check('Fenêtre : les données du compte passent par le relais', apiHits.includes('/api/me/bootstrap'), apiHits.slice(0, 4).join(' '));
+
+  const layout = await winJs(
+    `(() => { const r = ${ROOT_JS}; const p = r.querySelector('.kp-panel'); const b = p.getBoundingClientRect();
+       return { hidden: p.hidden, x: Math.round(b.left), y: Math.round(b.top), w: Math.round(b.width), h: Math.round(b.height), vw: innerWidth, vh: innerHeight,
+                fab: getComputedStyle(r.querySelector('.kp-fab')).display,
+                acts: [...r.querySelectorAll('#kp-modes [data-act]')].map((b) => b.dataset.act).join(',') }; })()`
+  );
+  check(
+    'Fenêtre : le panneau remplit toute la fenêtre, sans bouton flottant',
+    !layout.hidden && layout.x === 0 && layout.y === 0 && Math.abs(layout.w - layout.vw) <= 1 && Math.abs(layout.h - layout.vh) <= 1 && layout.fab === 'none',
+    JSON.stringify(layout)
+  );
+  check('Fenêtre : « Rattacher » remplace « Détacher »', layout.acts === 'mode,mode,panel-attach', layout.acts);
+
+  const away = await siteAway(true);
+  check(
+    'Page : carte « Kyareeh+ est ouvert dans une fenêtre » (Afficher / Rattacher)',
+    /ouvert dans une fenêtre/.test(away.text) && /Afficher/.test(away.text) && /Rattacher/.test(away.text) && away.modes && away.view,
+    away.text.replace(/\s+/g, ' ').slice(0, 90)
+  );
+
+  /* 2. Une seule fenêtre : double envoi + « Afficher » */
+  const twice = JSON.parse(
+    await winJs(
+      `Promise.all([1, 2].map(() => chrome.runtime.sendMessage({ type: 'kp-panel-detach' }))).then((r) => JSON.stringify(r))`
+    )
+  );
+  await siteJs(`${ROOT_JS}.querySelector('[data-act="panel-focus"]').click(); true`);
+  await sleep(700);
+  const count = (await panelPages(cdp, id)).length;
+  check(
+    'Une seule instance : Détacher/Afficher remet la fenêtre au premier plan',
+    count === 1 && twice.every((r) => r.ok && r.reused),
+    `${count} fenêtre(s), ${JSON.stringify(twice)}`
+  );
+
+  /* 3. La panne d'origine : fermer le panneau de la page vidait la fenêtre (clé kyareeh.ui.v1) */
+  await siteJs(`${ROOT_JS}.querySelector('[data-act="close"]').click(); true`);
+  await sleep(1200);
+  const stillOpen = await winJs(
+    `!${ROOT_JS}.querySelector('.kp-panel').hidden && ${ROOT_JS}.querySelector('.kp-panel').getBoundingClientRect().width > 300`
+  );
+  check('Fermer le panneau de la page ne vide pas la fenêtre', stillOpen === true);
+  await openSitePanel();
+
+  /* 4. +Duel dans la fenêtre */
+  await winJs(`${ROOT_JS}.querySelector('[data-act="mode"][data-mode="duel"]').click(); true`);
+  const duel = await waitFor(
+    async () => {
+      const st = await winJs(
+        `(() => { const f = ${ROOT_JS}.querySelector('.kp-duel-frame'); if (!f) return false; const d = f.contentDocument;
+           if (!d) return { src: f.src, tabs: 0, main: '' };
+           return { src: f.src, tabs: d.querySelectorAll('.kd-tab').length, main: d.getElementById('kd-main')?.innerText || '',
+                    api: Boolean(f.contentWindow.__kyaraDuel) }; })()`
+      );
+      return st && st.tabs >= 4 && st.api ? st : false;
+    },
+    { label: '+Duel dans la fenêtre', timeout: 20000 }
+  );
+  check(
+    '+Duel : l’application du duel se charge dans la fenêtre',
+    duel.src.startsWith(`chrome-extension://${id}/duel/duel.html`) && !/Chargement du duel/.test(duel.main),
+    `${duel.tabs} onglets · ${duel.src}`
+  );
+  const profile = await waitFor(
+    async () => {
+      const who = await winJs(`${ROOT_JS}.querySelector('.kp-duel-frame').contentDocument.querySelector('.kd-who')?.innerText || ''`);
+      return /Testeur/.test(who) ? who : false;
+    },
+    { label: 'profil du duel (storage.local)', timeout: 15000 }
+  ).catch(() => '');
+  check('+Duel : le profil du joueur est lu depuis le stockage', /Testeur/.test(profile), profile);
+  await sleep(6500); // plus que le délai « le duel n’a pas répondu »
+  const duelOk = await winJs(
+    `(() => { const f = ${ROOT_JS}.querySelector('.kp-duel-frame'); return { failed: Boolean(${ROOT_JS}.querySelector('.kp-duel-failed')), extra: /Détacher|Rattacher/.test(f.contentDocument.body.innerText) }; })()`
+  );
+  check('+Duel : prêt (pas d’avertissement) et sans second « Détacher »', !duelOk.failed && !duelOk.extra, JSON.stringify(duelOk));
+
+  /* 5. Rattacher depuis la fenêtre */
+  await winJs(`${ROOT_JS}.querySelector('[data-act="panel-attach"]').click(); true`).catch(() => {});
+  await waitFor(async () => (await panelPages(cdp, id)).length === 0, { label: 'fermeture de la fenêtre (Rattacher)', timeout: 12000 });
+  const back = await siteAway(false);
+  check('Rattacher (depuis la fenêtre) : la fenêtre se ferme, la page reprend le panneau', !back.modes && !back.view && back.detach === 1);
+
+  /* 6. Rattacher depuis la page */
+  await detach();
+  await siteAway(true);
+  await siteJs(`${ROOT_JS}.querySelector('[data-act="panel-attach"]').click(); true`);
+  await waitFor(async () => (await panelPages(cdp, id)).length === 0, { label: 'fermeture de la fenêtre (Rattacher, page)', timeout: 12000 });
+  await siteAway(false);
+  check('Rattacher (depuis la page) : la fenêtre se ferme', true);
+
+  /* 7. Fermeture manuelle de la fenêtre */
+  const manual = await detach();
+  await siteAway(true);
+  await cdp.send('Target.closeTarget', { targetId: manual.targetId });
+  await siteAway(false);
+  check('Fermeture manuelle de la fenêtre : la page reprend le panneau', (await panelPages(cdp, id)).length === 0);
+
+  /* 8. Fenêtre sans onglet du site : message clair en français */
+  const last = await detach();
+  const lastSession = await attach(cdp, last.targetId);
+  await waitFor(() => evaluate(cdp, lastSession, `Boolean(${ROOT_JS}?.querySelector('#kp-tabs button'))`), {
+    label: 'fenêtre (sans site)',
+    timeout: 15000
+  });
+  // Tous les onglets « site » (le harness des étapes précédentes aussi) sont fermés.
+  const { targetInfos } = await cdp.send('Target.getTargets');
+  for (const t of targetInfos.filter((x) => x.type === 'page' && x.url.startsWith('http://127.0.0.1:8787/'))) {
+    await cdp.send('Target.closeTarget', { targetId: t.targetId });
+  }
+  await sleep(500);
+  await evaluate(cdp, lastSession, `${ROOT_JS}.querySelector('[data-act="refresh"]').click(); true`);
+  const noTab = await waitFor(
+    async () => {
+      const text = await evaluate(cdp, lastSession, `${ROOT_JS}.querySelector('#kp-banner').innerText`);
+      return /Aucun onglet kyara\.games/.test(text) ? text : false;
+    },
+    { label: 'message « aucun onglet kyara.games »', timeout: 15000 }
+  ).catch(async () =>
+    `introuvable — bannière « ${await evaluate(cdp, lastSession, `${ROOT_JS}.querySelector('#kp-banner').innerText`)} », pied « ${await evaluate(cdp, lastSession, `${ROOT_JS}.querySelector('#kp-foot').innerText`)} »`
+  );
+  check('Sans onglet kyara.games : message clair dans la fenêtre', /Aucun onglet kyara\.games ouvert/.test(noTab), noTab.replace(/\s+/g, ' ').slice(0, 110));
+  await cdp.send('Target.closeTarget', { targetId: last.targetId });
+  await waitFor(async () => (await panelPages(cdp, id)).length === 0, { label: 'nettoyage', timeout: 8000 });
+  cdp.listeners.delete(onPaused);
+}
+
 async function extensionPass() {
   console.log('\n— Extension Chrome réelle —');
   const ext = makeTestPackage();
@@ -837,7 +1070,10 @@ async function extensionPass() {
     /* Content script : deux panneaux attendus (harness de page + content script). */
     const { sessionId } = await openTab(cdp, HARNESS);
     const roots = await waitFor(
-      () => evaluate(cdp, sessionId, `document.querySelectorAll('#kyara-plus-root').length`),
+      async () => {
+        const count = await evaluate(cdp, sessionId, `document.querySelectorAll('#kyara-plus-root').length`);
+        return count >= 2 ? count : false;
+      },
       { label: 'injection du content script' }
     );
     check('Content script injecté', roots >= 2, `${roots} panneau(x)`);
@@ -895,7 +1131,8 @@ async function extensionPass() {
         ),
       { label: 'fenêtre Global autonome', timeout: 15000 }
     );
-    check('Fenêtre Global autonome montée', panelMounted === true);
+    check('Page panel.html montée hors du site (onglet)', panelMounted === true);
+    await cdp.send('Target.closeTarget', { targetId: panelTarget });
 
     const reply = await evaluate(
       cdp,
@@ -909,6 +1146,8 @@ async function extensionPass() {
        })`
     );
     check('Message au script de fond', reply !== 'timeout' && JSON.parse(reply)?.ok === true, reply);
+
+    await detachPass(cdp, id);
   } finally {
     cdp?.ws.close();
     await closeChrome(proc);

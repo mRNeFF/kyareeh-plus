@@ -1,5 +1,5 @@
-/* Fenêtre Global autonome : le panneau n'a pas la session kyara.games.
- * Les appels /api/... sont relayés vers un onglet kyara.games ouvert. */
+/* Fenêtre détachée : cette page d'extension n'a pas la session kyara.games.
+ * Les appels /api/... sont relayés (script de fond) vers un onglet kyara.games ouvert. */
 (() => {
   'use strict';
   const ext = globalThis.browser ?? globalThis.chrome;
@@ -35,7 +35,9 @@
     }
 
     if (!relay || !relay.ok) {
-      return new Response(JSON.stringify({ error: relay?.error || 'Relais indisponible' }), {
+      // `code` (no_kyara_tab, kyara_tab_unready…) est traduit en français par le panneau.
+      const error = relay?.error || 'Relais indisponible';
+      return new Response(JSON.stringify({ error, code: relay?.code || undefined }), {
         status: Number(relay?.status) || 503,
         headers: { 'content-type': 'application/json' }
       });

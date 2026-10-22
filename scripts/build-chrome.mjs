@@ -14,7 +14,7 @@
  *   + minimum_chrome_version
  *   + icône 128 (obligatoire pour la fiche Chrome Web Store)
  *
- * Le code (content/, background/, popup/) est copié **à l'identique** : aucun
+ * Le code (content/, background/, popup/, panel/, duel/) est copié **à l'identique** : aucun
  * transpileur, aucune minification, exactement comme le paquet AMO.
  *
  * Sorties :
@@ -38,7 +38,7 @@ const ARTIFACTS = join(ROOT, 'web-ext-artifacts');
 const MIN_CHROME = '116';
 
 /** Dossiers copiés tels quels dans le paquet (mêmes fichiers que le zip AMO). */
-const COPY_DIRS = ['background', 'content', 'popup', 'icons', 'panel'];
+const COPY_DIRS = ['background', 'content', 'popup', 'icons', 'panel', 'duel'];
 
 function fail(message) {
   console.error(`\n✗ ${message}\n`);
@@ -94,6 +94,9 @@ writeFileSync(join(DIST, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}
 const referenced = [
   manifest.background.service_worker,
   manifest.action?.default_popup,
+  // Pages d'extension ouvertes par le code (fenêtre détachée, iframe du duel) : hors manifeste.
+  'panel/panel.html',
+  'duel/duel.html',
   ...(manifest.content_scripts ?? []).flatMap((cs) => cs.js ?? []),
   ...Object.values(manifest.icons ?? {}),
   ...(manifest.web_accessible_resources ?? []).flatMap((war) =>

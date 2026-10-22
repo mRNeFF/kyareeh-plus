@@ -3883,10 +3883,10 @@ img.kp-avatar {
 .kp-head { flex-wrap: wrap; }
 .kp-modes { flex-basis: 100%; }
 
-.kp-modes .kp-duel-detach { flex: none; padding: 6px 14px; background: transparent; border-color: #3a3f4e; color: #f3f4f7; }
-.kp-modes .kp-duel-detach:hover { background: #20232c; border-color: #ff4d2e; }
+.kp-modes .kp-detach { flex: none; padding: 6px 14px; background: transparent; border-color: #3a3f4e; color: #f3f4f7; }
+.kp-modes .kp-detach:hover { background: #20232c; border-color: #ff4d2e; }
 
-/* ---- +Duel : application intégrée (iframe) et carte « ouvert dans une fenêtre » ---- */
+/* ---- +Duel : application intégrée (iframe) ---- */
 .kp-view[hidden] { display: none !important; }
 .kp-duel-slot { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .kp-duel-slot[hidden] { display: none !important; }
@@ -3897,12 +3897,6 @@ img.kp-avatar {
 .kp-panel.is-duel .kp-banner { display: none; }
 .kp-duel-failed { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: min(420px, calc(100% - 32px)); padding: 14px 18px; border: 1px solid rgba(251, 191, 36, .4); border-radius: 14px; background: rgba(18, 19, 24, .97); box-shadow: 0 16px 40px rgba(0, 0, 0, .6); text-align: center; font-size: 12px; color: #9aa0ae; }
 .kp-duel-failed b { color: #fbbf24; font-size: 13px; }
-.kp-duel-away { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 24px; }
-.kp-duel-away-card { display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 380px; padding: 28px 30px; border: 1px solid #2d303a; border-radius: 18px; background: linear-gradient(180deg, #20232c, #171922); text-align: center; }
-.kp-duel-away-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 14px; background: linear-gradient(135deg, #ff4d2e, #ffb020); color: #0e0d12; font-size: 26px; font-weight: 800; }
-.kp-duel-away-card b { font-size: 16px; }
-.kp-duel-away-card p { margin: 0 0 6px; color: #9aa0ae; font-size: 12.5px; }
-
 /* ------------------------------------------------------------------ */
 /* DA unifiée : Tools+ reprend le langage visuel de +Duel              */
 /* ------------------------------------------------------------------ */
@@ -4168,7 +4162,7 @@ img.kp-avatar {
   box-shadow: 0 4px 12px rgba(255, 77, 46, 0.24);
 }
 
-.kp-modes .kp-duel-detach {
+.kp-modes .kp-detach {
   flex: none;
   padding: 8px 12px;
   border: 1px solid var(--kp-line);
@@ -4180,7 +4174,7 @@ img.kp-avatar {
   text-transform: uppercase;
 }
 
-.kp-modes .kp-duel-detach:hover {
+.kp-modes .kp-detach:hover {
   border-color: var(--kp-accent);
   background: var(--kp-bg-3);
   color: var(--kp-text);
@@ -4266,4 +4260,93 @@ img.kp-avatar {
     width: 100%;
     justify-content: space-between;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Fenêtre détachée : panneau complet ailleurs / panneau en fenêtre    */
+/* ------------------------------------------------------------------ */
+
+.kp-modes[hidden],
+.kp-away[hidden] {
+  display: none !important;
+}
+
+/* Page du site, panneau détaché : une simple carte « Afficher / Rattacher ». */
+.kp-panel.is-away .kp-stats,
+.kp-panel.is-away .kp-tabs,
+.kp-panel.is-away .kp-banner,
+.kp-panel.is-away .kp-sound {
+  display: none;
+}
+
+.kp-panel.is-away,
+.kp-panel.is-away.is-wide {
+  width: min(420px, calc(100vw - 24px));
+  height: auto;
+}
+
+.kp-away {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+}
+
+.kp-away-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 380px;
+  padding: 24px 26px;
+  border: 1px solid var(--kp-line, #2d303a);
+  border-radius: 18px;
+  background: linear-gradient(180deg, #20232c, #171922);
+  text-align: center;
+}
+
+.kp-away-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #ff4d2e, #ffb020);
+  color: #0e0d12;
+  font-size: 26px;
+  font-weight: 800;
+}
+
+.kp-away-card b {
+  font-size: 16px;
+}
+
+.kp-away-card p {
+  margin: 0 0 6px;
+  color: #9aa0ae;
+  font-size: 12.5px;
+}
+
+.kp-away-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Fenêtre détachée (panel/panel.html) : le panneau remplit toute la fenêtre.
+ * Ces règles vivent ici et non dans panel.css : le panneau est dans un Shadow DOM,
+ * qu'une feuille de style du document ne traverse pas. */
+.kp-panel.is-window,
+.kp-panel.is-window.is-wide {
+  inset: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+}
+
+.kp-panel.is-window .kp-view {
+  padding-bottom: 18px;
 }

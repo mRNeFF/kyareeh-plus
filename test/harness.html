@@ -23,8 +23,8 @@
       window.addEventListener('unhandledrejection', (e) => log('REJECTION: ' + (e.reason?.message || e.reason)));
 
       // Stockage persistant (localStorage) pour pouvoir tester la reprise après rechargement.
-      // Même clé que duel/duel-app.js hors extension : la page du duel (iframe ou fenêtre ouverte
-      // par « Détacher ») partage ce stockage ; on relit donc toujours la valeur la plus récente.
+      // Même clé que duel/duel-app.js hors extension : la page du duel (iframe) partage ce
+      // stockage ; on relit donc toujours la valeur la plus récente.
       const STORE_KEY = 'kp-harness-store';
       const readStore = () => {
         try {
@@ -35,8 +35,8 @@
       };
       const store = readStore();
       // Clé de fenêtre périmée d'une session précédente : aucune fenêtre n'est ouverte au chargement.
-      if (store['kyareeh.duel.window']) {
-        delete store['kyareeh.duel.window'];
+      if (store['kyareeh.panel.window']) {
+        delete store['kyareeh.panel.window'];
         localStorage.setItem(STORE_KEY, JSON.stringify(store));
       }
       window.__harnessStore = store;
@@ -51,7 +51,7 @@
           }
         }
       };
-      // Changements faits par une autre page (iframe du duel, fenêtre détachée).
+      // Changements faits par une autre page (iframe du duel).
       window.addEventListener('storage', (event) => {
         if (event.key !== STORE_KEY) return;
         let before = {};
@@ -69,33 +69,17 @@
         }
         emitChanges(changes);
       });
-      // Fenêtre détachée du duel (équivalent harness du script de fond : windows.create).
-      let duelWin = null;
-      const duelWinWatch = () => {
-        clearInterval(duelWinWatch.t);
-        duelWinWatch.t = setInterval(() => {
-          if (duelWin && !duelWin.closed) return;
-          clearInterval(duelWinWatch.t);
-          duelWin = null;
-          const cur = readStore();
-          if (cur['kyareeh.duel.window']) {
-            delete cur['kyareeh.duel.window'];
-            localStorage.setItem(STORE_KEY, JSON.stringify(cur));
-            const old = store['kyareeh.duel.window'];
-            delete store['kyareeh.duel.window'];
-            emitChanges({ 'kyareeh.duel.window': { oldValue: old, newValue: undefined } });
-          }
-        }, 500);
-      };
+      // Fenêtre détachée : le harness ne l'ouvre pas, il tient seulement la clé de stockage
+      // comme le script de fond (le vrai Détacher est testé dans un vrai Chrome, chrome-smoke).
       const setWindowKey = (value) => {
         const cur = readStore();
-        const old = cur['kyareeh.duel.window'];
-        if (value) cur['kyareeh.duel.window'] = value;
-        else delete cur['kyareeh.duel.window'];
+        const old = cur['kyareeh.panel.window'];
+        if (value) cur['kyareeh.panel.window'] = value;
+        else delete cur['kyareeh.panel.window'];
         localStorage.setItem(STORE_KEY, JSON.stringify(cur));
         Object.keys(store).forEach((k) => delete store[k]);
         Object.assign(store, cur);
-        emitChanges({ 'kyareeh.duel.window': { oldValue: old, newValue: value || undefined } });
+        emitChanges({ 'kyareeh.panel.window': { oldValue: old, newValue: value || undefined } });
       };
       // Régénération simulée : minutes restantes avant le prochain booster.
       window.__nextFreeMin = window.__nextFreeMin ?? 10;
@@ -118,26 +102,16 @@
         runtime: {
           getURL: (path) => '/' + path,
           onMessage: { addListener: () => {} },
-          // Réponses du script de fond pour le duel (background/background.js).
+          // Réponses du script de fond pour le panneau détaché (background/background.js).
           sendMessage: async (msg) => {
-            if (msg && msg.type === 'kp-duel-detach') {
-              if (duelWin && !duelWin.closed) {
-                duelWin.focus();
-                return { ok: true, reused: true };
-              }
-              duelWin = window.open('/duel/duel.html', 'kp-duel', 'popup,width=1100,height=760');
-              if (!duelWin) return { ok: false, error: 'fenêtre bloquée' };
+            if (msg && msg.type === 'kp-panel-state') {
+              return { ok: true, detached: Boolean(readStore()['kyareeh.panel.window']) };
+            }
+            if (msg && msg.type === 'kp-panel-detach') {
               setWindowKey({ id: 'harness', at: Date.now() });
-              duelWinWatch();
               return { ok: true, id: 'harness' };
             }
-            if (msg && msg.type === 'kp-duel-attach') {
-              try {
-                if (duelWin) duelWin.close();
-              } catch (e) {
-                /* ignore */
-              }
-              duelWin = null;
+            if (msg && msg.type === 'kp-panel-attach') {
               setWindowKey(null);
               return { ok: true };
             }

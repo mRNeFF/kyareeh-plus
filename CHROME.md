@@ -61,7 +61,11 @@ npm.cmd run verify:chrome
 3. injection du content script sur une page de test (Shadow DOM + 8 onglets) ;
 4. ouverture de la popup et affichage de la version ;
 5. rendu des onglets Compte / Vente / Stat du harness, sans exception JS
-   (captures dans `../_shots/chrome-*.png`).
+   (captures dans `../_shots/chrome-*.png`) ;
+6. **Détacher** (fenêtre `panel/panel.html`) : une seule fenêtre, panneau plein écran, données
+   du compte relayées par l'onglet du site, +Duel chargé dans la fenêtre, fermer le panneau de
+   la page sans vider la fenêtre, Rattacher (fenêtre, page, fermeture manuelle), message clair
+   sans onglet du site.
 
 Deux détails d'implémentation, appris à l'exécution :
 
@@ -69,7 +73,13 @@ Deux détails d'implémentation, appris à l'exécution :
   charge l'extension via la commande CDP `Extensions.loadUnpacked` (celle qu'utilise Puppeteer) ;
 - le content script n'étant autorisé que sur `https://kyara.games/*`, le test travaille sur une
   **copie** du paquet qui ajoute `http://127.0.0.1:8787/*` à ses correspondances. Le paquet
-  publié n'est jamais modifié.
+  publié n'est jamais modifié ;
+- pour le relais de la fenêtre détachée (qui cherche un onglet `https://kyara.games/*`), la
+  copie de test remplace aussi ce motif par l'onglet local et simule les `/api/…` par CDP
+  (`Fetch.fulfillRequest`) ;
+- le paquet doit contenir `panel/` **et** `duel/` (pages d'extension ouvertes par le code, donc
+  absentes du manifeste) : `build-chrome.mjs` échoue si `panel/panel.html` ou `duel/duel.html`
+  manque.
 
 ## Visuels de la fiche (captures, icône, bannières)
 
