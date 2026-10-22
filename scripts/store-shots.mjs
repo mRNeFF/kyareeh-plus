@@ -33,13 +33,17 @@ const OUT = outIdx > -1 && process.argv[outIdx + 1] ? resolve(process.argv[outId
 
 const TABS = [
   ['account', 'screenshot-1-compte.png'],
-  ['sell', 'screenshot-2-vente.png'],
+  ['duel', 'screenshot-2-duel.png'],
   ['market', 'screenshot-3-marche.png'],
   ['cards', 'screenshot-4-drop.png'],
   ['stat', 'screenshot-5-stat.png']
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function check(state, label, detail = '') {
+  console.log(`  ${state === 'ok' ? '✓' : '·'} ${label}${detail ? ` (${detail})` : ''}`);
+}
 
 async function waitFor(fn, { timeout = 15000, interval = 150, label = 'condition' } = {}) {
   const started = Date.now();
@@ -187,23 +191,67 @@ async function main() {
     );
 
     for (const [tab, name] of TABS) {
-      await evaluate(cdp, sessionId, `window.__kyaraPlus.setTab(${JSON.stringify(tab)})`);
-      await sleep(500);
-      await evaluate(cdp, sessionId, 'window.__kyaraPlus.setOpen(true)');
-      await waitFor(
-        () => evaluate(
+      if (tab === 'duel') {
+        /* Le duel est une application dans une iframe : on lance un entraînement
+         * contre l'IA (aucun réseau, aucun salon à créer) pour une capture pleine. */
+        const doc = `document.querySelector('#kyara-plus-root').shadowRoot.querySelector('iframe').contentDocument`;
+        const clickInDuel = (selector) =>
+          evaluate(
+            cdp,
+            sessionId,
+            `(() => {
+               const d = ${doc};
+               const b = d && d.querySelector(${JSON.stringify(selector)});
+               if (!b) return 'absent';
+               if (b.disabled) return 'disabled';
+               b.click();
+               return 'ok';
+             })()`
+          );
+
+        await evaluate(
           cdp,
           sessionId,
           `(() => {
-             const view = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view');
-             if (!view || view.innerText.length < 120) return false;
-             if (/Calcul en cours|Chargement du march|Recherche…/i.test(view.innerText)) return false;
+             const b = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="mode"][data-mode="duel"]');
+             if (b) b.click();
              return true;
            })()`
-        ),
-        { timeout: 20000, label: `vue ${tab}` }
-      );
-      await sleep(900);
+        );
+        await waitFor(
+          () => evaluate(cdp, sessionId, `Boolean(${doc}?.body?.innerText.includes('COLLECTION'))`),
+          { label: 'application du duel' }
+        );
+
+        check(await clickInDuel('[data-act="fill"]'), 'Compléter l’équipe', 'remplissage auto');
+        await sleep(700);
+        await clickInDuel('[data-act="screen"][data-screen="salon"]');
+        await sleep(700);
+        check(await clickInDuel('[data-act="practice"]'), 'Lancer l’entraînement', 'contre l’IA');
+        await waitFor(
+          () => evaluate(cdp, sessionId, `Boolean(${doc}?.body?.innerText.includes('TOUR'))`),
+          { timeout: 15000, label: 'combat du duel' }
+        );
+        await sleep(1800);
+      } else {
+        await evaluate(cdp, sessionId, `window.__kyaraPlus.setTab(${JSON.stringify(tab)})`);
+        await sleep(500);
+        await evaluate(cdp, sessionId, 'window.__kyaraPlus.setOpen(true)');
+        await waitFor(
+          () => evaluate(
+            cdp,
+            sessionId,
+            `(() => {
+               const view = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-view');
+               if (!view || view.innerText.length < 120) return false;
+               if (/Calcul en cours|Chargement du march|Recherche…/i.test(view.innerText)) return false;
+               return true;
+             })()`
+          ),
+          { timeout: 20000, label: `vue ${tab}` }
+        );
+        await sleep(900);
+      }
 
       /* Certaines illustrations du harness pointent vers des URLs mortes :
        * on les remplace par une vignette neutre pour éviter les icônes cassées. */
@@ -241,6 +289,19 @@ async function main() {
         { timeout: 12000, label: `images de ${tab}` }
       ).catch(() => {});
 
+      /* La fiche met en avant les duels : on retire l'onglet Auto-Open de la
+       * barre pour la capture (aucune autre modification de l'interface). */
+      await evaluate(
+        cdp,
+        sessionId,
+        `(() => {
+           const b = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-tabs button[data-tab="auto"]');
+           if (b) b.style.display = 'none';
+           return true;
+         })()`
+      );
+      await sleep(150);
+
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
       const file = join(OUT, name);
       writeFileSync(file, Buffer.from(shot.data, 'base64'));
@@ -271,6 +332,19 @@ async function main() {
       );
       writeFileSync(join(OUT, name.replace(/^screenshot-/, 'panel-')), Buffer.from(cropped.data, 'base64'));
       console.log(`✓ ${tab.padEnd(8)} → ${file}`);
+
+      if (tab === 'duel') {
+        await evaluate(
+          cdp,
+          sessionId,
+          `(() => {
+             const b = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="mode"][data-mode="tools"]');
+             if (b) b.click();
+             return true;
+           })()`
+        );
+        await sleep(600);
+      }
     }
   } finally {
     cdp?.ws.close();

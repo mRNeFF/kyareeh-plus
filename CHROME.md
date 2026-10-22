@@ -85,7 +85,11 @@ Sortie par défaut : `../_shots/store/` (hors dépôt, donc jamais dans un paque
 
 | Fichier | Format | Usage |
 |---|---|---|
-| `screenshot-1-compte.png` … `screenshot-5-stat.png` | 1280 × 800 | captures de la fiche |
+| `screenshot-1-compte.png` | 1280 × 800 | compte, valeur, ressources |
+| `screenshot-2-duel.png` | 1280 × 800 | duel : entraînement contre l'IA (plein écran) |
+| `screenshot-3-marche.png` | 1280 × 800 | marché global et annonces |
+| `screenshot-4-drop.png` | 1280 × 800 | %Drop, espérance par booster |
+| `screenshot-5-stat.png` | 1280 × 800 | classement des comptes suivis |
 | `icon-128.png` | 128 × 128 | icône de la fiche (96 px d'illustration + 16 px de marge transparente, règle Chrome) |
 | `promo-440x280.png` | 440 × 280 | petite vignette promotionnelle |
 | `promo-1400x560.png` | 1400 × 560 | bannière marquee |
@@ -94,6 +98,10 @@ Sortie par défaut : `../_shots/store/` (hors dépôt, donc jamais dans un paque
 Le script de captures neutralise les éléments du harness, aligne la version affichée sur
 celle du manifeste et remplace les illustrations de cartes mortes par une vignette neutre.
 Les données montrées sont celles de `test/harness.html`, pas celles d'un compte réel.
+
+La fiche met en avant les **duels** : la capture 2 est une partie d'entraînement contre l'IA,
+et l'onglet **Auto-Open** est masqué dans les autres captures (aucune autre modification de
+l'interface). Les textes de `description.md` ne mentionnent ni l'auto-open ni la vente auto.
 
 ## Publier sur le Chrome Web Store
 
@@ -107,7 +115,8 @@ Les données montrées sont celles de `test/harness.html`, pas celles d'un compt
    - **Catégorie** : Outils (ou Jeux et loisirs).
    - **Langue** : français.
    - **Icône de la fiche** : `../_shots/store/icon-128.png`.
-   - **Captures** : `../_shots/store/screenshot-1-compte.png` … `screenshot-5-stat.png` (1280 × 800).
+   - **Captures** : `../_shots/store/screenshot-1-compte.png`, `screenshot-2-duel.png`,
+     `screenshot-3-marche.png`, `screenshot-4-drop.png`, `screenshot-5-stat.png` (1280 × 800).
    - **Vignette et bannière** : `promo-440x280.png` et `promo-1400x560.png`.
    - **Politique de confidentialité** : publier `PRIVACY.md` sur une URL publique
      (page GitHub suffit) — obligatoire dès qu'une permission sensible est demandée.

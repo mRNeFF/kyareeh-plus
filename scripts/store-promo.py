@@ -98,11 +98,11 @@ def small_tile(icon: Image.Image) -> Image.Image:
     draw = ImageDraw.Draw(canvas)
     draw.text((120, 34), "Kyareeh+", font=font(FONT_BOLD, 34), fill=TEXT)
     draw.text((122, 82), "Tableau de bord &", font=font(FONT_REG, 17), fill=MUTED)
-    draw.text((122, 102), "vente assistée", font=font(FONT_REG, 17), fill=MUTED)
+    draw.text((122, 102), "duels entre cartes", font=font(FONT_REG, 17), fill=MUTED)
 
     draw.line([(28, 150), (412, 150)], fill=(41, 44, 55))
-    draw.text((28, 170), "Valorisation en chakra · marché", font=font(FONT_REG, 15), fill=(214, 218, 226))
-    draw.text((28, 192), "%Drop · auto-open · statistiques", font=font(FONT_REG, 15), fill=(214, 218, 226))
+    draw.text((28, 170), "Valorisation en chakra · %Drop", font=font(FONT_REG, 15), fill=(214, 218, 226))
+    draw.text((28, 192), "Marché · statistiques · duels", font=font(FONT_REG, 15), fill=(214, 218, 226))
 
     pill(draw, (28, 226), "kyara.games", font(FONT_SEMI, 14))
     draw.text((412, 233), "Chrome · Edge · Firefox", font=font(FONT_REG, 12), fill=(120, 127, 140), anchor="ra")
@@ -119,11 +119,11 @@ def marquee(icon: Image.Image, panel: Image.Image) -> Image.Image:
     draw = ImageDraw.Draw(canvas)
     draw.text((188, 62), "Kyareeh+", font=font(FONT_BOLD, 62), fill=TEXT)
     draw.text((190, 146), "Tableau de bord, valorisation en chakra", font=font(FONT_REG, 24), fill=(206, 211, 221))
-    draw.text((190, 180), "et vente assistée des doublons", font=font(FONT_REG, 24), fill=(206, 211, 221))
+    draw.text((190, 180), "et duels entre cartes", font=font(FONT_REG, 24), fill=(206, 211, 221))
 
     features = [
         ("Valeur du compte", "médianes du marché, fourchette basse/haute"),
-        ("Vente assistée", "prix recommandé, enchères, plafond d'annonces"),
+        ("Duels entre cartes", "deck de Mythiques, entraînement ou salon en ligne"),
         ("Analyse", "%Drop par booster, marché, statistiques"),
     ]
     y = 246
@@ -137,10 +137,10 @@ def marquee(icon: Image.Image, panel: Image.Image) -> Image.Image:
     draw.text((66, 512), "Extension Chrome, Edge et Firefox — non affiliée à Kyara.",
               font=font(FONT_REG, 14), fill=(120, 127, 140))
 
-    # Panneau : hauteur 456 px, largeur proportionnelle.
-    target_h = 456
-    scale = target_h / panel.height
-    card = panel.resize((round(panel.width * scale), target_h), Image.LANCZOS)
+    # Panneau : hauteur 440 px, largeur proportionnelle (bornée).
+    target_h = 440
+    scale = min(target_h / panel.height, 690 / panel.width)
+    card = panel.resize((round(panel.width * scale), round(panel.height * scale)), Image.LANCZOS)
     card = rounded(card, 20)
     framed = Image.new("RGBA", (card.width + 2, card.height + 2), (0, 0, 0, 0))
     ImageDraw.Draw(framed).rounded_rectangle(
@@ -160,7 +160,7 @@ def main() -> None:
     # transparente) : pour les visuels, on repart de l'illustration pleine (96 px).
     artwork = Image.open(ROOT / "icons" / "icon-96.png").convert("RGBA")
     store_icon = Image.open(ROOT / "icons" / "icon-128.png").convert("RGBA")
-    panel = Image.open(OUT / "panel-2-vente.png").convert("RGBA")
+    panel = Image.open(OUT / "panel-2-duel.png").convert("RGBA")
 
     store_icon.save(OUT / "icon-128.png")
     small_tile(artwork).save(OUT / "promo-440x280.png")
