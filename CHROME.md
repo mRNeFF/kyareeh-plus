@@ -71,19 +71,44 @@ Deux détails d'implémentation, appris à l'exécution :
   **copie** du paquet qui ajoute `http://127.0.0.1:8787/*` à ses correspondances. Le paquet
   publié n'est jamais modifié.
 
+## Visuels de la fiche (captures, icône, bannières)
+
+Tous les visuels demandés par le Chrome Web Store sont générés depuis le harness local
+(données fictives, aucun compte réel) :
+
+```powershell
+node scripts/store-shots.mjs     # 5 captures 1280×800 + panneaux recadrés
+python scripts/store-promo.py    # icône 128, vignette 440×280, bannière 1400×560
+```
+
+Sortie par défaut : `../_shots/store/` (hors dépôt, donc jamais dans un paquet).
+
+| Fichier | Format | Usage |
+|---|---|---|
+| `screenshot-1-compte.png` … `screenshot-5-stat.png` | 1280 × 800 | captures de la fiche |
+| `icon-128.png` | 128 × 128 | icône de la fiche (96 px d'illustration + 16 px de marge transparente, règle Chrome) |
+| `promo-440x280.png` | 440 × 280 | petite vignette promotionnelle |
+| `promo-1400x560.png` | 1400 × 560 | bannière marquee |
+| `description.md` | texte | nom, description courte (106/132), description détaillée, notes relecteur |
+
+Le script de captures neutralise les éléments du harness, aligne la version affichée sur
+celle du manifeste et remplace les illustrations de cartes mortes par une vignette neutre.
+Les données montrées sont celles de `test/harness.html`, pas celles d'un compte réel.
+
 ## Publier sur le Chrome Web Store
 
 1. Compte développeur : <https://chrome.google.com/webstore/devconsole> (5 USD, une fois).
 2. **Nouvel élément** → téléverse `web-ext-artifacts/kyareeh-plus-<version>-chrome.zip`.
 3. Remplis la fiche :
    - **Nom** : `Kyareeh+ (beta)` (≤ 75 caractères, déjà dans le manifeste).
-   - **Description courte** : celle du manifeste (≤ 132 caractères).
-   - **Description détaillée** : reprendre la section « Fonctionnalités » du `README.md`.
-   - **Catégorie** : Outils (ou Productivité).
+   - **Description courte** : celle du manifeste (≤ 132 caractères) — variantes dans
+     `../_shots/store/description.md`.
+   - **Description détaillée** : `../_shots/store/description.md` (section « Description détaillée »).
+   - **Catégorie** : Outils (ou Jeux et loisirs).
    - **Langue** : français.
-   - **Icône de la fiche** : `icons/icon-128.png`.
-   - **Captures** : 1280×800 (ou 640×400). `../_shots/chrome-compte.png` et
-     `chrome-vente.png` donnent une base, à recadrer/monter.
+   - **Icône de la fiche** : `../_shots/store/icon-128.png`.
+   - **Captures** : `../_shots/store/screenshot-1-compte.png` … `screenshot-5-stat.png` (1280 × 800).
+   - **Vignette et bannière** : `promo-440x280.png` et `promo-1400x560.png`.
    - **Politique de confidentialité** : publier `PRIVACY.md` sur une URL publique
      (page GitHub suffit) — obligatoire dès qu'une permission sensible est demandée.
 4. Onglet **Confidentialité** :

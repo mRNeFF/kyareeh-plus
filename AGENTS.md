@@ -69,6 +69,8 @@ l'extension depuis la console ou un navigateur automatisé.
 | `test/chrome-smoke.mjs` | Charge le paquet Chrome dans un Chrome headless (CDP) et vérifie worker, content script, popup, rendu. |
 | `scripts/release.mjs` | Bump + build + lint + commit/push (+ upload AMO si clés API). |
 | `scripts/build-chrome.mjs` | Manifeste Chrome **dérivé** de `manifest.json` + zip (aucun code transformé). |
+| `scripts/store-shots.mjs` | Captures 1280×800 pour la fiche Chrome (harness, Chrome headless). Sortie hors dépôt : `../_shots/store`. |
+| `scripts/store-promo.py` | Icône 128, vignette 440×280 et bannière 1400×560 (Pillow), à partir des captures. |
 | `.web-ext-config.mjs` | Fichiers exclus du `.zip` publié. |
 | `README.md` | Documentation utilisateur (fonctionnalités, installation, AMO, Chrome). |
 | `CHROME.md` | Portage Chrome/Edge : build, test, publication Chrome Web Store. |
@@ -171,8 +173,8 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 - `verify-odds.mjs` a **1 écart préexistant** (`season-2026-fall R`), antérieur à la 1.0.0.
 - **Anti-rafale** : toutes les requêtes `/api/…` passent par une file dans `content/ui.js` (une seule à la fois, 350 ms minimum entre deux départs). La vente auto lit les prix manquants en un lot et ne scanne plus le marché carte par carte ; après chaque vente elle relit seulement la collection puis les ventes actives, séquentiellement.
 - **Paquet Chrome** : manifeste dérivé (`scripts/build-chrome.mjs`), aucun code transformé.
-  `icons/icon-128.png` est un agrandissement LANCZOS de `icon-96.png` (pas d'original plus
-  grand) : à remplacer si un logo source réapparaît. Depuis Chrome 137, `--load-extension`
+  `icons/icon-128.png` suit la règle Chrome (illustration 96 px + 16 px de marge transparente)
+  et n'a pas d'original plus grand : à remplacer si un logo source réapparaît. Depuis Chrome 137, `--load-extension`
   est ignoré dans les builds de marque ; `test/chrome-smoke.mjs` charge donc l'extension via
   CDP `Extensions.loadUnpacked` et travaille sur une copie autorisant `127.0.0.1:8787`.
 - Les textes qui nomment le navigateur ou sa page de réglages passent par `IS_GECKO` /
