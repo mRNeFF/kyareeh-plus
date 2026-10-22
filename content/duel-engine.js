@@ -48,7 +48,7 @@
     reviveHpPct: 50,
     fatigueTurn: 18,       // dès ce tour (0 = désactivé), les deux actifs s'épuisent en fin de tour
     fatigueDamage: 3,      // PV perdus au premier tour d'épuisement, multipliés par 2, 3… les tours suivants
-    dyingStrike: 1,        // 1 : un champion mis K.O. avant d'agir joue quand même sa capacité (dernier souffle)
+    lateGuard: 5,          // garde offerte au champion qui agit en second, s'il a choisi une capacité (compense l'avantage du plus rapide)
     speedBand: 1,          // la vitesse est comparée par paliers de N points (1 = exacte)
     speedLuck: 0,          // % de tours où l'ordre des capacités est tiré au sort malgré la vitesse
     maxTurns: 40,          // limite de tours → victoire au % de PV restants
@@ -685,6 +685,13 @@
       doSwitch(s, ev, p, acts[p].to, false);
       s.acted[p] = true;
     }
+    // 1 bis. Compensation : le champion qui agit en second (quelle qu'en soit la raison : vitesse, égalité, tirage ou
+    // priorité) se met en garde avant que le premier ne frappe. Le plus rapide frappe d'abord, mais pas pour rien.
+    if (s.rules.lateGuard > 0 && info.order.length === 2) {
+      const late = info.order[1];
+      const lc = activeOf(s, late);
+      if (acts[late].type === 'move' && lc.alive) addGuard(s, ev, lc, s.rules.lateGuard, 'late');
+    }
     // 2. Capacités et passes, par vitesse.
     for (const p of info.order) {
       if (s.winner !== null) break;
@@ -699,10 +706,10 @@
         ev.push({ type: 'pass', player: p, playerName: pl.name });
       } else {
         const c = activeOf(s, p);
-        if (!c.alive && !(s.rules.dyingStrike && a.type === 'move')) {
+        if (!c.alive) {
           emit(s, ev, c, 'fail', { player: p, playerName: pl.name, reason: 'ko', moveName: c.moves[a.move].name });
         } else {
-          resolveMove(s, ev, p, a, !c.alive);
+          resolveMove(s, ev, p, a);
         }
       }
       s.acted[p] = true;
@@ -818,7 +825,7 @@
   }
 
   // ─── Résolution d'une capacité (ordre fixe, documenté dans les règles) ────────────────────
-  function resolveMove(s, ev, p, action, dying) {
+  function resolveMove(s, ev, p, action) {
     const me = s.players[p];
     const ai = me.active;
     const c = me.champions[ai];
@@ -850,7 +857,7 @@
     const tpos = target ? sideIndex(s, target) : null;
     ev.push(Object.assign({
       type: 'move', player: p, playerName: me.name, move: action.move, moveName: m.name, kind: m.kind, cost: m.cost,
-      target: target ? tag(s, tpos.side, tpos.index) : null, retarget, dying: !!dying
+      target: target ? tag(s, tpos.side, tpos.index) : null, retarget
     }, tag(s, p, ai)));
 
     // 2. Annulation par « annule la prochaine attaque ».
@@ -1300,7 +1307,7 @@
       }
       case 'heal': return `${e.name} récupère ${e.amount} PV${e.source === 'regen' ? ' (régénération)' : ''} — ${e.hp} PV.`;
       case 'guardDecay': return `${e.name} perd ${e.amount} garde (${e.guard}).`;
-      case 'guard': return `${e.name} gagne ${e.amount} garde (${e.guard}).`;
+      case 'guard': return e.source === 'late' ? `${e.name} agit en second et se met en garde : +${e.amount} garde (${e.guard}).` : `${e.name} gagne ${e.amount} garde (${e.guard}).`;
       case 'buff': return `${e.name} prépare +${e.amount} dégâts (${e.buff}).`;
       case 'atk': return `${e.name} gagne +${e.amount} ATQ (bonus ${e.atkBonus}).`;
       case 'status': return `${e.name} : ${statusText(e.status, e.turns)}.`;

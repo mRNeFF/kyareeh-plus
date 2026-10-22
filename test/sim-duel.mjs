@@ -4,7 +4,7 @@
 // duels arrivés à la limite de tours, part des changements dans les actions (choix « changer »
 // sur toutes les actions de tour, remplacements forcés exclus), taux de victoire par type,
 // champions sur/sous-performants (taux de victoire de leur camp) et liste de ceux hors de
-// la plage 30–70 %.
+// la plage 30–70 %. Rapporte aussi la corrélation vitesse / taux de victoire par Mythique (0 = la vitesse ne décide pas).
 // Déterministe : même N et même graine → mêmes chiffres, quel que soit le nombre de workers
 // (le deck et la graine d'un duel ne dépendent que de la graine de base et de son numéro).
 import { readFileSync } from 'node:fs';
@@ -20,6 +20,7 @@ const data = JSON.parse(src.slice(src.indexOf('{'), src.lastIndexOf('}') + 1));
 const pool = E.mythics(data);
 const ids = pool.map((c) => c.id);
 const typeById = new Map(pool.map((c) => [c.id, E.typeOf(c)]));
+const speedById = new Map(pool.map((c) => [c.id, Number(c.speed) || 0]));
 
 function mulberry(seed) {
   let a = seed >>> 0;
@@ -139,9 +140,17 @@ if (!isMainThread) {
   const names = new Map(pool.map((c) => [c.id, c.name]));
   const pct = (a, b) => (b ? ((100 * a) / b).toFixed(1) : '—');
   const ranked = Object.entries(res.byChamp).filter(([, e]) => e.games >= 10)
-    .map(([id, e]) => ({ id: Number(id), name: names.get(Number(id)), type: typeById.get(Number(id)), games: e.games, rate: e.wins / e.games }))
+    .map(([id, e]) => ({ id: Number(id), name: names.get(Number(id)), type: typeById.get(Number(id)), speed: speedById.get(Number(id)), games: e.games, rate: e.wins / e.games }))
     .sort((a, b) => b.rate - a.rate);
+  // Corrélation de Pearson entre la vitesse d'un Mythique et son taux de victoire (0 = la vitesse ne compte pas).
+  const mean = (a) => a.reduce((x, y) => x + y, 0) / (a.length || 1);
+  const mx = mean(ranked.map((r) => r.speed));
+  const my = mean(ranked.map((r) => r.rate));
+  let sxy = 0; let sxx = 0; let syy = 0;
+  for (const r of ranked) { sxy += (r.speed - mx) * (r.rate - my); sxx += (r.speed - mx) ** 2; syy += (r.rate - my) ** 2; }
+  const speedCorr = sxx && syy ? sxy / Math.sqrt(sxx * syy) : 0;
   const summary = {
+    speedCorr,
     duels: res.games,
     avgTurns: res.turns / res.games,
     side0Pct: res.decided ? (100 * res.wins0) / res.decided : null,
@@ -160,6 +169,7 @@ if (!isMainThread) {
     console.log(`Tours en moyenne : ${summary.avgTurns.toFixed(2)} (objectif 12–25)`);
     const hist = Object.entries(res.hist).sort((a, b) => a[0] - b[0]).map(([r, n]) => `${r}:${n}`).join(' ');
     console.log(`Répartition des tours : ${hist}`);
+    console.log(`Corrélation vitesse / taux de victoire (par Mythique) : ${speedCorr.toFixed(2)} (0 = la vitesse ne décide pas)`);
     console.log(`Victoires du camp 0 : ${pct(res.wins0, res.decided)} % (sur ${res.decided} duels décidés ; objectif 45–55)`);
     console.log(`Nuls : ${res.draws ?? 0} (${pct(res.draws ?? 0, res.games)} %) · limite de ${E.RULES.maxTurns} tours atteinte : ${res.limit ?? 0} (${pct(res.limit ?? 0, res.games)} % ; objectif < 3)`);
     console.log(`Fins : ${JSON.stringify(res.reasons)}`);
@@ -171,12 +181,12 @@ if (!isMainThread) {
     }
     if (args.includes('--all')) {
       console.log('Tous les champions :');
-      for (const r of ranked) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] (${r.games})`);
+      for (const r of ranked) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] v${r.speed} (${r.games})`);
     } else {
       console.log('Champions les plus performants (≥ 10 duels) :');
-      for (const r of ranked.slice(0, 10)) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] (${r.games})`);
+      for (const r of ranked.slice(0, 10)) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] v${r.speed} (${r.games})`);
       console.log('Champions les moins performants :');
-      for (const r of ranked.slice(-10).reverse()) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] (${r.games})`);
+      for (const r of ranked.slice(-10).reverse()) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] v${r.speed} (${r.games})`);
     }
     console.log(`Champions hors de 30–70 % : ${summary.outOfRange.length}${summary.outOfRange.length ? ` — ${summary.outOfRange.join(' ; ')}` : ''}`);
   }

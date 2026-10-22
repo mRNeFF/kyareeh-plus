@@ -60,7 +60,7 @@ Tout le hasard du duel (égalité de vitesse, dégâts aléatoires) vient d’un
 
 2. Choix : les deux joueurs choisissent en secret et en même temps.
 
-3. Résolution : changements, puis capacités et « passer » dans l’ordre d’action (voir plus bas).
+3. Résolution : changements, puis capacités et « passer » dans l’ordre d’action (voir plus bas) ; le champion qui agit en second se met d’abord en garde.
 
 4. Action bonus éventuelle (capacité « rejoue ») : le joueur concerné rejoue immédiatement une action, sans nouveau chakra ni nouvelle usure de garde, avant la fin du tour.
 
@@ -90,7 +90,9 @@ Priorités tirées des données : Subaru Natsuki, tant qu’il est le champion a
 
 Nouvelle cible : si votre capacité vise l’adversaire et que celui-ci a changé de champion avant qu’elle ne soit résolue, elle frappe le NOUVEL actif (le journal l’indique). Si la cible a disparu (déjà KO ce tour-ci), la capacité échoue et rien n’est dépensé.
 
-Dernier souffle : un champion mis KO avant d’avoir agi joue quand même la capacité qu’il avait choisie ; ses bonus et statuts, perdus à la chute, ne comptent plus. Ainsi, être plus rapide ne suffit pas à éliminer l’adversaire sans qu’il réplique. Le dernier souffle ne concerne que les capacités : passer est sans effet et un changement a de toute façon lieu avant.
+Un champion KO ne joue plus : s’il est mis KO avant d’avoir agi, sa capacité choisie est annulée (le journal l’annonce), sans dépense de chakra, sans effet, sans Hâte consommée ni action bonus. Cela vaut aussi pour les actions bonus (capacité « rejoue ») : un champion abattu entre-temps ne rejoue pas, et celui qui était censé rejouer mais tombe avant ne gagne rien. Frapper le premier peut donc éliminer l’adversaire avant qu’il ne réplique : c’est pourquoi le plus lent est protégé (règle suivante).
+
+Agir en second : le champion qui agit en second (parce qu’il est plus lent, qu’il a perdu l’égalité de vitesse tirée au sort, ou face à la priorité de Subaru) se met en garde avant que le premier ne frappe : il gagne 5 garde, à condition d’avoir choisi une capacité (attaque, soutien ou ultime) ; pas s’il passe ou change de champion. La garde habituelle s’applique (plafond, usure au début du tour suivant) et le journal l’annonce. Ainsi, être plus rapide donne l’initiative mais pas la victoire.
 
 Les changements ne dépendent pas de la vitesse, sauf pour décider de l’ordre quand les deux camps changent ; ils ont tous lieu avant la moindre capacité.
 
@@ -304,7 +306,7 @@ Légendaires (hors de cette version, déjà traduites) : Doflamingo inflige Mal�
 
 ## Fin du duel
 
-Victoire : les 5 champions adverses sont KO. Si les deux camps tombent en même temps (par exemple sous le poison en fin de tour, ou par deux derniers souffles), le duel est nul.
+Victoire : les 5 champions adverses sont KO. Si les deux camps tombent en même temps (par exemple sous le poison en fin de tour, ou par l’épuisement), le duel est nul.
 
 Épuisement : à partir du tour 18, à la fin de chaque tour, les deux champions actifs perdent 3 PV, puis 6 PV au tour suivant, 9 PV… Ni la garde ni les soins ne tiennent bien longtemps : les duels qui s’enlisent se terminent. L’épuisement respecte l’invulnérabilité et la survie.
 
