@@ -39,9 +39,13 @@ const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith('--')));
 const version = args.find((a) => !a.startsWith('--')) ?? null;
 
-function run(cmd, cmdArgs, { allowFail = false, quiet = false } = {}) {
+function run(cmd, cmdArgs, { allowFail = false, quiet = false, env = null } = {}) {
   if (!quiet) console.log(`\n$ ${cmd} ${cmdArgs.join(' ')}`);
-  const res = spawnSync(cmd, cmdArgs, { cwd: ROOT, stdio: quiet ? 'pipe' : 'inherit' });
+  const res = spawnSync(cmd, cmdArgs, {
+    cwd: ROOT,
+    stdio: quiet ? 'pipe' : 'inherit',
+    env: env ?? process.env
+  });
   if (res.error) {
     if (allowFail) return null;
     throw new Error(`Impossible d'exécuter ${cmd} : ${res.error.message}`);
@@ -237,21 +241,27 @@ Pour automatiser :
   process.exit(0);
 }
 
-run(process.execPath, [
-  WEB_EXT,
-  'sign',
-  '--source-dir',
-  '.',
-  '--channel',
-  'listed',
-  '--api-key',
-  apiKey,
-  '--api-secret',
-  apiSecret,
-  '--artifacts-dir',
-  'web-ext-artifacts',
-  '--overwrite-dest',
-]);
+// Les clés passent par l'environnement (WEB_EXT_API_KEY / WEB_EXT_API_SECRET) :
+// web-ext les lit directement, et elles n'apparaissent jamais dans la commande
+// journalisée. `--approval-timeout 0` rend la main dès la soumission : une
+// version listée n'est signée qu'après relecture, parfois plusieurs jours après.
+run(
+  process.execPath,
+  [
+    WEB_EXT,
+    'sign',
+    '--source-dir',
+    '.',
+    '--channel',
+    'listed',
+    '--artifacts-dir',
+    'web-ext-artifacts',
+    '--approval-timeout',
+    '0',
+    '--no-input'
+  ],
+  { env: { ...process.env, WEB_EXT_API_KEY: apiKey, WEB_EXT_API_SECRET: apiSecret } }
+);
 
 console.log(`
 ✓ v${target} envoyée à AMO (canal listé).
