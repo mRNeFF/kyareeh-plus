@@ -1521,6 +1521,144 @@ async function visualPass() {
         /retraits automatiques/i.test(expiry.expiryPanel),
       `${expiry.note.replace(/\s+/g, ' ')} | ${expiry.expiryPanel.replace(/\s+/g, ' ').slice(0, 120)}`
     );
+
+    // — Option « recycler les cartes retirées après expiration » —
+    const recycleExpiry = await evaluate(
+      cdp,
+      sessionId,
+      `(async () => {
+         const kp = window.__kyaraPlus;
+         const state = kp.state;
+         const settings = state.settings;
+         const optionWasOff = settings.autoSellRecycleExpired === false;
+         const saved = settings.autoSellRecycleExpired;
+         const savedExpire = {
+           enabled: settings.autoSellExpireEnabled,
+           value: settings.autoSellExpireValue,
+           unit: settings.autoSellExpireUnit
+         };
+         const callsBefore = (window.__recycled || []).length;
+         const market = window.__marketState || {};
+         const collection = Array.isArray(market.collection) ? market.collection : [];
+         const previousCard = ${JSON.stringify(expiry.targetCard)};
+         const actives = kp.autoSellActiveEntries().filter((l) => l.characterId && !l.pending);
+         // Cible : une autre annonce. On force une carte à 4 exemplaires dont
+         // 1 seul est engagé par l'annonce, pour un scénario déterministe :
+         // après le retrait, 3 exemplaires sont recyclables et l'annonce en
+         // contient 2 — le recyclage doit porter exactement sur 2.
+         const qty = 2;
+         const pick = actives.find((l) => String(l.characterId) !== previousCard) || null;
+         if (!pick) return { ok: false, reason: 'aucune annonce disponible' };
+         const targetId = String(pick.id);
+         const cardId = String(pick.characterId);
+         let targetRow = collection.find((r) => String(r.characterId) === cardId) || null;
+         if (!targetRow) return { ok: false, reason: 'carte absente du harness' };
+         targetRow.qty = 4;
+         targetRow.listable = 4;
+         pick.qty = qty;
+         pick.createdAt = new Date(Date.now() - 3 * 3600000).toISOString();
+         for (const l of market.listings) {
+           if (String(l.id) === targetId) {
+             l.createdAt = new Date(Date.now() - 3 * 3600000).toISOString();
+             l.qty = qty;
+           }
+         }
+         state.salesTrack = [
+           ...state.salesTrack,
+           {
+             id: targetId,
+             characterId: cardId,
+             name: pick.character?.name || '',
+             rarity: pick.character?.rarity || '',
+             price: Number(pick.price) || null,
+             source: 'auto',
+             createdAt: Date.now() - 3 * 3600000,
+             endsAt: Date.now() + 3600000
+           }
+         ];
+         const qtyBefore = Number((collection.find((r) => String(r.characterId) === cardId) || {}).qty);
+         settings.autoSellExpireEnabled = true;
+         settings.autoSellExpireValue = 1;
+         settings.autoSellExpireUnit = 'min';
+         settings.autoSellRecycleExpired = true;
+         kp.render();
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const box = root.querySelector('[data-autosell-recycle-expired]');
+         const boxChecked = Boolean(box && box.checked);
+         state.autoSell.expiry.locks = {};
+         state.autoSell.stop = false;
+         state.autoSell.running = true;
+         let result = null;
+         let failure = null;
+         try {
+           await kp.autoSellRefresh();
+           result = await kp.autoSellPurgeExpired({ refresh: true });
+         } catch (err) {
+           failure = err && err.message ? err.message : String(err);
+         }
+         state.autoSell.running = false;
+         state.autoSell.stop = true;
+         const calls = (window.__recycled || []).slice(callsBefore);
+         const rowAfter = (window.__marketState.collection || []).find((r) => String(r.characterId) === cardId);
+         const entry =
+           state.autoSell.expiry.history
+             .filter((h) => h.kind === 'remove' && String(h.characterId) === cardId)
+             .pop() || null;
+         const inReturns = state.autoSell.expiry.returns.some((r) => String(r.characterId) === cardId);
+         const logText = state.autoSell.log.map((e) => e.text).join(' | ');
+         const rowNow = state.collection.find((r) => String(r.characterId ?? r.id) === cardId) || null;
+         const listingsForCard = (window.__marketState.listings || []).filter(
+           (l) => String(l.characterId) === cardId
+         ).length;
+         settings.autoSellRecycleExpired = saved;
+         settings.autoSellExpireEnabled = savedExpire.enabled;
+         settings.autoSellExpireValue = savedExpire.value;
+         settings.autoSellExpireUnit = savedExpire.unit;
+         kp.render();
+         return {
+           ok: true,
+           failure,
+           optionWasOff,
+           boxChecked,
+           removed: result ? result.removed : null,
+           recycledCalls: calls.length,
+           recycledQty: calls.reduce((sum, call) => sum + Number(call.qty || 0), 0),
+           listingQty: qty,
+           qtyBefore,
+           qtyAfter: Number(rowAfter?.qty),
+           listableNow: Number(rowNow?.listable),
+           qtyNow: Number(rowNow?.qty),
+           listingsForCard,
+           outcome: entry ? entry.outcome : null,
+           entryQty: entry ? entry.recycledQty : null,
+           inReturns,
+           logText
+         };
+       })()`
+    );
+    check('Recyclage auto : option décochée par défaut', recycleExpiry.ok === true && recycleExpiry.optionWasOff === true, JSON.stringify(recycleExpiry.failure || recycleExpiry.reason));
+    check('Recyclage auto : case visible et cochée', recycleExpiry.boxChecked === true);
+    check('Recyclage auto : aucune erreur', recycleExpiry.ok === true && recycleExpiry.failure === null, JSON.stringify(recycleExpiry.failure));
+    check(
+      'Recyclage auto : la carte expirée est recyclée',
+      recycleExpiry.recycledCalls === 1 && recycleExpiry.recycledQty === recycleExpiry.listingQty,
+      `appels=${recycleExpiry.recycledCalls} · qty=${recycleExpiry.recycledQty}/${recycleExpiry.listingQty} · listable=${recycleExpiry.listableNow} · annonces=${recycleExpiry.listingsForCard}`
+    );
+    check(
+      'Recyclage auto : quantité exacte retirée de l’inventaire',
+      recycleExpiry.qtyAfter === recycleExpiry.qtyBefore - recycleExpiry.recycledQty,
+      `qty ${recycleExpiry.qtyBefore} → ${recycleExpiry.qtyAfter}`
+    );
+    check(
+      'Recyclage auto : la carte ne revient pas dans le pool',
+      recycleExpiry.inReturns === false && recycleExpiry.outcome === 'recycle',
+      `retour=${recycleExpiry.inReturns} · statut=${recycleExpiry.outcome}`
+    );
+    check(
+      'Recyclage auto : journal et historique explicites',
+      /recyclée/i.test(recycleExpiry.logText) && recycleExpiry.entryQty === recycleExpiry.listingQty,
+      recycleExpiry.logText.slice(-160)
+    );
     await evaluate(
       cdp,
       sessionId,

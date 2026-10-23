@@ -21,7 +21,8 @@ const api = new Function(`${source.slice(begin, end)}
     recycleBlockOf,
     recycleQtyOf,
     recycleBuildPlan,
-    recycleTotals
+    recycleTotals,
+    recycleAfterExpiryDecision
   };
 `)();
 
@@ -136,6 +137,35 @@ check('scénario : 2 exemplaires au total', api.recycleTotals(full).copies === 2
 check(
   'scénario : la légendaire reste exclue',
   full.every((line) => line.rarity !== 'L')
+);
+
+/* --- décision après expiration d'une annonce ------------------------- */
+const decide = (row, options = {}) =>
+  api.recycleAfterExpiryDecision(row, { enabled: true, listingQty: 1, includeM: false, ...options });
+
+check('expiration : option désactivée → aucun recyclage', decide(row({ qty: 3 }), { enabled: false }).recycle === false);
+check('expiration : carte absente → repli', decide(null).recycle === false && /absente/.test(decide(null).reason));
+check('expiration : carte verrouillée → repli', decide(row({ qty: 4, listable: 4, pinned: true })).recycle === false);
+check('expiration : carte unique → repli', decide(row({ qty: 1, listable: 1 })).recycle === false);
+check('expiration : exemplaires engagés → repli', decide(row({ qty: 3, listable: 0 })).recycle === false);
+check('expiration : exemplaires verrouillés → repli', decide(row({ qty: 4, listable: 4, lockedQty: 3 })).recycle === false);
+
+const twoOfFour = decide(row({ qty: 4, listable: 4, rarity: 'R' }), { listingQty: 2 });
+check('expiration : quantité exacte de l’annonce', twoOfFour.recycle === true && twoOfFour.qty === 2, String(twoOfFour.qty));
+const oneOfThree = decide(row({ qty: 3, listable: 3 }), { listingQty: 1 });
+check('expiration : on ne recycle pas plus que l’annonce', oneOfThree.qty === 1);
+
+const tooMany = decide(row({ qty: 3, listable: 3 }), { listingQty: 3 });
+check('expiration : quantité supérieure aux exemplaires en trop → repli', tooMany.recycle === false);
+check('expiration : motif de quantité explicite', /quantité non recyclable/.test(tooMany.reason), tooMany.reason);
+
+check('expiration : mythique exclue par défaut', decide(row({ qty: 3, rarity: 'M' })).recycle === false);
+check('expiration : mythique autorisée avec l’option', decide(row({ qty: 3, rarity: 'M' }), { includeM: true }).recycle === true);
+check('expiration : légendaire autorisée', decide(row({ qty: 3, rarity: 'L' })).recycle === true);
+check('expiration : commune autorisée', decide(row({ qty: 2, rarity: 'C' })).recycle === true);
+check(
+  'expiration : listable absent → verrouillés seuls retirés',
+  decide(row({ qty: 3, listable: null, lockedQty: 1 })).qty === 1
 );
 
 console.log(`${checks - failures}/${checks} contrôles OK`);

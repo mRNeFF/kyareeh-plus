@@ -105,7 +105,10 @@
     // Désactivé par défaut : rien ne change tant que l'option n'est pas cochée.
     autoSellExpireEnabled: false,
     autoSellExpireValue: 72,
-    autoSellExpireUnit: 'h'
+    autoSellExpireUnit: 'h',
+    // Une carte retirée pour ancienneté peut être recyclée au lieu de repartir
+    // dans le pool de vente. Désactivé par défaut : comportement inchangé.
+    autoSellRecycleExpired: false
   };
 
   // Tris acceptés par /api/market/listings (valeurs validées côté serveur).
@@ -1029,6 +1032,7 @@
     state.settings.autoSellExpireEnabled = expireSettings.enabled;
     state.settings.autoSellExpireValue = expireSettings.value;
     state.settings.autoSellExpireUnit = expireSettings.unit;
+    state.settings.autoSellRecycleExpired = Boolean(state.settings.autoSellRecycleExpired);
     state.settings.dealsRarity = String(state.settings.dealsRarity || 'all');
     state.settings.dupeSort = DUPE_SORTS.some(([value]) => value === state.settings.dupeSort) ? state.settings.dupeSort : 'price_desc';
     state.settings.salesRange = ['1d', '7d', 'total'].includes(state.settings.salesRange)
@@ -1703,6 +1707,39 @@
       chakra += Math.max(0, Number(row.total) || 0);
     }
     return { cards, copies, chakra };
+  }
+
+  /**
+   * Une carte dont l'annonce vient d'être retirée pour ancienneté peut-elle
+   * être recyclée à la place d'un retour dans le pool ?
+   *
+   * `row` décrit la carte **après le retrait** (les exemplaires de l'annonce
+   * sont de nouveau libres : `listable` doit déjà les inclure). `listingQty`
+   * est la quantité exacte de l'annonce retirée : on ne recycle jamais plus
+   * que ça, et jamais moins (sinon une partie retournerait au pool sans trace).
+   *
+   * Retourne `{ recycle: true, qty }` ou `{ recycle: false, reason }`.
+   */
+  function recycleAfterExpiryDecision(row, options = {}) {
+    const enabled = Boolean(options.enabled);
+    const listingQty = Math.max(1, Math.floor(Number(options.listingQty) || 1));
+    const includeM = Boolean(options.includeM);
+    if (!enabled) return { recycle: false, reason: 'recyclage automatique désactivé' };
+    if (!row) return { recycle: false, reason: 'carte absente de la collection' };
+    const block = recycleBlockOf(row, { includeML: true });
+    if (block) return { recycle: false, reason: block };
+    const rarity = String(row.rarity || 'C').toUpperCase();
+    if (rarity === 'M' && !includeM) {
+      return { recycle: false, reason: 'Mythique exclue (option « Inclure les Mythiques » désactivée)' };
+    }
+    const spare = recycleSpareOf(row);
+    if (spare < listingQty) {
+      return {
+        recycle: false,
+        reason: `quantité non recyclable (${spare} exemplaire(s) en trop pour ${listingQty} annoncé(s))`
+      };
+    }
+    return { recycle: true, qty: listingQty, reason: '' };
   }
   /* RECYCLE:END */
 
@@ -2457,6 +2494,10 @@
         price: Number(item.price) > 0 ? Math.round(Number(item.price)) : null,
         ageMs: Math.max(0, Number(item.ageMs) || 0),
         thresholdMs: Math.max(0, Number(item.thresholdMs) || 0),
+        // Ce que la carte est devenue : recyclée ou renvoyée en fin de file.
+        outcome: item.outcome === 'recycle' ? 'recycle' : 'return',
+        recycledQty: Math.max(0, Math.round(Number(item.recycledQty) || 0)),
+        gained: Math.max(0, Math.round(Number(item.gained) || 0)),
         reason: String(item.reason ?? '')
       });
     }
@@ -5662,7 +5703,7 @@
    */
   async function autoSellPurgeExpired({ refresh = false } = {}) {
     const a = state.autoSell;
-    const report = { checked: 0, removed: 0, skipped: 0, errors: 0, disabled: false, simulated: false };
+    const report = { checked: 0, removed: 0, recycled: 0, skipped: 0, errors: 0, disabled: false, simulated: false };
     const cfg = autoSellExpirySettings();
     if (!cfg.enabled) {
       report.disabled = true;
@@ -5703,6 +5744,40 @@
       a.expiry.lastCheck = { at: now, checked: due.length, removed: 0, thresholdMs: cfg.maxAgeMs };
       if (!due.length) return report;
 
+      // Recyclage automatique : une seule lecture de collection pour tout le
+      // lot. Chaque retrait libère ses exemplaires dans cet instantané, pour
+      // que deux annonces de la même carte ne se disputent pas la même quantité.
+      let recycleOn = Boolean(state.settings.autoSellRecycleExpired);
+      let collectionSnapshot = null;
+      if (recycleOn) {
+        try {
+          const coll = await api('/api/me/collection?lean=1', { timeout: 25000 });
+          const items = Array.isArray(coll) ? coll : Array.isArray(coll?.items) ? coll.items : null;
+          if (!items) throw new Error('Collection illisible');
+          collectionSnapshot = new Map();
+          for (const entry of items) {
+            const rawId = entry?.characterId ?? entry?.id;
+            if (rawId == null) continue;
+            const key = String(rawId);
+            const character = state.characters.get(key) ?? {};
+            collectionSnapshot.set(key, {
+              qty: Math.max(0, Number(entry.qty ?? entry.quantity ?? 0) || 0),
+              listable: entry.listable == null ? null : Math.max(0, Number(entry.listable) || 0),
+              lockedQty: Math.max(0, Number(entry.locked) || 0),
+              pinned: Boolean(entry.pinned),
+              rarity: String(character.rarity ?? entry.rarity ?? 'C').toUpperCase()
+            });
+          }
+        } catch (err) {
+          recycleOn = false;
+          a.lastError = `Recyclage automatique · ${friendlyError(err)}`;
+          autoSellLog(
+            `♻ Recyclage automatique indisponible (${friendlyError(err)}) · les cartes retirées repartent en fin de file`,
+            'err'
+          );
+        }
+      }
+
       for (const item of due.slice(0, AUTOSELL_EXPIRY_BATCH)) {
         if (!a.running || a.stop) break;
         try {
@@ -5740,21 +5815,90 @@
           autoSellDropLocalListing(item.id);
           untrackPendingSale(item.id, item.characterId);
           const at = Date.now();
-          a.expiry.returns = autoSellReturnAdd(
-            a.expiry.returns,
-            {
-              characterId: item.characterId,
-              listingId: item.id,
-              name: item.name,
-              rarity: item.rarity,
-              price: item.price,
-              at,
-              startedAt: recheck.startAt,
-              ageMs: recheck.ageMs,
-              thresholdMs: cfg.maxAgeMs
-            },
-            { now: at }
-          );
+          const listingQty = Math.max(1, Math.floor(Number(autoSellListingQty(fresh ?? item)) || 1));
+
+          // Le retrait vient de libérer les exemplaires de l'annonce : on
+          // l'inscrit dans l'instantané avant de décider du recyclage.
+          const live = collectionSnapshot ? collectionSnapshot.get(String(item.characterId)) : null;
+          if (live) {
+            const free = live.listable == null ? live.qty : live.listable;
+            live.listable = Math.min(live.qty, free + listingQty);
+          }
+
+          let outcome = 'return';
+          let fallbackReason = '';
+          let recycledQty = 0;
+          let gained = 0;
+          if (recycleOn) {
+            const decision = recycleAfterExpiryDecision(live, {
+              enabled: true,
+              listingQty,
+              includeM: Boolean(state.settings.autoSellIncludeM)
+            });
+            if (decision.recycle) {
+              try {
+                const posted = await api(
+                  `/api/me/collection/${encodeURIComponent(String(item.characterId))}/recycle`,
+                  { method: 'POST', timeout: 20000, body: { qty: decision.qty } }
+                );
+                if (posted && posted.ok === false) {
+                  throw new ApiError(0, 'Recyclage refusé par le site');
+                }
+                recycledQty = decision.qty;
+                gained = Math.max(
+                  0,
+                  Math.round(Number(posted?.gained ?? recycleOf(live.rarity) * recycledQty) || 0)
+                );
+                if (posted?.user && typeof posted.user === 'object') {
+                  state.user = { ...state.user, ...posted.user };
+                }
+                if (posted?.entry) {
+                  applyRecycleEntry(posted.entry);
+                }
+                if (posted?.entry?.qty == null) {
+                  // Réponse sans quantité : on retire localement la quantité exacte.
+                  const index = state.collection.findIndex(
+                    (row) => String(row?.characterId ?? row?.id) === String(item.characterId)
+                  );
+                  if (index >= 0) {
+                    const row = state.collection[index];
+                    row.qty = Math.max(0, (Number(row.qty) || 0) - recycledQty);
+                    if (row.listable != null) row.listable = Math.max(0, Number(row.listable) - recycledQty);
+                  }
+                }
+                live.qty = Math.max(0, live.qty - recycledQty);
+                live.listable = Math.max(0, (live.listable ?? 0) - recycledQty);
+                a.expiry.returns = autoSellReturnClear(a.expiry.returns, item.characterId);
+                outcome = 'recycle';
+                report.recycled += 1;
+              } catch (err) {
+                // Repli : la carte repart en fin de file, avec le motif affiché.
+                fallbackReason = friendlyError(err);
+              }
+            } else {
+              fallbackReason = decision.reason;
+            }
+          } else if (!recycleOn && state.settings.autoSellRecycleExpired) {
+            fallbackReason = 'collection indisponible';
+          }
+
+          if (outcome === 'return') {
+            a.expiry.returns = autoSellReturnAdd(
+              a.expiry.returns,
+              {
+                characterId: item.characterId,
+                listingId: item.id,
+                name: item.name,
+                rarity: item.rarity,
+                price: item.price,
+                at,
+                startedAt: recheck.startAt,
+                ageMs: recheck.ageMs,
+                thresholdMs: cfg.maxAgeMs
+              },
+              { now: at }
+            );
+          }
           a.expiry.history = [
             ...a.expiry.history,
             {
@@ -5767,7 +5911,10 @@
               price: item.price,
               ageMs: recheck.ageMs,
               thresholdMs: cfg.maxAgeMs,
-              reason: 'durée dépassée'
+              outcome,
+              recycledQty,
+              gained,
+              reason: outcome === 'recycle' ? 'durée dépassée' : fallbackReason || 'durée dépassée'
             }
           ].slice(-AUTOSELL_EXPIRY_HISTORY_MAX);
           a.expiry.locks[item.id] = at;
@@ -5775,12 +5922,28 @@
           a.lastError = null;
           report.removed += 1;
           saveExpirySoon();
-          autoSellLog(
-            `⏱ ${item.name || 'Carte'} · retirée après ${autoSellExpireLabel(recheck.ageMs)} (seuil ${autoSellExpireLabel(
-              cfg.maxAgeMs
-            )}) · carte rendue à l’inventaire, classée en fin de file`,
-            'ok'
-          );
+          if (outcome === 'recycle') {
+            autoSellLog(
+              `♻ ${item.name || 'Carte'} · retirée après ${autoSellExpireLabel(
+                recheck.ageMs
+              )} · recyclée ×${fmt(recycledQty)} · +◆ ${fmt(gained)}`,
+              'ok'
+            );
+          } else if (fallbackReason) {
+            autoSellLog(
+              `⏱ ${item.name || 'Carte'} · retirée après ${autoSellExpireLabel(
+                recheck.ageMs
+              )} · renvoyée en fin de file · non recyclée : ${fallbackReason}`,
+              'info'
+            );
+          } else {
+            autoSellLog(
+              `⏱ ${item.name || 'Carte'} · retirée après ${autoSellExpireLabel(recheck.ageMs)} (seuil ${autoSellExpireLabel(
+                cfg.maxAgeMs
+              )}) · carte rendue à l’inventaire, classée en fin de file`,
+              'ok'
+            );
+          }
         } catch (err) {
           a.expiry.locks[item.id] = Date.now();
           report.errors += 1;
@@ -8966,9 +9129,22 @@
               ([value, label]) => `<option value="${value}" ${expire.unit === value ? 'selected' : ''}>${label}</option>`
             ).join('')}
           </select>
+          <label class="kp-check kp-expiry-recycle">
+            <input type="checkbox" data-autosell-recycle-expired ${s.autoSellRecycleExpired ? 'checked' : ''} ${locked ? 'disabled' : ''}>
+            Recycler automatiquement les cartes retirées après expiration
+          </label>
+          <small class="kp-expiry-help">
+            Décoché : la carte revient dans le <b>pool de vente</b>, classée en fin de file (comportement actuel).
+            Coché : après le retrait, elle part au <b>recyclage</b> (1 exemplaire conservé, cartes verrouillées
+            et Mythiques exclues) ; si le recyclage est refusé, elle revient en fin de file avec le motif.
+          </small>
           <small>${
             expire.enabled
-              ? `seuil ${autoSellExpireLabel(expire.maxAgeMs)} · ventes auto uniquement · carte rendue à l’inventaire et classée en fin de file`
+              ? `seuil ${autoSellExpireLabel(expire.maxAgeMs)} · ventes auto uniquement · ${
+                  s.autoSellRecycleExpired
+                    ? 'cartes expirées recyclées, repli en fin de file si refus'
+                    : 'carte rendue à l’inventaire et classée en fin de file'
+                }`
               : 'désactivé · aucune annonce n’est retirée pour ancienneté'
           }</small>
         </div>
@@ -9189,13 +9365,30 @@
     const rows = history
       .map((entry) => {
         const relist = entry.kind === 'relist';
-        const what = relist
-          ? `remise en vente${entry.price ? ` · ◆ ${fmt(entry.price)}` : ''}`
-          : `retirée après ${autoSellExpireLabel(entry.ageMs)} (seuil ${autoSellExpireLabel(entry.thresholdMs)})`;
-        return `<div class="kp-expiry-row ${relist ? 'is-relist' : 'is-remove'}">
+        if (relist) {
+          const what = `remise en vente${entry.price ? ` · ◆ ${fmt(entry.price)}` : ''}`;
+          return `<div class="kp-expiry-row is-relist">
+            <span class="kp-expiry-time">${nowTime(entry.at)}</span>
+            <b>${esc(entry.name || 'Carte')}</b>
+            <span class="kp-expiry-what">${esc(what)}</span>
+          </div>`;
+        }
+        const recycled = entry.outcome === 'recycle';
+        const what = `retirée après ${autoSellExpireLabel(entry.ageMs)} (seuil ${autoSellExpireLabel(
+          entry.thresholdMs
+        )})${entry.price ? ` · annonce ◆ ${fmt(entry.price)}` : ''}`;
+        const tag = recycled
+          ? `<span class="kp-expiry-tag is-recycled">♻ recyclée${
+              entry.recycledQty ? ` ×${fmt(entry.recycledQty)}` : ''
+            }${entry.gained ? ` · +◆ ${fmt(entry.gained)}` : ''}</span>`
+          : `<span class="kp-expiry-tag is-return">↩ fin de file${
+              entry.reason && entry.reason !== 'durée dépassée' ? ` · ${esc(entry.reason)}` : ''
+            }</span>`;
+        return `<div class="kp-expiry-row is-remove">
           <span class="kp-expiry-time">${nowTime(entry.at)}</span>
           <b>${esc(entry.name || 'Carte')}</b>
           <span class="kp-expiry-what">${esc(what)}</span>
+          ${tag}
         </div>`;
       })
       .join('');
@@ -9211,7 +9404,7 @@
         <b>Retraits automatiques</b>
         <span>${
           cfg.enabled ? `seuil ${autoSellExpireLabel(cfg.maxAgeMs)}` : 'désactivé'
-        } · annonces de la vente auto uniquement</span>
+        }${cfg.enabled && state.settings.autoSellRecycleExpired ? ' · recyclage auto' : ''} · annonces de la vente auto uniquement</span>
       </div>
       ${
         rows
@@ -13898,6 +14091,7 @@
     const autoExpire = target.closest('[data-autosell-expire]');
     const autoExpireValue = target.closest('[data-autosell-expire-value]');
     const autoExpireUnit = target.closest('[data-autosell-expire-unit]');
+    const autoRecycleExpired = target.closest('[data-autosell-recycle-expired]');
     if (
       autoType ||
       autoStrategy ||
@@ -13907,7 +14101,8 @@
       autoDryRun ||
       autoExpire ||
       autoExpireValue ||
-      autoExpireUnit
+      autoExpireUnit ||
+      autoRecycleExpired
     ) {
       if (state.autoSell.running) return;
       state.autoSell.armed = false;
@@ -13929,6 +14124,9 @@
       if (autoIncludeM) state.settings.autoSellIncludeM = Boolean(autoIncludeM.checked);
       if (autoDryRun) state.settings.autoSellDryRun = Boolean(autoDryRun.checked);
       if (autoExpire) state.settings.autoSellExpireEnabled = Boolean(autoExpire.checked);
+      if (autoRecycleExpired) {
+        state.settings.autoSellRecycleExpired = Boolean(autoRecycleExpired.checked);
+      }
       if (autoExpireUnit) {
         const previousUnit = state.settings.autoSellExpireUnit === 'min' ? 'min' : 'h';
         const nextUnit = autoExpireUnit.value === 'min' ? 'min' : 'h';

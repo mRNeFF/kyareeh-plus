@@ -1807,6 +1807,42 @@ img.kp-avatar {
   white-space: nowrap;
 }
 
+/* Choix du devenir des cartes retirées : pool de vente ou recyclage. */
+.kp-autosell-expire .kp-expiry-recycle {
+  flex-basis: 100%;
+  margin-top: 2px;
+  font-size: 9.5px;
+}
+
+.kp-expiry-help b {
+  color: var(--kp-text);
+  font-weight: 700;
+}
+
+.kp-expiry-row {
+  flex-wrap: wrap;
+}
+
+.kp-expiry-tag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.kp-expiry-tag.is-recycled {
+  background: rgba(74, 222, 128, 0.14);
+  color: #86efac;
+}
+
+.kp-expiry-tag.is-return {
+  background: rgba(251, 191, 36, 0.12);
+  color: #f5dfa8;
+}
+
 .kp-autosell-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
