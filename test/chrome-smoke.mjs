@@ -982,6 +982,169 @@ async function visualPass() {
       hover.visible && /◆/.test(hover.text) && /\d{2} h/.test(hover.text) && !hover.text.includes(','),
       hover.text
     );
+    // — Remise en vente automatique d'une annonce revenue sans acheteur —
+    // Simulation : l'annonce expire (elle quitte le marché), l'échéance est
+    // dépassée et la copie redevient listable. Le cycle de vente auto doit la
+    // remettre en ligne tout seul, au prix le plus bas autorisé.
+    const relistSetup = await evaluate(
+      cdp,
+      sessionId,
+      `(async () => {
+         const kp = window.__kyaraPlus;
+         const state = kp.state;
+         const collection = (window.__marketState && window.__marketState.collection) || [];
+         const entries = kp
+           .autoSellActiveEntries()
+           .filter((listing) => !listing.pending && listing.characterId && listing.status !== 'expired');
+         const target = entries[0];
+         if (!target) return { ok: false, reason: 'aucune annonce active' };
+         const listingId = String(target.id);
+         const characterId = String(target.characterId);
+         // Toutes les annonces de cette carte expirent : une seule reste suivie.
+         const dropIds = new Set([
+           listingId,
+           ...entries
+             .filter((listing) => String(listing.characterId) === characterId)
+             .map((listing) => String(listing.id))
+         ]);
+         const market = window.__marketState || {};
+         if (Array.isArray(market.listings)) {
+           market.listings = market.listings.filter((listing) => !dropIds.has(String(listing.id)));
+         }
+         const row = collection.find((item) => String(item.characterId) === characterId);
+         if (row) {
+           row.qty = Math.max(2, Number(row.qty || 1));
+           row.listable = 1;
+         }
+         const track =
+           state.salesTrack.find((entry) => String(entry.id) === listingId) ||
+           state.salesTrack.find((entry) => String(entry.characterId) === characterId);
+         if (!track) return { ok: false, reason: 'annonce non suivie' };
+         state.salesTrack = [track];
+         state.autoSell.pendingListings = [];
+         // Annonce ancienne et expirée : le site l'a retirée sans acheteur.
+         track.createdAt = Date.now() - 3600000;
+         track.at = track.createdAt;
+         track.endsAt = Date.now() - 60000;
+         window.__relist = {
+           listingId,
+           characterId,
+           previous: Number(target.price) || null,
+           rarity: target.character?.rarity || null
+         };
+         // Relecture des annonces puis un cycle complet, comme le ferait la boucle.
+         state.autoSell.stop = false;
+         state.autoSell.starting = true;
+         try {
+           await kp.autoSellRefresh();
+         } catch (err) {
+           state.autoSell.starting = false;
+           return { ok: false, reason: 'refresh: ' + (err && err.message ? err.message : String(err)) };
+         }
+         state.autoSell.starting = false;
+         const queued = state.autoSell.relist.queue.length;
+         state.autoSell.running = true;
+         state.autoSell.stop = false;
+         let result = null;
+         let failure = null;
+         try {
+           result = await kp.autoSellCycle();
+         } catch (err) {
+           failure = err && err.message ? err.message : String(err);
+         }
+         state.autoSell.running = false;
+         state.autoSell.stop = true;
+         return {
+           ok: queued > 0,
+           queued,
+           failure,
+           result: result ? { created: result.created, error: result.error, fatal: result.fatal } : null,
+           count: state.autoSell.relist.count,
+           last: state.autoSell.relist.last,
+           log: state.autoSell.log.map((entry) => entry.text).slice(-4)
+         };
+       })()`
+    );
+    check(
+      'Remise en vente : annonce expirée détectée et mise en file',
+      relistSetup.ok === true,
+      JSON.stringify(relistSetup)
+    );
+    const relist = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const kp = window.__kyaraPlus;
+         const a = kp.state.autoSell;
+         const active = kp.autoSellActiveEntries();
+         const rarity = window.__relist?.rarity;
+         return {
+           count: a.relist.count,
+           price: Number(a.relist.last?.price) || null,
+           previous: window.__relist?.previous ?? null,
+           floor: Number(kp.state.config?.recycle?.[rarity] ?? 1),
+           active: active.length,
+           max: kp.listingSlots().max,
+           sameCard: active.filter(
+             (l) => String(l.characterId) === String(window.__relist?.characterId)
+           ).length,
+           queue: a.relist.queue.length,
+           logText: a.log.map((entry) => entry.text).join(' | '),
+           panel:
+             document.querySelector('#kyara-plus-root').shadowRoot.querySelector('.kp-autosell-relist')
+               ?.innerText || ''
+         };
+       })()`
+    );
+    check('Remise en vente auto : la carte repart toute seule', relistSetup.count === 1, JSON.stringify(relistSetup));
+    check(
+      'Remise en vente auto : jamais sous le plancher de recyclage',
+      relist.price >= relist.floor && relist.price > 0,
+      `${relist.price} / plancher ${relist.floor}`
+    );
+    check(
+      'Remise en vente auto : pas plus cher que l’annonce expirée',
+      relist.previous == null || relist.price <= relist.previous,
+      `${relist.price} vs ${relist.previous}`
+    );
+    check(
+      'Remise en vente auto : une seule annonce pour la carte',
+      relist.sameCard === 1,
+      `${relist.sameCard} annonce(s)`
+    );
+    check(
+      'Remise en vente auto : limite de 10 respectée',
+      relist.active <= relist.max,
+      `${relist.active}/${relist.max}`
+    );
+    check(
+      'Remise en vente auto : journal explicite et prix affiché',
+      /remise en vente auto/.test(relist.logText) && /◆/.test(relist.logText),
+      relist.logText.replace(/\s+/g, ' ').slice(-120)
+    );
+    check(
+      'Remise en vente auto : encart visible dans le panneau',
+      /remise en vente auto/i.test(relist.panel) && /◆/.test(relist.panel),
+      relist.panel
+    );
+    check('Remise en vente auto : file vidée après traitement', relist.queue === 0, String(relist.queue));
+
+    const relistStopped = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const a = window.__kyaraPlus.state.autoSell;
+         a.running = true;
+         document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act="autosell-stop"]')?.click();
+         return { running: a.running, queue: a.relist.queue.length };
+       })()`
+    );
+    check(
+      'Remise en vente auto : l’arrêt de la vente auto vide la file',
+      relistStopped.running === false && relistStopped.queue === 0,
+      JSON.stringify(relistStopped)
+    );
+
     await evaluate(
       cdp,
       sessionId,

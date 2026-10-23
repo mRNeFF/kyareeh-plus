@@ -1632,6 +1632,27 @@ img.kp-avatar {
   line-height: 1.35;
 }
 
+/* Remise en vente automatique d'une annonce revenue sans acheteur. */
+.kp-autosell-relist {
+  margin-top: 6px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  border: 1px solid rgba(34, 211, 238, 0.28);
+  background: rgba(34, 211, 238, 0.08);
+  color: #a5f3fc;
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+
+.kp-autosell-relist b {
+  color: #e6feff;
+}
+
+.kp-listed-relist {
+  font-style: normal;
+  color: #22d3ee;
+}
+
 .kp-autosell-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));

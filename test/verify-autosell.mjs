@@ -29,7 +29,10 @@ const api = new Function(`${source.slice(begin, end)}
     autoSellListingPrice,
     autoSellListingTotal,
     autoSellActiveQtyByKey,
-    autoSellActiveQtyFor
+    autoSellActiveQtyFor,
+    autoSellRelistPrice,
+    autoSellRelistCheck,
+    autoSellRelistEnqueue
   };
 `)();
 
@@ -304,6 +307,115 @@ check(
   'optimisé : à score égal, le lot le plus gros passe devant',
   quantityRank[0]?.id === 'lot2' && quantityRank[0]?.autoQty === 2,
   quantityRank.map((r) => `${r.id}:${r.autoQty}`).join(',')
+);
+
+// --- Remise en vente automatique d'une annonce revenue sans acheteur --------
+// Le prix repart au plus bas autorisé (stratégie « Vente rapide »), jamais sous
+// la valeur de recyclage ; une carte déjà au minimum garde exactement son prix.
+
+const relistPrice = (over = {}) => api.autoSellRelistPrice(over);
+check(
+  'remise en vente : 1 chakra sous la vente la plus basse',
+  relistPrice({ floor: 1, lowest: 10, median: 30, previous: 12 }) === 9,
+  String(relistPrice({ floor: 1, lowest: 10, median: 30, previous: 12 }))
+);
+check(
+  'remise en vente : jamais sous le plancher de recyclage',
+  relistPrice({ floor: 10, lowest: 10, median: 10, previous: 10 }) === 10
+);
+check(
+  'remise en vente : plancher relevé quand le marché est plus bas',
+  relistPrice({ floor: 40, lowest: 39, median: 50, previous: 50 }) === 40
+);
+check(
+  'remise en vente : déjà au minimum, remise au même prix',
+  relistPrice({ floor: 1, lowest: 5, median: 9, previous: 4 }) === 4
+);
+check(
+  'remise en vente : prix précédent sous le plancher ramené au plancher',
+  relistPrice({ floor: 150, lowest: null, median: null, previous: 1 }) === 150
+);
+check(
+  'remise en vente : sans concurrence, médiane',
+  relistPrice({ floor: 1, lowest: null, median: 20, previous: null }) === 20
+);
+check('remise en vente : sans aucune donnée, plancher', relistPrice({ floor: 3 }) === 3);
+
+const expired = { id: 'l-exp', reason: 'expirée', characterId: '1' };
+const canRelist = (over = {}) =>
+  api.autoSellRelistCheck({ dropped: expired, row: row(), spare: 1, slots: 5, includeM: false, now, ...over });
+
+check('remise en vente : cas nominal accepté', canRelist().ok === true);
+check(
+  'remise en vente refusée après annulation manuelle',
+  canRelist({ dropped: { ...expired, reason: 'annulée' } }).ok === false &&
+    canRelist({ dropped: { ...expired, reason: 'annulée' } }).permanent === true
+);
+check(
+  'remise en vente refusée si annonce retirée par l’utilisateur',
+  canRelist({ dropped: { ...expired, manual: true } }).permanent === true
+);
+check('remise en vente refusée si la carte a quitté la collection', canRelist({ row: null }).permanent === true);
+check(
+  'remise en vente refusée sur la dernière copie',
+  canRelist({ spare: api.autoSellSpare(row({ qty: 1, listable: 1 })) }).permanent === true
+);
+check(
+  'remise en vente refusée si une annonce est déjà active pour la carte',
+  canRelist({ spare: api.autoSellSpare(row({ qty: 2, listable: 1 }), 1) }).permanent === true
+);
+check(
+  'remise en vente refusée si mythique exclue',
+  canRelist({ row: row({ rarity: 'M' }) }).permanent === true
+);
+check(
+  'remise en vente autorisée sur une mythique incluse',
+  canRelist({ row: row({ rarity: 'M' }), includeM: true }).ok === true
+);
+check(
+  'remise en vente refusée si revente bloquée',
+  canRelist({ row: row({ sellBlock: 'resale_lock' }) }).permanent === true
+);
+check(
+  'remise en vente reportée sans place libre',
+  canRelist({ slots: 0 }).ok === false && canRelist({ slots: 0 }).permanent === false
+);
+check(
+  'remise en vente reportée par le délai anti-boucle',
+  canRelist({ lastAt: now - 1000 }).ok === false && canRelist({ lastAt: now - 1000 }).permanent === false
+);
+check('remise en vente autorisée après le délai anti-boucle', canRelist({ lastAt: now - 5 * 60000 }).ok === true);
+
+let relistQueue = [];
+relistQueue = api.autoSellRelistEnqueue(
+  relistQueue,
+  { characterId: '1', listingId: 'a', previousPrice: 10 },
+  { now }
+);
+relistQueue = api.autoSellRelistEnqueue(
+  relistQueue,
+  { characterId: '1', listingId: 'b', previousPrice: 8 },
+  { now: now + 1000 }
+);
+check(
+  'file de remise en vente : une seule entrée par carte',
+  relistQueue.length === 1 && relistQueue[0].listingId === 'b',
+  JSON.stringify(relistQueue)
+);
+check('file de remise en vente : dernier prix connu conservé', relistQueue[0].previousPrice === 8);
+check(
+  'file de remise en vente : deux cartes distinctes',
+  api.autoSellRelistEnqueue(relistQueue, { characterId: '2', listingId: 'c' }, { now }).length === 2
+);
+check(
+  'file de remise en vente : entrée sans carte ignorée',
+  api.autoSellRelistEnqueue([], { listingId: 'x' }).length === 0
+);
+check(
+  'file de remise en vente : demande trop ancienne oubliée',
+  api
+    .autoSellRelistEnqueue([{ characterId: '9', at: now - 7 * 3600000 }], { characterId: '8' }, { now })
+    .every((entry) => entry.characterId !== '9')
 );
 
 console.log(`${checks - failures}/${checks} contrôles OK`);

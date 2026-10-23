@@ -358,6 +358,17 @@
       // Nombre de classements recalculés (un par vente en mode optimisé).
       rankCount: 0,
       rankAt: 0,
+      // Annonces revenues sans acheteur, en attente de remise en vente.
+      relist: {
+        queue: [],
+        // Dernière remise en vente automatique (affichée dans le panneau).
+        last: null,
+        count: 0,
+        // characterId -> horodatage de la dernière remise en vente (anti-boucle).
+        locks: {},
+        // listingId -> horodatage : annonce déjà remise en vente (pastille).
+        ids: {}
+      },
       log: []
     },
     reloadArmed: false,
@@ -1857,6 +1868,100 @@
     return Number.isFinite(price) && price > 0 ? Math.max(1, Math.round(price)) : null;
   }
 
+  /* --- Remise en vente automatique d'une annonce revenue sans acheteur ------ */
+
+  /** Délai minimal entre deux remises en vente automatiques d'une même carte. */
+  const AUTOSELL_RELIST_COOLDOWN_MS = 90 * 1000;
+
+  /** Essais avant d'abandonner : la carte reste alors dans l'inventaire. */
+  const AUTOSELL_RELIST_MAX_ATTEMPTS = 2;
+
+  /** Une demande de remise en vente oubliée après ce délai (carte plus vendable). */
+  const AUTOSELL_RELIST_TTL_MS = 6 * 3600 * 1000;
+
+  /**
+   * Prix d'une remise en vente : **le plus bas autorisé**, c'est-à-dire le prix
+   * de la stratégie « Vente rapide » (1 chakra sous la vente la plus basse),
+   * jamais sous la valeur de recyclage de la rareté.
+   *
+   * Une carte déjà proposée à ce prix (ou en dessous) repart **exactement au
+   * même prix** : inutile de descendre plus bas, le site refuserait la mise en
+   * vente (`price_too_low`).
+   */
+  function autoSellRelistPrice({ floor, lowest, median, previous } = {}) {
+    const min = Math.max(1, Math.round(Number(floor) || 1));
+    const prev = Number(previous) > 0 ? Math.round(Number(previous)) : null;
+    const low = Number(lowest) > 0 ? Math.round(Number(lowest)) : null;
+    const med = Number(median) > 0 ? Math.round(Number(median)) : null;
+    let target = low != null ? low - 1 : med;
+    if (target == null) target = prev;
+    if (target == null) target = min;
+    target = Math.max(min, Math.round(target));
+    // Déjà au prix plancher : on remet au même prix, sans tenter plus bas.
+    if (prev != null && prev <= target) return Math.max(min, prev);
+    return target;
+  }
+
+  /**
+   * Une annonce expirée peut-elle repartir tout de suite ?
+   * Renvoie `{ ok: true }` ou `{ ok: false, reason, permanent }`.
+   *
+   * `permanent` = inutile de réessayer (annulation volontaire, carte absente,
+   * dernière copie, mythique exclue…) ; sinon la demande reste en attente
+   * (place libre, délai anti-boucle, prochain essai).
+   */
+  function autoSellRelistCheck({
+    dropped = null,
+    row = null,
+    spare = 0,
+    slots = 0,
+    includeM = false,
+    lastAt = 0,
+    now = Date.now(),
+    cooldownMs = AUTOSELL_RELIST_COOLDOWN_MS
+  } = {}) {
+    const reason = String(dropped?.reason ?? '');
+    // Retrait volontaire : jamais de remise en vente automatique.
+    if (dropped?.manual || /annul/i.test(reason)) {
+      return { ok: false, reason: 'annonce retirée à la main', permanent: true };
+    }
+    if (!row) return { ok: false, reason: 'carte absente de la collection', permanent: true };
+    if (String(row.rarity || '').toUpperCase() === 'M' && !includeM) {
+      return { ok: false, reason: 'carte mythique exclue de la vente auto', permanent: true };
+    }
+    if (row.pinned) return { ok: false, reason: 'carte épinglée', permanent: true };
+    if (row.sellBlock || row.block) {
+      return { ok: false, reason: 'revente bloquée (achat de moins de 48 h)', permanent: true };
+    }
+    if (Number(spare) <= 0) {
+      return { ok: false, reason: 'aucune copie disponible, dernière copie conservée', permanent: true };
+    }
+    if (Number(slots) <= 0) return { ok: false, reason: 'aucune place d’annonce libre', permanent: false };
+    if (Number(lastAt) > 0 && now - Number(lastAt) < Math.max(0, Number(cooldownMs) || 0)) {
+      return { ok: false, reason: 'délai anti-boucle', permanent: false };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Ajoute une demande de remise en vente sans doublon : une seule entrée par
+   * carte, la plus récente (dernier prix connu, dernier horodatage) gagne.
+   */
+  function autoSellRelistEnqueue(queue, entry, options = {}) {
+    const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+    const ttl = Math.max(0, Number(options.ttlMs) || AUTOSELL_RELIST_TTL_MS);
+    const list = (Array.isArray(queue) ? queue : []).filter(
+      (item) => item && String(item.characterId ?? '') && now - Number(item.at || 0) <= ttl
+    );
+    const characterId = String(entry?.characterId ?? '');
+    if (!characterId) return list;
+    const next = { ...entry, characterId, at: now, attempts: 0 };
+    const index = list.findIndex((item) => String(item.characterId) === characterId);
+    if (index >= 0) list[index] = next;
+    else list.push(next);
+    return list;
+  }
+
   /** Répartit les places d'annonce disponibles, en commençant par les lots les plus values. */
   function autoSellBuildPlan(candidates, options = {}) {
     let left = Math.max(0, Math.min(10, Math.round(Number(options.slots) || 0)));
@@ -2045,7 +2150,19 @@
           continue;
         }
         if (snap.dead) {
-          dropped.push({ id: entry.id, reason: 'annulée ou expirée' });
+          // Détail conservé : une annulation volontaire ne doit jamais être
+          // remise en vente, contrairement à une expiration sans acheteur.
+          dropped.push({
+            id: entry.id,
+            reason: snap.status === 'expired' ? 'expirée' : 'annulée',
+            status: snap.status,
+            characterId: entry.characterId ?? null,
+            name: entry.name ?? '',
+            rarity: entry.rarity ?? '',
+            type: entry.type ?? '',
+            price: snap.price ?? entry.price ?? null,
+            endsAt: snap.at ?? entry.endsAt ?? null
+          });
           continue;
         }
         if (snap.active) {
@@ -2088,7 +2205,17 @@
         sales.push(salesEntryFromTrack({ ...entry, price: bestBid }, null, endsAt, rates));
         continue;
       }
-      dropped.push({ id: entry.id, reason: 'expirée' });
+      dropped.push({
+        id: entry.id,
+        reason: 'expirée',
+        status: 'expired',
+        characterId: entry.characterId ?? null,
+        name: entry.name ?? '',
+        rarity: entry.rarity ?? '',
+        type: entry.type ?? '',
+        price: entry.price ?? null,
+        endsAt
+      });
     }
     return { sales, keep, dropped };
   }
@@ -2790,6 +2917,9 @@
     });
     state.salesTrack = result.keep.slice(-SALES_TRACK_MAX);
     saveSalesSoon();
+    // Une annonce revenue sans acheteur repart immédiatement si la vente auto
+    // tourne ; une annulation volontaire est écartée par `autoSellRelistCheck`.
+    autoSellQueueRelists(result.dropped);
     if (!result.sales.length) return [];
     const added = recordConfirmedSales(result.sales);
     if (added.length) {
@@ -4257,6 +4387,161 @@
   }
 
   /**
+   * Met en file les annonces revenues sans acheteur, pour une remise en vente
+   * immédiate. Uniquement pendant la vente auto : hors session ou après un
+   * arrêt demandé, rien n'est remis en ligne.
+   */
+  function autoSellQueueRelists(dropped) {
+    const a = state.autoSell;
+    if (!a || (!a.running && !a.starting) || a.stop) return [];
+    for (const item of Array.isArray(dropped) ? dropped : []) {
+      const listingId = String(item?.id ?? '');
+      if (!listingId || a.relist.ids[listingId]) continue;
+      if (item?.characterId == null || item.characterId === '') continue;
+      a.relist.queue = autoSellRelistEnqueue(a.relist.queue, {
+        listingId,
+        characterId: String(item.characterId),
+        name: String(item.name ?? ''),
+        rarity: String(item.rarity ?? ''),
+        type: String(item.type ?? 'fixed'),
+        previousPrice: Number(item.price) > 0 ? Math.round(Number(item.price)) : null,
+        endsAt: item.endsAt ?? null,
+        reason: String(item.reason ?? 'expirée')
+      });
+    }
+    return a.relist.queue;
+  }
+
+  /**
+   * Remet en vente les cartes dont l'annonce est revenue sans acheteur, au prix
+   * le plus bas autorisé (stratégie « Vente rapide », jamais sous la valeur de
+   * recyclage). Une carte à la fois, jamais deux annonces en parallèle pour la
+   * même carte. En cas d'échec, la carte reste dans l'inventaire et l'erreur
+   * est affichée : rien n'est perdu.
+   */
+  async function autoSellProcessRelists() {
+    const a = state.autoSell;
+    const s = state.settings;
+    const report = { created: 0, matched: 0, errors: 0, rows: [], skipped: 0 };
+    if (!a.relist.queue.length) return report;
+
+    const type = s.autoSellType === 'auction' ? 'auction' : 'fixed';
+    const keep = [];
+    for (const item of a.relist.queue.slice()) {
+      if (!a.running || a.stop) {
+        keep.push(item);
+        continue;
+      }
+      const row = sellRows().find((r) => String(r.id) === item.characterId) ?? null;
+      const activeQty = row
+        ? autoSellActiveQtyFor(row, autoSellActiveQtyByKey(autoSellActiveEntries()))
+        : 0;
+      const check = autoSellRelistCheck({
+        dropped: item,
+        row,
+        spare: row ? autoSellSpare(row, activeQty) : 0,
+        slots: listingSlots().remaining,
+        includeM: Boolean(s.autoSellIncludeM),
+        lastAt: Number(a.relist.locks[item.characterId] || 0)
+      });
+      if (!check.ok) {
+        if (check.permanent) {
+          report.skipped += 1;
+          autoSellLog(`↻ ${item.name || 'Carte'} · remise en vente impossible · ${check.reason}`, 'err');
+        } else {
+          keep.push(item);
+        }
+        continue;
+      }
+
+      const key = item.characterId;
+      // Prix le plus bas réel de cette carte : un seul instantané marché.
+      if (s.autoSellStrategy === 'quick' && !state.marketScanned.has(key)) {
+        try {
+          await ensureMarketData([key]);
+        } catch {
+          /* les prix déjà connus suffisent */
+        }
+      }
+      const floor = recycleFloor(row.rarity);
+      const prices = state.prices[key] ?? {};
+      const price = autoSellRelistPrice({
+        floor,
+        lowest: Number(state.lowest[key] ?? state.fixedLow[key]),
+        median: Number(prices.m7 ?? prices.m30),
+        previous: item.previousPrice
+      });
+      const alreadyLowest = item.previousPrice != null && price === item.previousPrice;
+      const single = {
+        ...row,
+        characterId: apiId(row.rawId ?? row.id),
+        price,
+        qty: 1,
+        floor
+      };
+
+      const result = await runSalePlan([single], {
+        type,
+        duration: autoSellDuration(),
+        buyoutPct: s.buyoutPct,
+        quick: true,
+        dryRun: Boolean(s.autoSellDryRun),
+        gap: () => 0,
+        source: 'auto',
+        log: autoSellLog,
+        shouldStop: () => !a.running || a.stop
+      });
+
+      if (result.created) {
+        a.relist.locks[key] = Date.now();
+        a.relist.ids[String(item.listingId)] = Date.now();
+        a.relist.count += 1;
+        a.relist.last = {
+          name: single.name,
+          price,
+          at: Date.now(),
+          previous: item.previousPrice
+        };
+        if (!result.matched) {
+          autoSellRememberListing(single, result.posted, type, autoSellDuration(), activeQty);
+        }
+        report.created += 1;
+        if (result.matched) report.matched += 1;
+        report.rows.push(single);
+        autoSellLog(
+          `↻ ${single.name} · remise en vente auto · ◆ ${fmt(price)}${
+            alreadyLowest ? ' · déjà au prix le plus bas, même prix' : ''
+          }`,
+          'ok'
+        );
+        continue;
+      }
+
+      if (result.simulated) {
+        // Simulation : rien n'est posté, la demande ne revient pas en boucle.
+        a.relist.ids[String(item.listingId)] = Date.now();
+        report.rows.push(single);
+        continue;
+      }
+
+      // Échec réel (API, prix refusé…) : la carte reste dans l'inventaire.
+      a.relist.locks[key] = Date.now();
+      item.attempts = Number(item.attempts || 0) + 1;
+      report.errors += 1;
+      if (item.attempts < AUTOSELL_RELIST_MAX_ATTEMPTS) {
+        keep.push(item);
+      } else {
+        autoSellLog(
+          `✗ ${single.name} · remise en vente impossible · la carte reste dans l’inventaire`,
+          'err'
+        );
+      }
+    }
+    a.relist.queue = keep;
+    return report;
+  }
+
+  /**
    * Un cycle : relit les données, puis vend **une annonce à la fois**. Après
    * chaque vente, la collection et les ventes actives sont relues et le
    * meilleur candidat est choisi à nouveau. `preview` ne poste rien.
@@ -4289,7 +4574,22 @@
       }
     }
 
-    if (prep.error) {
+    // Remise en vente des annonces revenues sans acheteur, avant tout nouveau
+    // choix : la carte repart au prix le plus bas autorisé, jamais sous le
+    // plancher de recyclage.
+    let relisted = { created: 0, matched: 0, errors: 0, rows: [], skipped: 0 };
+    if (!preview) {
+      relisted = await autoSellProcessRelists();
+      if (relisted.created && !prep.error) {
+        try {
+          prep = await autoSellPrepare({ refresh: false });
+        } catch {
+          /* le plan initial reste valable */
+        }
+      }
+    }
+
+    if (prep.error && !relisted.created) {
       a.lastError = prep.error;
       a.status = prep.error;
       a.preview = null;
@@ -4304,6 +4604,11 @@
         error: prep.error,
         errorKind: prep.errorKind
       };
+    }
+
+    if (prep.error) {
+      // La remise en vente a réussi : ce n'est pas une erreur de la signaler.
+      prep = { ...prep, error: null, errorKind: null, plan: [], candidates: [] };
     }
 
     if (preview) {
@@ -4346,8 +4651,13 @@
       return { ...result, plan: prep.plan, fatal: null };
     }
 
-    const totals = { created: 0, matched: 0, errors: 0, simulated: 0 };
-    const plan = [];
+    const totals = {
+      created: relisted.created,
+      matched: relisted.matched,
+      errors: relisted.errors,
+      simulated: 0
+    };
+    const plan = [...relisted.rows];
     let fatal = null;
     let needSync = false;
     let current = prep;
@@ -4547,6 +4857,8 @@
     a.initialPrep = null;
     a.priceScanAt = 0;
     a.log = [];
+    // Nouvelle session : file de remise en vente repartie de zéro.
+    a.relist = { queue: [], last: null, count: 0, locks: {}, ids: {} };
     render();
 
     let prep;
@@ -4611,6 +4923,10 @@
     a.gen += 1;
     a.nextAt = 0;
     a.initialPrep = null;
+    // Arrêt demandé : aucune remise en vente ne doit partir après ce point.
+    a.relist.queue = [];
+    a.relist.ids = {};
+    a.relist.locks = {};
     a.status = reason;
     autoSellLog(reason);
     render();
@@ -4622,6 +4938,18 @@
       if (!alive()) return;
       await sleep(Math.min(1000, end - Date.now()));
     }
+  }
+
+  /**
+   * Une annonce suivie arrive-t-elle à échéance ? La boucle relit alors les
+   * ventes actives sans attendre le refresh complet, pour remettre la carte en
+   * vente tout de suite.
+   */
+  function autoSellExpirySoon(now = Date.now(), windowMs = 90000) {
+    return state.salesTrack.some((entry) => {
+      const ends = Number(entry?.endsAt) || 0;
+      return ends > 0 && ends <= now + Math.max(0, Number(windowMs) || 0);
+    });
   }
 
   /** Vérifie une place libre sans relire toute la collection (une requête). */
@@ -4715,14 +5043,23 @@
       let elapsed = 0;
       while (alive() && elapsed < pause) {
         // File pleine : on surveille une vente toutes les 5 s pour remettre
-        // immédiatement une annonce dès qu'une place se libère.
-        const chunk = Math.min(full ? 5000 : 30000, pause - elapsed);
+        // immédiatement une annonce dès qu'une place se libère. Sinon, une
+        // annonce proche de son échéance est surveillée toutes les 15 s.
+        const soon = autoSellExpirySoon();
+        const watch = full ? 5000 : soon ? 15000 : 30000;
+        const chunk = Math.min(watch, pause - elapsed);
         await autoSellWait(chunk, alive);
         elapsed += chunk;
         if (!alive() || elapsed >= pause) break;
         if (full && (await autoSellCheckFreeSlot())) {
           a.nextAt = 0;
           a.status = 'Place libre · reprise du remplissage';
+          render();
+          break;
+        }
+        if (!full && autoSellExpirySoon() && (await autoSellCheckFreeSlot())) {
+          a.nextAt = 0;
+          a.status = 'Annonce arrivée à échéance · remise en vente';
           render();
           break;
         }
@@ -7267,6 +7604,15 @@
           <span><b>${fmt(slots.remaining)}</b> place(s) libre(s)</span>
         </div>
         ${
+          a.relist.last
+            ? `<div class="kp-autosell-relist">↻ Remise en vente auto · <b>${esc(
+                a.relist.last.name
+              )}</b> · ◆ ${fmt(a.relist.last.price)} · ${nowTime(a.relist.last.at)}${
+                a.relist.count > 1 ? ` · ${fmt(a.relist.count)} au total` : ''
+              }</div>`
+            : ''
+        }
+        ${
           a.status
             ? `<div class="kp-autosell-status">${esc(a.status)}${
                 a.nextAt && a.running ? ` · prochain cycle ${nowTime(a.nextAt)}` : ''
@@ -7468,12 +7814,17 @@
             const id = String(listing.characterId ?? card?.id ?? '');
             const stateText = autoSellListingLabel(listing);
             const pending = Boolean(listing.pending);
+            const relisted = Boolean(state.autoSell.relist.ids[String(listing.id)]);
             return `<button class="kp-listed-card ${pending ? 'is-pending' : ''}" type="button" style="--rc:${esc(
               info.color
             )}" data-act="sell-detail" data-id="${esc(id)}" data-hide-recommend="1" title="Voir l'étude de marché de cette carte">
               <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
               <span class="kp-listed-info">
-                <b>${esc(card?.name ?? `Carte #${listing.characterId ?? '?'}`)}</b>
+                <b>${esc(card?.name ?? `Carte #${listing.characterId ?? '?'}`)}${
+                  relisted
+                    ? ' <i class="kp-listed-relist" title="Remise en vente automatique après expiration">↻</i>'
+                    : ''
+                }</b>
                 <small>${esc(info.label)} · ${type} · ×${fmt(qty)}</small>
                 <em>◆ ${fmt(unit)}${
                   qty > 1 && total != null ? ` <i>· total ◆ ${fmt(total)}</i>` : ''

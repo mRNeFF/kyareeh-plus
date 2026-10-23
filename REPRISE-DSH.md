@@ -41,7 +41,7 @@ Ce que fait le panneau, par onglet :
 | Onglet | Ce qu'il apporte | Fonction de vue |
 |---|---|---|
 | **Compte** | Valeur estimée en chakra, ressources (boosters, pity), top cartes, valeur par rareté, complétion par série, recherche d'un autre joueur avec valorisation exacte | `viewAccount()` |
-| **Vente** | Toutes les cartes (pas seulement les doublons), filtres rareté/série/doublons, blocage de revente 48 h avec compte à rebours, sélection plafonnée aux places d'annonce, prix fixe ou enchère, 3 stratégies applicables au lot | `viewSell()` |
+| **Vente** | Toutes les cartes (pas seulement les doublons), filtres rareté/série/doublons, blocage de revente 48 h avec compte à rebours, sélection plafonnée aux places d'annonce, prix fixe ou enchère, 3 stratégies applicables au lot, **remise en vente auto** des annonces revenues sans acheteur (prix le plus bas autorisé, journal `↻` + pastille) | `viewSell()` |
 | **Marché** | Scan des annonces sous la médiane, annonces actives, marché global groupé par carte | `viewMarket()` |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra | `viewCards()` |
 | **Auto-Open** | Boucle d'ouverture (1 booster à la fois, délai aléatoire `T_max = (9 − B) × I + R`), watchdog, arrêt sur L/M, anti-AFK, journal, reprise après rechargement | `viewAuto()` |
