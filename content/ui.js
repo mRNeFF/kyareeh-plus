@@ -85,7 +85,7 @@
     // Vente automatique : uniquement les doublons, jamais la dernière copie.
     autoSellType: 'fixed',
     autoSellStrategy: 'balanced',
-    autoSellOrder: 'price_desc',
+    autoSellOrder: 'score',
     autoSellDelayMinSec: 5,
     autoSellDelayMaxSec: 60,
     autoSellRefreshMinMin: 7,
@@ -109,6 +109,13 @@
     ['rarity_desc', 'Rareté ↓'],
     ['price_asc', 'Prix unitaire ↑'],
     ['name_asc', 'Nom A→Z']
+  ];
+
+  // Ordres de la vente auto. « score » = prix + ventes sur 7 jours (défaut).
+  const AUTOSELL_ORDERS = [
+    ['score', 'Optimisé : prix + ventes sur 7 j'],
+    ['price_desc', 'Prix ↓ · plus cher → moins cher'],
+    ['price_asc', 'Prix ↑ · moins cher → plus cher']
   ];
 
   const RARITY = {
@@ -339,6 +346,9 @@
       initialPrep: null,
       refreshing: false,
       lastPick: null,
+      // Nombre de classements recalculés (un par vente en mode optimisé).
+      rankCount: 0,
+      rankAt: 0,
       log: []
     },
     reloadArmed: false,
@@ -918,7 +928,9 @@
     state.settings.autoSellStrategy = ['quick', 'balanced', 'max'].includes(state.settings.autoSellStrategy)
       ? state.settings.autoSellStrategy
       : 'balanced';
-    state.settings.autoSellOrder = state.settings.autoSellOrder === 'price_asc' ? 'price_asc' : 'price_desc';
+    state.settings.autoSellOrder = AUTOSELL_ORDERS.some(([value]) => value === state.settings.autoSellOrder)
+      ? state.settings.autoSellOrder
+      : 'score';
     state.settings.autoSellRefreshMinMin = Math.min(
       60,
       Math.max(1, Math.round(Number(state.settings.autoSellRefreshMinMin) || 7))
@@ -1682,27 +1694,147 @@
   }
 
   /**
+   * Ancienneté maximale d'une statistique de ventes 7 j pour servir au
+   * classement optimisé. Au-delà, le volume n'est plus considéré comme fiable :
+   * la carte est classée comme si sa demande était inconnue (donc sans bonus).
+   */
+  const AUTOSELL_VOLUME_MAX_AGE_MS = 6 * 3600 * 1000;
+
+  /** Les volumes/prix des candidats sont relus au plus toutes les 5 minutes. */
+  const AUTOSELL_VOLUME_TTL_MS = 5 * 60 * 1000;
+
+  /** Poids du classement optimisé : la demande pèse plus lourd que le prix. */
+  const AUTOSELL_SCORE_WEIGHTS = { volume: 0.7, price: 0.3 };
+
+  /**
+   * Volume de ventes 7 j réellement exploitable pour une ligne.
+   * `sales7dAt` est l'horodatage de la lecture marché : sans date, ou avec une
+   * date trop ancienne, le volume est marqué `stale` et n'est pas utilisé.
+   * Aucune donnée inventée : pas de volume connu ⇒ `missing`.
+   */
+  function autoSellVolumeInfo(row, options = {}) {
+    const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+    const maxAge = Number.isFinite(Number(options.volumeMaxAgeMs))
+      ? Math.max(0, Number(options.volumeMaxAgeMs))
+      : AUTOSELL_VOLUME_MAX_AGE_MS;
+    const raw = row?.sales7d ?? row?.sales7 ?? row?.sold7d ?? null;
+    const volume = Number(raw);
+    const known = raw != null && raw !== '' && Number.isFinite(volume) && volume >= 0;
+    const atRaw = Number(row?.sales7dAt ?? row?.salesAt);
+    const at = Number.isFinite(atRaw) && atRaw > 0 ? atRaw : null;
+    if (!known) return { volume: null, status: 'missing', at };
+    // Une valeur sans date de lecture ne peut pas être datée : on la traite
+    // comme obsolète plutôt que de la croire sur parole.
+    if (at == null) return { volume, status: 'stale', at: null };
+    if (now - at > maxAge) return { volume, status: 'stale', at };
+    return { volume, status: 'ok', at };
+  }
+
+  /**
+   * Classement « Optimisé : prix + ventes sur 7 j ».
+   *
+   * Score 0–100 = 70 % liquidité + 30 % prix, chaque part log-normalisée sur la
+   * meilleure candidate du moment (statistiques réelles, aucune constante de
+   * marché) :
+   *   - liquidité = log(1 + ventes 7 j) / log(1 + meilleur volume)
+   *   - prix      = log(prix) / log(meilleur prix)
+   * Le volume pèse donc plus lourd que le prix : une carte chère mais peu
+   * demandée passe derrière une carte un peu moins chère qui s'écoule vite,
+   * même avec un gros écart de prix. À liquidité comparable, le prix départage.
+   * Un volume absent ou périmé laisse la liquidité à 0 : la carte ne peut pas
+   * être supposée très demandée (score plafonné à 30/100).
+   */
+  function autoSellRank(rows, options = {}) {
+    const list = Array.isArray(rows) ? rows : [];
+    const infos = list.map((row) => autoSellVolumeInfo(row, options));
+    const maxVolume = infos.reduce(
+      (max, info) => (info.status === 'ok' ? Math.max(max, info.volume) : max),
+      0
+    );
+    const maxPrice = list.reduce((max, row) => {
+      const price = Number(row?.price);
+      return Number.isFinite(price) && price > 0 ? Math.max(max, price) : max;
+    }, 0);
+    const weightVolume = Number.isFinite(Number(options.volumeWeight))
+      ? Number(options.volumeWeight)
+      : AUTOSELL_SCORE_WEIGHTS.volume;
+    const weightPrice = Number.isFinite(Number(options.priceWeight))
+      ? Number(options.priceWeight)
+      : AUTOSELL_SCORE_WEIGHTS.price;
+    const logVolumeRef = Math.log1p(maxVolume);
+    const logPriceRef = Math.log(Math.max(2, maxPrice));
+
+    const scored = list.map((row, index) => {
+      const info = infos[index];
+      const price = Number(row?.price);
+      const liquidity =
+        info.status === 'ok' && logVolumeRef > 0
+          ? Math.min(1, Math.max(0, Math.log1p(info.volume) / logVolumeRef))
+          : 0;
+      const pricePart =
+        Number.isFinite(price) && price > 0
+          ? Math.min(1, Math.max(0, Math.log(price) / logPriceRef))
+          : 0;
+      const exact = weightVolume * liquidity + weightPrice * pricePart;
+      return {
+        ...row,
+        // Volume brut conservé pour l'affichage, même s'il n'est pas exploitable.
+        volume7: info.volume,
+        volume7Status: info.status,
+        volume7At: info.at,
+        rank: {
+          score: Math.round(exact * 100),
+          exact,
+          liquidity: Math.round(liquidity * 100) / 100,
+          pricePart: Math.round(pricePart * 100) / 100,
+          share: maxVolume > 0 && info.status === 'ok' ? info.volume / maxVolume : 0,
+          maxVolume,
+          maxPrice
+        }
+      };
+    });
+
+    scored.sort((a, b) => {
+      const score = (b.rank?.exact ?? 0) - (a.rank?.exact ?? 0);
+      if (score) return score;
+      // Égalité de score : le prix unitaire, puis le lot, puis le nom.
+      const priceA = Number(a.price) || 0;
+      const priceB = Number(b.price) || 0;
+      if (priceA !== priceB) return priceB - priceA;
+      const totalA = priceA * (Number(a.autoQty) || 0);
+      const totalB = priceB * (Number(b.autoQty) || 0);
+      if (totalA !== totalB) return totalB - totalA;
+      return String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr');
+    });
+
+    return scored.map((row, index) => ({ ...row, rank: { ...row.rank, position: index + 1 } }));
+  }
+
+  /**
    * Filtre les lignes de vente pour ne garder que les doublons sûrs.
    * `price` doit déjà être résolu par l'appelant (null = pas de prix connu).
-   * Le tri porte sur le **prix unitaire**, jamais sur le total du lot : un lot
-   * de 2 cartes à 12 ne doit pas passer devant une carte à 100.
+   * Trois ordres : `score` (prix + ventes 7 j), `price_desc` ou `price_asc`.
+   * Les deux tris par prix portent sur le **prix unitaire**, jamais sur le total
+   * du lot : un lot de 2 cartes à 12 ne doit pas passer devant une carte à 100.
    */
   function autoSellSelect(rows, options = {}) {
+    const list = (Array.isArray(rows) ? rows : [])
+      .map((row) => ({ ...row, autoQty: autoSellSpare(row, row.activeQty) }))
+      .filter((row) => autoSellEligible(row, options));
+    if (options.order === 'score') return autoSellRank(list, options);
+
     const ascending = options.order === 'price_asc';
     const sign = ascending ? 1 : -1;
-    return (Array.isArray(rows) ? rows : [])
-      .map((row) => ({ ...row, autoQty: autoSellSpare(row, row.activeQty) }))
-      .filter((row) => autoSellEligible(row, options))
-      .sort((a, b) => {
-        const priceA = Number(a.price);
-        const priceB = Number(b.price);
-        const unit = sign * (priceA - priceB);
-        if (unit) return unit;
-        // À prix égal, le lot qui rapporte le plus passe devant.
-        const total = sign * (priceA * a.autoQty - priceB * b.autoQty);
-        if (total) return total;
-        return String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr');
-      });
+    return list.sort((a, b) => {
+      const priceA = Number(a.price);
+      const priceB = Number(b.price);
+      const unit = sign * (priceA - priceB);
+      if (unit) return unit;
+      // À prix égal, le lot qui rapporte le plus passe devant.
+      const total = sign * (priceA * a.autoQty - priceB * b.autoQty);
+      if (total) return total;
+      return String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr');
+    });
   }
 
   /** Prix d'une stratégie de vente, sans jamais retomber sur un prix inventé. */
@@ -1826,6 +1958,22 @@
    */
   function autoSellPrice(row, strategy = state.settings.autoSellStrategy) {
     return autoSellStrategyPrice(rowRecommendation(row, row), strategy);
+  }
+
+  /**
+   * Statistiques de marché du classement optimisé, lues dans le cache de prix
+   * (le même instantané que la fiche carte). `sales7dAt` permet de détecter un
+   * volume trop ancien : une donnée périmée n'est jamais présentée comme fraîche.
+   */
+  function autoSellMarketStats(id) {
+    const entry = state.prices[String(id ?? '')];
+    if (!entry) return { sales7d: null, sales7dAt: null };
+    const raw = entry.sales7d;
+    const volume = raw == null || raw === '' ? null : Number(raw);
+    return {
+      sales7d: Number.isFinite(volume) ? volume : null,
+      sales7dAt: Number(entry.at) > 0 ? Number(entry.at) : null
+    };
   }
 
   function filteredDupes() {
@@ -3529,12 +3677,13 @@
   /**
    * Récupère les prix manquants en **un seul lot** via l'endpoint officiel, au
    * lieu d'un scan marché par carte. C'est ce qui évite la rafale de requêtes
-   * qui faisait expulser le compte.
+   * qui faisait expulser le compte. En mode optimisé (`force`), les entrées déjà
+   * connues mais périmées sont aussi relues : le volume 7 j doit être récent.
    */
-  async function autoSellEnsurePrices(ids) {
+  async function autoSellEnsurePrices(ids, { force = false } = {}) {
     const a = state.autoSell;
     const unique = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
-    const missing = unique.filter((id) => priceOf(id) == null);
+    const missing = force ? unique : unique.filter((id) => priceOf(id) == null);
     if (!missing.length) return;
     a.priceScanAt = Date.now();
     for (let offset = 0; offset < missing.length; offset += 500) {
@@ -3557,11 +3706,14 @@
   /**
    * Prépare un cycle sans rien poster : relit la collection et les ventes
    * actives, met à jour les prix manquants, puis classe les doublons selon le
-   * tri actif. Avant chaque vente, l'appelant rappelle cette fonction.
+   * tri actif. Avant chaque vente, l'appelant rappelle cette fonction : en mode
+   * optimisé, le classement est donc recalculé à chaque annonce, avec des
+   * volumes 7 j relus s'ils ont plus de AUTOSELL_VOLUME_TTL_MS.
    */
   async function autoSellPrepare({ refresh = true } = {}) {
     const a = state.autoSell;
     const s = state.settings;
+    const scoreMode = s.autoSellOrder === 'score';
     if (refresh) {
       a.status = 'Lecture de la collection et des ventes actives…';
       render();
@@ -3588,21 +3740,36 @@
       autoSellEligible(row, { ...options, requirePrice: false })
     );
     const duplicateIds = eligible.map((row) => String(row.id));
-    const missingPrices = duplicateIds.filter((id) => priceOf(id) == null);
-    if (missingPrices.length && Date.now() - Number(a.priceScanAt || 0) > 60000) {
-      a.status = `Lecture des prix (${Math.min(500, missingPrices.length)}/${missingPrices.length})…`;
+    const now = Date.now();
+    // Mode optimisé : on relit aussi les entrées dont le volume 7 j a vieilli.
+    const wantedPrices = scoreMode
+      ? duplicateIds.filter((id) => {
+          if (priceOf(id) == null) return true;
+          const at = Number(state.prices[id]?.at);
+          return !(at > 0) || now - at > AUTOSELL_VOLUME_TTL_MS;
+        })
+      : duplicateIds.filter((id) => priceOf(id) == null);
+    if (wantedPrices.length && now - Number(a.priceScanAt || 0) > 60000) {
+      a.status = scoreMode
+        ? `Lecture des prix et ventes 7 j (${Math.min(500, wantedPrices.length)}/${wantedPrices.length})…`
+        : `Lecture des prix (${Math.min(500, wantedPrices.length)}/${wantedPrices.length})…`;
       render();
       // Un seul appel groupé : plus de scan marché carte par carte au lancement.
-      await autoSellEnsurePrices(missingPrices);
+      await autoSellEnsurePrices(wantedPrices, { force: scoreMode });
     }
 
     const priced = all.map((row) => ({
       ...row,
+      ...autoSellMarketStats(row.id),
       characterId: apiId(row.rawId ?? row.id),
       price: autoSellPrice(row, s.autoSellStrategy),
       floor: recycleFloor(row.rarity)
     }));
-    const candidates = autoSellSelect(priced, options);
+    const candidates = autoSellSelect(priced, { ...options, now: Date.now() });
+    // Un classement complet est refait ici, donc avant chaque vente : c'est ce
+    // qui garantit que l'ordre suit les dernières stats de marché.
+    a.rankCount = Number(a.rankCount || 0) + 1;
+    a.rankAt = Date.now();
     const withoutPrice = priced.filter(
       (row) =>
         autoSellEligible(row, { ...options, requirePrice: false }) &&
@@ -3769,7 +3936,12 @@
       const pick = current.candidates[0];
       const single = { ...pick, qty: 1 };
       a.lastPick = single;
-      a.status = `Meilleure carte · ${single.name} · ◆ ${fmt(single.price)} · ${fmt(
+      // En mode optimisé, on affiche les critères retenus : volume 7 j + score.
+      const pickDetail =
+        s.autoSellOrder === 'score'
+          ? ` · ${autoSellVolumeLabel(single)} · score ${single.rank?.score ?? 0}/100`
+          : '';
+      a.status = `Meilleure carte · ${single.name} · ◆ ${fmt(single.price)}${pickDetail} · ${fmt(
         current.slots.remaining
       )} place(s) libre(s)`;
       render();
@@ -6530,32 +6702,72 @@
       </div>`;
   }
 
-  /** Valeur totale des doublons **disponibles** selon la stratégie choisie. */
-  function autoSellEstimate() {
+  /**
+   * Doublons disponibles, classés selon l'ordre actif. Les statistiques de
+   * marché (volume 7 j + date de lecture) sont jointes avant le tri : c'est le
+   * même jeu de données que celui utilisé par la vente auto.
+   */
+  function autoSellRankedCandidates() {
     const strategy = state.settings.autoSellStrategy;
     const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
     const priced = sellRows().map((row) => ({
       ...row,
       activeQty: autoSellActiveQtyFor(row, activeQtyByKey),
-      price: autoSellPrice(row, strategy)
+      ...autoSellMarketStats(row.id),
+      price: autoSellPrice(row, strategy),
+      floor: recycleFloor(row.rarity)
     }));
-    const candidates = autoSellSelect(priced, {
+    return autoSellSelect(priced, {
       includeM: Boolean(state.settings.autoSellIncludeM),
-      order: state.settings.autoSellOrder
+      order: state.settings.autoSellOrder,
+      now: Date.now()
     });
+  }
+
+  /** Valeur totale des doublons **disponibles** selon la stratégie choisie. */
+  function autoSellEstimate() {
+    const candidates = autoSellRankedCandidates();
     let total = 0;
     let copies = 0;
     for (const row of candidates) {
       total += (Number(row.price) || 0) * row.autoQty;
       copies += row.autoQty;
     }
-    return { total, copies, cards: candidates.length };
+    return { total, copies, cards: candidates.length, candidates };
+  }
+
+  /** Libellé français du niveau de priorité d'une carte classée. */
+  function autoSellPriorityLabel(row) {
+    const status = row?.volume7Status;
+    if (status === 'missing') return 'ventes 7 j inconnues';
+    if (status === 'stale') return 'ventes 7 j périmées';
+    const share = Number(row?.rank?.share) || 0;
+    if (share >= 0.6) return 'forte demande';
+    if (share >= 0.2) return 'demande moyenne';
+    return 'faible demande';
+  }
+
+  /** « 83 ventes/7 j », « ventes 7 j — » ou « 83 ventes/7 j (périmé) ». */
+  function autoSellVolumeLabel(row) {
+    const status = row?.volume7Status;
+    if (status === 'missing') return 'ventes 7 j —';
+    const volume = Number(row?.volume7);
+    if (!Number.isFinite(volume)) return 'ventes 7 j —';
+    return `${fmt(volume)} vente(s)/7 j${status === 'stale' ? ' · périmé' : ''}`;
+  }
+
+  /** Date courte de la lecture marché, pour justifier un volume ignoré. */
+  function autoSellVolumeDate(row) {
+    const at = Number(row?.volume7At);
+    if (!Number.isFinite(at) || at <= 0) return null;
+    return new Date(at).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
   }
 
   function autoSellPanel(all, slots) {
     const a = state.autoSell;
     const s = state.settings;
     const estimate = autoSellEstimate();
+    const scoreMode = s.autoSellOrder === 'score';
     const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
     const rows = all.map((row) => ({
       ...row,
@@ -6590,6 +6802,26 @@
           : 'arrêtée';
     const locked = a.running || a.starting;
     const log = a.log.slice(-8);
+    // Mode optimisé : la carte qui partira au prochain tour, avec les chiffres
+    // exacts qui ont servi au classement (volume 7 j, prix, score).
+    const pick = scoreMode ? estimate.candidates[0] ?? null : null;
+    const runnerUp = scoreMode ? estimate.candidates[1] ?? null : null;
+    const pickWhy = (row) => {
+      if (!row) return '';
+      if (row.volume7Status === 'missing') {
+        return 'Ventes 7 j inconnues : aucun bonus de demande, score plafonné à 30/100.';
+      }
+      if (row.volume7Status === 'stale') {
+        const date = autoSellVolumeDate(row);
+        return `Ventes 7 j lues le ${date ?? '—'} : trop anciennes, ignorées (score plafonné à 30/100).`;
+      }
+      const share = Number(row.rank?.share) || 0;
+      const liquid = share >= 0.999 ? 'le plus liquide de la sélection' : `liquidité ${Math.round(share * 100)} % du meilleur`;
+      return `Volume 7 j : ${fmt(row.volume7)} (${liquid}) · prix ◆ ${fmt(row.price)} · score ${row.rank?.score ?? 0}/100.`;
+    };
+    const scoreHint = scoreMode
+      ? '<div class="kp-autosell-hint">Score 0–100 : 70 % ventes sur 7 j + 30 % prix, recalculé avant chaque vente · volume relu au plus toutes les 5 min.</div>'
+      : '';
     return `
       <section class="kp-autosell ${a.running ? 'is-running' : ''} ${a.armed ? 'is-armed' : ''} ${
         a.starting ? 'is-starting' : ''
@@ -6635,8 +6867,10 @@
           <label>
             <span>Ordre</span>
             <select class="kp-select" data-autosell-order ${locked ? 'disabled' : ''}>
-              <option value="price_desc" ${s.autoSellOrder === 'price_desc' ? 'selected' : ''}>Plus cher → moins cher</option>
-              <option value="price_asc" ${s.autoSellOrder === 'price_asc' ? 'selected' : ''}>Moins cher → plus cher</option>
+              ${AUTOSELL_ORDERS.map(
+                ([value, label]) =>
+                  `<option value="${value}" ${s.autoSellOrder === value ? 'selected' : ''}>${label}</option>`
+              ).join('')}
             </select>
           </label>
           <label>
@@ -6651,6 +6885,33 @@
             </select>
           </label>
         </div>
+        ${scoreHint}
+        ${
+          pick
+            ? `<div class="kp-autosell-pick">
+                 <div class="kp-pick-head">
+                   <span>${a.running ? 'Carte en cours de sélection' : 'Prochaine carte'} · classement optimisé</span>
+                   <span class="kp-pick-score">${pick.rank?.score ?? 0}<i>/100</i></span>
+                 </div>
+                 <div class="kp-pick-line">
+                   <b>${esc(pick.name)}</b>
+                   <span class="kp-pick-cell">◆ ${fmt(pick.price)}</span>
+                   <span class="kp-pick-cell">${esc(autoSellVolumeLabel(pick))}</span>
+                   <em class="kp-pick-tag ${pick.volume7Status === 'ok' ? '' : 'is-warn'}">${esc(
+                     autoSellPriorityLabel(pick)
+                   )}</em>
+                 </div>
+                 <div class="kp-pick-why">${esc(pickWhy(pick))}</div>
+                 ${
+                   runnerUp
+                     ? `<div class="kp-pick-next">Ensuite · ${esc(runnerUp.name)} · ◆ ${fmt(
+                         runnerUp.price
+                       )} · ${esc(autoSellVolumeLabel(runnerUp))} · score ${runnerUp.rank?.score ?? 0}/100</div>`
+                     : ''
+                 }
+               </div>`
+            : ''
+        }
         <div class="kp-autosell-estimate">
           <span>Gain estimé · ${strategyLabel}</span>
           <b>◆ ${fmt(estimate.total)}</b>
@@ -6696,8 +6957,14 @@
                      ? a.preview.plan
                          .slice(0, 10)
                          .map(
-                           (row) =>
-                             `<div><span>${esc(row.name)} × ${row.qty}</span><b>◆ ${fmt(row.price)}</b></div>`
+                           (row, index) =>
+                             `<div><span>#${index + 1} ${esc(row.name)} × ${row.qty}</span>${
+                               scoreMode
+                                 ? `<span class="kp-preview-meta">${esc(autoSellVolumeLabel(row))} · score ${
+                                     row.rank?.score ?? 0
+                                   }</span>`
+                                 : ''
+                             }<b>◆ ${fmt(row.price)}</b></div>`
                          )
                          .join('')
                      : '<div>Aucune annonce à préparer.</div>'
@@ -11225,7 +11492,11 @@
           ? autoStrategy.value
           : 'balanced';
       }
-      if (autoOrder) state.settings.autoSellOrder = autoOrder.value === 'price_asc' ? 'price_asc' : 'price_desc';
+      if (autoOrder) {
+        state.settings.autoSellOrder = AUTOSELL_ORDERS.some(([value]) => value === autoOrder.value)
+          ? autoOrder.value
+          : 'score';
+      }
       if (autoDuration) {
         const hours = Number(autoDuration.value);
         if ([12, 24, 48].includes(hours)) state.settings.durationHours = hours;
@@ -11562,6 +11833,10 @@
       autoSellRefreshListings,
       autoSellActiveEntries,
       autoSellListings,
+      autoSellSelect,
+      autoSellRank,
+      autoSellVolumeInfo,
+      autoSellRankedCandidates,
       startAutoSell,
       stopAutoSell,
       armAutoSell,

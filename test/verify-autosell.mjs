@@ -18,6 +18,8 @@ const api = new Function(`${source.slice(begin, end)}
     autoSellSpare,
     autoSellEligible,
     autoSellSelect,
+    autoSellRank,
+    autoSellVolumeInfo,
     autoSellBuildPlan,
     autoSellStrategyPrice,
     autoSellListingRows,
@@ -188,6 +190,121 @@ check('stratégie équilibrée', api.autoSellStrategyPrice(rec, 'balanced') === 
 check('stratégie maximale', api.autoSellStrategyPrice(rec, 'max') === 35);
 check('prix estimé refusé', api.autoSellStrategyPrice({ ...rec, estimated: true }, 'max') === null);
 check('prix absurde refusé', api.autoSellStrategyPrice({ max: { price: 0 } }, 'max') === null);
+
+// --- Classement optimisé : prix + ventes sur 7 jours -------------------
+const H = 3600 * 1000;
+const scoredRow = (over) => row({ sales7dAt: now, ...over });
+
+const example = api.autoSellSelect(
+  [
+    scoredRow({ id: 'e', name: 'E', price: 15, sales7d: 100 }),
+    scoredRow({ id: 'x', name: 'X', price: 10, sales7d: 10000 })
+  ],
+  { order: 'score', now }
+);
+check(
+  'optimisé : une carte chère peu demandée passe derrière une carte liquide',
+  example[0]?.id === 'x',
+  example.map((r) => `${r.id}:${r.rank?.score}`).join(',')
+);
+check(
+  'optimisé : score, volume et rang exposés',
+  Number.isFinite(example[0]?.rank?.score) &&
+    example[0]?.volume7 === 10000 &&
+    example[0]?.rank?.position === 1 &&
+    example[1]?.rank?.position === 2,
+  JSON.stringify(example[0]?.rank)
+);
+check(
+  'optimisé : scores bornés à 0–100',
+  example.every((r) => r.rank.score >= 0 && r.rank.score <= 100),
+  example.map((r) => r.rank.score).join(',')
+);
+check(
+  'optimisé : le prix départage une liquidité comparable',
+  api.autoSellSelect(
+    [
+      scoredRow({ id: 'cher', name: 'Cher', price: 15, sales7d: 100 }),
+      scoredRow({ id: 'moins', name: 'Moins', price: 14, sales7d: 100 })
+    ],
+    { order: 'score', now }
+  )[0]?.id === 'cher'
+);
+check(
+  'optimisé : faible volume rétrogradé malgré un prix très supérieur',
+  api.autoSellSelect(
+    [
+      scoredRow({ id: 'chere-peu', name: 'Chère peu demandée', price: 5000, sales7d: 1 }),
+      scoredRow({ id: 'moins-chere', name: 'Moins chère demandée', price: 4000, sales7d: 50 })
+    ],
+    { order: 'score', now }
+  )[0]?.id === 'moins-chere'
+);
+check(
+  'optimisé : volume inconnu = comportement conservateur',
+  api.autoSellSelect(
+    [
+      scoredRow({ id: 'inconnu', name: 'Inconnu', price: 1000, sales7d: null }),
+      scoredRow({ id: 'connu', name: 'Connu', price: 10, sales7d: 5 })
+    ],
+    { order: 'score', now }
+  )[0]?.id === 'connu'
+);
+check(
+  'optimisé : score plafonné à 30 sans volume exploitable',
+  api.autoSellSelect(
+    [scoredRow({ id: 'inconnu', name: 'Inconnu', price: 1000, sales7d: null })],
+    { order: 'score', now }
+  )[0]?.rank.score === 30
+);
+check(
+  'optimisé : volume périmé ignoré',
+  api.autoSellSelect(
+    [
+      scoredRow({ id: 'vieux', name: 'Vieux', price: 1000, sales7d: 9000, sales7dAt: now - 7 * 24 * H }),
+      scoredRow({ id: 'frais', name: 'Frais', price: 10, sales7d: 5 })
+    ],
+    { order: 'score', now }
+  )[0]?.id === 'frais'
+);
+check('volume 7 j absent', api.autoSellVolumeInfo({}, { now }).status === 'missing');
+check(
+  'volume 7 j sans date traité comme périmé',
+  api.autoSellVolumeInfo({ sales7d: 12 }, { now }).status === 'stale'
+);
+check(
+  'volume 7 j trop ancien marqué périmé',
+  api.autoSellVolumeInfo({ sales7d: 12, sales7dAt: now - 7 * H }, { now }).status === 'stale'
+);
+check(
+  'volume 7 j récent accepté',
+  api.autoSellVolumeInfo({ sales7d: 12, sales7dAt: now - H }, { now }).status === 'ok'
+);
+const fallback = api.autoSellSelect(base, { order: 'score' });
+check(
+  'sans aucun volume connu : repli sur le prix',
+  fallback[0]?.id === 'chere' && fallback[1]?.id === 'moyenne',
+  fallback.map((r) => r.id).join(',')
+);
+check(
+  'optimisé : filtres de sécurité conservés',
+  api.autoSellSelect(
+    [scoredRow({ id: 'p', pinned: true, sales7d: 10 }), scoredRow({ id: 'm', rarity: 'M', sales7d: 10 })],
+    { order: 'score', now }
+  ).length === 0
+);
+const quantityRank = api.autoSellSelect(
+  [
+    scoredRow({ id: 'lot2', name: 'Lot 2', price: 20, qty: 3, listable: 2, sales7d: 10 }),
+    scoredRow({ id: 'lot1', name: 'Lot 1', price: 20, qty: 2, listable: 1, sales7d: 10 })
+  ],
+  { order: 'score', now }
+);
+check(
+  'optimisé : à score égal, le lot le plus gros passe devant',
+  quantityRank[0]?.id === 'lot2' && quantityRank[0]?.autoQty === 2,
+  quantityRank.map((r) => `${r.id}:${r.autoQty}`).join(',')
+);
 
 console.log(`${checks - failures}/${checks} contrôles OK`);
 process.exit(failures ? 1 : 0);

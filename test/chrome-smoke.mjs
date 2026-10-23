@@ -433,7 +433,7 @@ async function visualPass() {
     );
     check('Délai anti-flag 5–60 s', autoUi.delay === 5 && autoUi.delayMax === 60, `${autoUi.delay}–${autoUi.delayMax} s`);
     check('Refresh aléatoire 7–10 min', autoUi.refreshMin === 7 && autoUi.refreshMax === 10, `${autoUi.refreshMin}–${autoUi.refreshMax} min`);
-    check('Ordre de vente réglable', autoUi.order.includes('price_desc') && autoUi.order.includes('price_asc'), autoUi.order.join(','));
+    check('Ordre de vente réglable', autoUi.order.includes('score') && autoUi.order.includes('price_desc') && autoUi.order.includes('price_asc'), autoUi.order.join(','));
     check('Durée annonce 12/24/48 h', ['12', '24', '48'].every((h) => autoUi.duration.includes(h)), autoUi.duration.join(','));
     check(
       'Option Mythiques uniquement',
@@ -443,6 +443,75 @@ async function visualPass() {
     check('Bordure de rareté sur les cartes en vente', autoUi.rarity.includes('--rc:'), autoUi.rarity);
     check('Bouton Détacher Global disponible', autoUi.detach === true && autoUi.detachAct === 'panel-detach');
     check('Son global disponible', autoUi.sound === true);
+
+    // Classement optimisé : la carte choisie doit être la plus liquide, pas la plus chère.
+    await waitFor(
+      () => evaluate(cdp, sessionId, `window.__kyaraPlus.autoSellRankedCandidates().length > 0`),
+      { label: 'classement optimisé disponible', timeout: 15000 }
+    );
+    const optimized = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const s = window.__kyaraPlus.state;
+         s.settings.autoSellOrder = 'score';
+         window.__kyaraPlus.render();
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const pick = root.querySelector('.kp-autosell-pick');
+         const ranked = window.__kyaraPlus.autoSellRankedCandidates();
+         const first = ranked[0] || null;
+         const dearest = ranked.reduce((best, row) => (Number(row.price) > Number(best?.price || 0) ? row : best), null);
+         return {
+           order: s.settings.autoSellOrder,
+           hint: root.querySelector('.kp-autosell-hint')?.innerText || '',
+           pick: pick?.innerText || '',
+           count: ranked.length,
+           first: first
+             ? { id: String(first.id), price: Number(first.price), volume: first.volume7, status: first.volume7Status, score: first.rank?.score }
+             : null,
+           dearest: dearest ? { id: String(dearest.id), price: Number(dearest.price) } : null
+         };
+       })()`
+    );
+    check(
+      'Vente auto : tri « Optimisé : prix + ventes sur 7 j » actif par défaut',
+      optimized.order === 'score' && /ventes sur 7 j/i.test(optimized.hint),
+      `${optimized.order} · ${optimized.hint.replace(/\s+/g, ' ').slice(0, 120)}`
+    );
+    check(
+      'Vente auto : prochaine carte expliquée (prix, ventes 7 j, score)',
+      /vente\(s\)\/7 j/i.test(optimized.pick) &&
+        /score/i.test(optimized.pick) &&
+        optimized.pick.includes('◆') &&
+        /prochaine carte/i.test(optimized.pick),
+      optimized.pick.replace(/\s+/g, ' ').slice(0, 240)
+    );
+    check(
+      'Vente auto : l’ordre optimisé ne prend pas la carte la plus chère',
+      Boolean(optimized.first) &&
+        optimized.first.id !== optimized.dearest?.id &&
+        Number(optimized.first.volume) > 0 &&
+        optimized.first.score > 0,
+      `premier=${optimized.first?.id} vol=${optimized.first?.volume} score=${optimized.first?.score} · plus chère=${optimized.dearest?.id}`
+    );
+    const priceOrder = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const s = window.__kyaraPlus.state;
+         s.settings.autoSellOrder = 'price_desc';
+         const ranked = window.__kyaraPlus.autoSellRankedCandidates();
+         const first = ranked[0] || null;
+         s.settings.autoSellOrder = 'score';
+         window.__kyaraPlus.render();
+         return { first: first ? { id: String(first.id), price: Number(first.price) } : null };
+       })()`
+    );
+    check(
+      'Vente auto : tri par prix toujours disponible',
+      priceOrder.first?.id === '999001',
+      `premier=${priceOrder.first?.id} · ◆ ${priceOrder.first?.price}`
+    );
     const soundState = await evaluate(
       cdp,
       sessionId,
@@ -626,9 +695,14 @@ async function visualPass() {
            running: a.running,
            created: a.created,
            cycles: a.cycles,
+           rankCount: a.rankCount,
+           pickScore: a.lastPick?.rank?.score ?? null,
+           pickVolume: a.lastPick?.volume7 ?? null,
            log: a.log.length,
            logText: a.log.map((entry) => entry.text).join(' | '),
            characterId: a.lastPlan?.[0]?.characterId,
+           firstVolume: a.lastPlan?.[0]?.volume7 ?? null,
+           firstScore: a.lastPlan?.[0]?.rank?.score ?? null,
            plan: (a.lastPlan || []).map((row) => String(row.characterId)),
            active: window.__kyaraPlus.autoSellActiveEntries().length,
            slots: window.__kyaraPlus.listingSlots()
@@ -641,9 +715,19 @@ async function visualPass() {
     check('Vente auto : annonces créées', auto.created > 0, `${auto.created} annonce(s) · ${auto.cycles} cycle(s)`);
     check('Vente auto : identifiant API présent', Number.isFinite(Number(auto.characterId)), String(auto.characterId));
     check(
-      'Vente auto : la carte la plus chère passe en premier',
-      Number(auto.characterId) === 999001,
-      `première=${auto.characterId} · plan=${auto.plan.join(',')}`
+      'Vente auto : la carte la plus liquide passe en premier',
+      String(auto.characterId) !== '999001' && Number(auto.firstVolume) > 12 && Number(auto.firstScore) > 0,
+      `première=${auto.characterId} · volume=${auto.firstVolume} · score=${auto.firstScore} · plan=${auto.plan.join(',')}`
+    );
+    check(
+      'Vente auto : classement recalculé avant chaque vente',
+      auto.rankCount >= auto.created && auto.created > 1,
+      `${auto.rankCount} classement(s) pour ${auto.created} annonce(s)`
+    );
+    check(
+      'Vente auto : la carte choisie porte son score et son volume 7 j',
+      Number.isFinite(Number(auto.pickScore)) && Number.isFinite(Number(auto.pickVolume)),
+      `score=${auto.pickScore} · volume=${auto.pickVolume}`
     );
     check(
       'Vente auto : les légendaires en double sont incluses',
