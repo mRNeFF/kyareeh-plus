@@ -124,6 +124,7 @@ de `renderView()`, nouvel appel réseau **uniquement** via `api()`.
 | `kyareeh.packavg.v1` | prix moyens par rareté (24 h) | `storage.local` |
 | `kyareeh.packpools.v1` | pools réels des boosters | `storage.local` |
 | `kyareeh.statboard.v1` | comptes suivis, index propriétaires, `friendsAt` | `storage.local` |
+| `kyareeh.autosellexpiry.v1` | cartes retirées pour ancienneté (file de fin) + journal des retraits/remises | `storage.local` |
 | `kyara_token`, `kyara_device`, `kyara_pass` | session du site (lecture seule côté extension) | `localStorage` de kyara.games |
 
 Détail important : `boot()` **migre** les anciens réglages (suppression de `autoCount`,

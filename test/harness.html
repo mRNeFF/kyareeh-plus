@@ -556,7 +556,16 @@
         ) {
           const id = decodeURIComponent(url.split('/api/market/listings/')[1].split('/cancel')[0]);
           const index = MARKET_STATE.listings.findIndex((item) => item.id === id);
-          if (index >= 0) MARKET_STATE.listings.splice(index, 1);
+          if (index >= 0) {
+            // Le retrait libère l'emplacement et rend l'exemplaire au pool,
+            // comme le vrai site (la carte et sa quantité ne changent pas).
+            const listing = MARKET_STATE.listings[index];
+            const row = MARKET_STATE.collection.find(
+              (item) => Number(item.characterId) === Number(listing.characterId)
+            );
+            if (row) row.listable = Math.min(Number(row.qty ?? 1), Number(row.listable ?? 0) + 1);
+            MARKET_STATE.listings.splice(index, 1);
+          }
           return json({ ok: index >= 0 });
         }
 
@@ -592,6 +601,8 @@
             buyoutPrice: body.buyoutPrice ?? null,
             status: 'active',
             qty: 1,
+            // Même champ que le vrai site : date réelle de mise en vente.
+            createdAt: new Date().toISOString(),
             endsAt: new Date(Date.now() + (Number(body.durationHours) || 12) * 3600e3).toISOString()
           };
           MARKET_STATE.listings.unshift(listing);

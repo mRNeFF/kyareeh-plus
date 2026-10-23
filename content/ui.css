@@ -1653,6 +1653,160 @@ img.kp-avatar {
   color: #22d3ee;
 }
 
+/* Annonce créée par la vente auto : seule catégorie retirable pour ancienneté. */
+.kp-listed-auto {
+  font-style: normal;
+  font-size: 6.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--kp-muted);
+  border: 1px solid var(--kp-line-2, #3a3f4e);
+  border-radius: 999px;
+  padding: 0 3px;
+  vertical-align: middle;
+}
+
+.kp-listed-card.is-due {
+  border-color: rgba(251, 191, 36, 0.55);
+  background: rgba(251, 191, 36, 0.07);
+}
+
+.kp-listed-state.is-due {
+  color: var(--kp-warn);
+}
+
+/* Réglage « Retirer les annonces après » dans la configuration de la vente auto. */
+.kp-autosell-expire {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 6px;
+  margin-top: 7px;
+  padding: 6px 7px;
+  border: 1px solid var(--kp-line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.kp-autosell-expire .kp-check {
+  margin-top: 0;
+  font-size: 9.5px;
+}
+
+.kp-autosell-expire .kp-input {
+  width: 62px;
+  padding: 5px 6px;
+  font-size: 10px;
+}
+
+.kp-autosell-expire .kp-select {
+  padding: 5px 6px;
+  font-size: 10px;
+}
+
+.kp-autosell-expire small {
+  flex-basis: 100%;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+  line-height: 1.35;
+}
+
+.kp-autosell-expire-note {
+  margin-top: 6px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  background: rgba(251, 191, 36, 0.07);
+  color: #f5dfa8;
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+
+.kp-autosell-expire-note b {
+  color: #fff3d1;
+}
+
+/* Journal des retraits automatiques et file de retour. */
+.kp-expiry {
+  margin: 8px 0;
+}
+
+.kp-expiry-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.kp-expiry-head b {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--kp-text);
+}
+
+.kp-expiry-head span {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+  text-align: right;
+}
+
+.kp-expiry-list {
+  display: grid;
+  gap: 3px;
+  padding: 6px 7px;
+  border: 1px solid var(--kp-line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.kp-expiry-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 9px;
+  line-height: 1.3;
+}
+
+.kp-expiry-time {
+  flex: none;
+  color: var(--kp-muted);
+  font: 600 8.5px "JetBrains Mono", ui-monospace, monospace;
+}
+
+.kp-expiry-row b {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--kp-text);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kp-expiry-what {
+  color: var(--kp-muted);
+}
+
+.kp-expiry-row.is-remove .kp-expiry-what {
+  color: #f5dfa8;
+}
+
+.kp-expiry-row.is-relist .kp-expiry-what {
+  color: #a5f3fc;
+}
+
+.kp-expiry-queue {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .kp-autosell-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));

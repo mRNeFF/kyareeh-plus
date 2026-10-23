@@ -48,6 +48,8 @@
   const SALES_KEY = 'kyareeh.sales.v1';
   const SALES_LEDGER_KEY = 'kyareeh.sales.v2';
   const SALES_TRACK_KEY = 'kyareeh.salestrack.v1';
+  // Retraits automatiques : cartes rendues à l'inventaire et journal des remises.
+  const AUTOSELL_EXPIRY_KEY = 'kyareeh.autosellexpiry.v1';
   const SALES_MAX = 2000;
   const SALES_TRACK_MAX = 200;
   // Délai laissé au site pour indexer une annonce qui vient d'être créée.
@@ -98,7 +100,12 @@
     autoSellRefreshMinMin: 7,
     autoSellRefreshMaxMin: 10,
     autoSellIncludeM: false,
-    autoSellDryRun: false
+    autoSellDryRun: false,
+    // Retrait des annonces de la vente auto restées en ligne au-delà de X.
+    // Désactivé par défaut : rien ne change tant que l'option n'est pas cochée.
+    autoSellExpireEnabled: false,
+    autoSellExpireValue: 72,
+    autoSellExpireUnit: 'h'
   };
 
   // Tris acceptés par /api/market/listings (valeurs validées côté serveur).
@@ -368,6 +375,19 @@
         locks: {},
         // listingId -> horodatage : annonce déjà remise en vente (pastille).
         ids: {}
+      },
+      // Retrait des annonces trop anciennes (durée réglable, désactivé par défaut).
+      expiry: {
+        // Vérification en cours : empêche deux retraits simultanés.
+        purging: null,
+        lastAt: 0,
+        lastCheck: null,
+        // listingId -> horodatage : vérification déjà faite (anti double retrait).
+        locks: {},
+        // Cartes retirées pour expiration, classées en fin de file.
+        returns: [],
+        // Journal persistant des retraits et des remises en vente.
+        history: []
       },
       log: []
     },
@@ -975,6 +995,16 @@
     state.settings.autoSellIncludeM = Boolean(state.settings.autoSellIncludeM);
     delete state.settings.autoSellIncludeML;
     state.settings.autoSellDryRun = Boolean(state.settings.autoSellDryRun);
+    // Retrait des annonces trop anciennes : valeur validée et bornée, conservée
+    // telle quelle entre les sessions (clé `kyaraplus.settings.v2`).
+    const expireSettings = autoSellExpireSettings({
+      enabled: state.settings.autoSellExpireEnabled,
+      value: state.settings.autoSellExpireValue,
+      unit: state.settings.autoSellExpireUnit
+    });
+    state.settings.autoSellExpireEnabled = expireSettings.enabled;
+    state.settings.autoSellExpireValue = expireSettings.value;
+    state.settings.autoSellExpireUnit = expireSettings.unit;
     state.settings.dealsRarity = String(state.settings.dealsRarity || 'all');
     state.settings.dupeSort = DUPE_SORTS.some(([value]) => value === state.settings.dupeSort) ? state.settings.dupeSort : 'price_desc';
     state.settings.salesRange = ['1d', '7d', 'total'].includes(state.settings.salesRange)
@@ -1030,6 +1060,7 @@
       state.prices = cached.prices && typeof cached.prices === 'object' ? cached.prices : cached;
     }
     await loadSalesLog();
+    await loadExpiryJournal();
     await loadSoundPrefs();
     await loadUiPrefs();
     // Fenêtre détachée : le panneau est toujours ouvert (il remplit la fenêtre).
@@ -1997,6 +2028,312 @@
       left -= qty;
     }
     return plan;
+  }
+
+  /* --- Retrait des annonces trop anciennes, retour en fin de classement ---- */
+
+  /** Unités acceptées pour la durée de retrait : minutes ou heures. */
+  const AUTOSELL_EXPIRE_UNITS = Object.freeze({ min: 60 * 1000, h: 3600 * 1000 });
+
+  /** Bornes de la durée : 1 minute au minimum, 30 jours au maximum. */
+  const AUTOSELL_EXPIRE_MIN_MS = 60 * 1000;
+  const AUTOSELL_EXPIRE_MAX_MS = 30 * 24 * 3600 * 1000;
+
+  /** Une carte retirée n'est pas remise en vente avant ce délai (anti-boucle). */
+  const AUTOSELL_RETURN_COOLDOWN_MS = 10 * 60 * 1000;
+
+  /** Un retour trop ancien n'occupe plus la file de fin de classement. */
+  const AUTOSELL_RETURN_TTL_MS = 24 * 3600 * 1000;
+
+  /** Taille maximale du journal des retraits (affiché dans le panneau). */
+  const AUTOSELL_EXPIRY_HISTORY_MAX = 40;
+
+  /** Champs d'horodatage qui donnent la vraie date de mise en vente d'une annonce. */
+  const AUTOSELL_LISTING_START_FIELDS = ['createdAt', 'listedAt', 'publishedAt', 'startAt', 'created'];
+
+  /** Unités proposées dans le panneau. */
+  const AUTOSELL_EXPIRE_UNIT_OPTIONS = [
+    ['min', 'minutes'],
+    ['h', 'heures']
+  ];
+
+  /** Durée de retrait en millisecondes, ou 0 si la fonctionnalité est désactivée. */
+  function autoSellExpireDelayMs(options = {}) {
+    if (!options.enabled) return 0;
+    const unit = String(options.unit ?? 'h') === 'min' ? 'min' : 'h';
+    const amount = Math.round(Number(options.value));
+    if (!Number.isFinite(amount) || amount <= 0) return 0;
+    const ms = amount * AUTOSELL_EXPIRE_UNITS[unit];
+    return Math.min(AUTOSELL_EXPIRE_MAX_MS, Math.max(AUTOSELL_EXPIRE_MIN_MS, ms));
+  }
+
+  /**
+   * Réglage validé de la durée de retrait : unité connue, valeur entière dans
+   * les bornes de cette unité (1 minute à 30 jours). Une valeur absente ou
+   * illisible retombe sur 72 heures, jamais silencieusement sur zéro.
+   */
+  function autoSellExpireSettings(raw = {}) {
+    const unit = String(raw.unit ?? 'h') === 'min' ? 'min' : 'h';
+    const max = unit === 'min' ? Math.round(AUTOSELL_EXPIRE_MAX_MS / 60000) : Math.round(AUTOSELL_EXPIRE_MAX_MS / 3600000);
+    const fallback = unit === 'min' ? 60 : 72;
+    // Une saisie explicite (0, valeur négative, texte) est ramenée dans les
+    // bornes ; une valeur absente ou vide retombe sur le défaut de l'unité.
+    const rawValue = raw.value;
+    const parsed =
+      rawValue === null || rawValue === undefined || rawValue === '' ? NaN : Number(rawValue);
+    const value = Number.isFinite(parsed) ? Math.min(max, Math.max(1, Math.round(parsed))) : fallback;
+    return { enabled: Boolean(raw.enabled), unit, value };
+  }
+
+  /** Durée lisible : « 45 min », « 2 h 30 min », « 3 j 2 h ». */
+  function autoSellExpireLabel(ms) {
+    const total = Math.round(Number(ms) / 60000);
+    if (!(total > 0)) return '—';
+    if (total < 60) return `${total} min`;
+    const hours = Math.floor(total / 60);
+    const minutes = total % 60;
+    if (hours < 24) return minutes ? `${hours} h ${minutes} min` : `${hours} h`;
+    const days = Math.floor(hours / 24);
+    const rest = hours % 24;
+    return rest ? `${days} j ${rest} h` : `${days} j`;
+  }
+
+  /**
+   * Date réelle de mise en vente : d'abord l'horodatage renvoyé par le site,
+   * sinon la trace locale de création par Kyareeh+ (`trackAt`). Sans les deux,
+   * renvoie `null` — on ne retire jamais une annonce dont la date est inconnue.
+   */
+  function autoSellListingStartAt(listing, options = {}) {
+    for (const field of AUTOSELL_LISTING_START_FIELDS) {
+      const raw = listing?.[field];
+      const parsed = typeof raw === 'number' ? raw : Date.parse(raw ?? '');
+      if (Number.isFinite(parsed) && parsed > 0) return parsed < 1e11 ? parsed * 1000 : parsed;
+    }
+    const trackAt = Number(options.trackAt);
+    return Number.isFinite(trackAt) && trackAt > 0 ? trackAt : null;
+  }
+
+  /**
+   * Origine d'une annonce. Seule une annonce **créée par la vente auto** peut
+   * être retirée : `track` est le suivi local de Kyareeh+ (`state.salesTrack`,
+   * avec `source: 'auto' | 'manual'`). Sans preuve d'origine, `auto` vaut false.
+   */
+  function autoSellOriginOf(listing, track) {
+    const entries = Array.isArray(track) ? track : [];
+    const ids = autoSellListingIds(listing);
+    if (ids.length) {
+      const direct = entries.find((entry) => entry && ids.includes(String(entry.id)));
+      if (direct) return { auto: direct.source === 'auto', entry: direct };
+    }
+    const cardId = listing?.characterId ?? listing?.character?.id ?? listing?.cardId ?? listing?.card?.id ?? null;
+    if (cardId == null || cardId === '') return { auto: false, entry: null };
+    const price = autoSellListingPrice(listing);
+    // Repli réservé aux annonces dont le site n'a pas renvoyé d'identifiant
+    // (`local-…`) : une annonce portant un identifiant serveur inconnu du suivi
+    // n'est jamais attribuée à la vente auto, donc jamais retirée.
+    const sameCard = entries.filter(
+      (entry) =>
+        entry &&
+        String(entry.id).startsWith('local-') &&
+        String(entry.characterId ?? '') === String(cardId)
+    );
+    const samePrice = sameCard.filter(
+      (entry) => price == null || entry.price == null || Number(entry.price) === Number(price)
+    );
+    // Rapprochement uniquement s'il est unique : deux annonces identiques ne
+    // peuvent pas être attribuées sans risque, on ne touche donc à aucune.
+    if (samePrice.length === 1) return { auto: samePrice[0].source === 'auto', entry: samePrice[0] };
+    return { auto: false, entry: null };
+  }
+
+  /** Une enchère ayant déjà reçu une offre ne peut pas être retirée par le site. */
+  function autoSellListingHasBids(listing) {
+    const bids = Number(listing?.bidCount ?? listing?.bids ?? 0);
+    if (Number.isFinite(bids) && bids > 0) return true;
+    const bid = Number(listing?.currentBid ?? listing?.bid ?? 0);
+    const price = autoSellListingPrice(listing);
+    return Number.isFinite(bid) && bid > 0 && (price == null || bid > price);
+  }
+
+  /**
+   * Cette annonce doit-elle être retirée maintenant ? `due` n'est vrai que si :
+   * fonctionnalité active, annonce encore active (ni vendue ni terminée),
+   * créée par la vente auto, date de mise en vente connue, seuil atteint et
+   * aucune offre déjà placée. Aucune date n'est inventée.
+   */
+  function autoSellExpiryCheck(listing, options = {}) {
+    const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+    const maxAgeMs = Math.max(0, Number(options.maxAgeMs) || 0);
+    const startedAt = autoSellListingStartAt(listing, { trackAt: options.trackAt });
+    const ageMs = startedAt == null ? null : Math.max(0, now - startedAt);
+    const base = { startAt: startedAt, ageMs, listingId: autoSellListingIds(listing)[0] ?? null };
+    if (!(maxAgeMs > 0)) return { ...base, due: false, reason: 'désactivé' };
+    if (!autoSellListingIsActive(listing, now)) return { ...base, due: false, reason: 'annonce déjà terminée' };
+    if (options.auto !== true) return { ...base, due: false, reason: 'annonce manuelle' };
+    if (autoSellListingHasBids(listing)) return { ...base, due: false, reason: 'enchère avec offre' };
+    if (startedAt == null) return { ...base, due: false, reason: 'date de mise en vente inconnue' };
+    if (ageMs < maxAgeMs) return { ...base, due: false, reason: 'délai non atteint' };
+    return { ...base, due: true, reason: 'durée dépassée' };
+  }
+
+  /**
+   * Annonces à retirer, triées par date de mise en vente (ordre stable).
+   * `skipIds` écarte les annonces déjà en cours de retrait (verrou) ; un même
+   * identifiant n'est jamais proposé deux fois.
+   */
+  function autoSellExpiredListings(listings, options = {}) {
+    const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+    const maxAgeMs = Math.max(0, Number(options.maxAgeMs) || 0);
+    const track = Array.isArray(options.track) ? options.track : [];
+    const skip = options.skipIds instanceof Set ? options.skipIds : new Set(Array.isArray(options.skipIds) ? options.skipIds : []);
+    const out = [];
+    const seen = new Set();
+    for (const listing of Array.isArray(listings) ? listings : []) {
+      const ids = autoSellListingIds(listing);
+      if (!ids.length) continue;
+      if (ids.some((id) => skip.has(id) || seen.has(id))) continue;
+      const origin = autoSellOriginOf(listing, track);
+      const check = autoSellExpiryCheck(listing, {
+        now,
+        maxAgeMs,
+        auto: origin.auto,
+        trackAt: origin.entry?.createdAt
+      });
+      if (!check.due) continue;
+      ids.forEach((id) => seen.add(id));
+      const card = listing.character ?? {};
+      out.push({
+        listing,
+        id: ids[0],
+        ids,
+        startAt: check.startAt,
+        ageMs: check.ageMs,
+        reason: check.reason,
+        characterId: listing.characterId ?? card.id ?? null,
+        name: String(card.name ?? listing.name ?? ''),
+        rarity: String(card.rarity ?? listing.rarity ?? ''),
+        price: autoSellListingPrice(listing)
+      });
+    }
+    out.sort((a, b) => (a.startAt ?? 0) - (b.startAt ?? 0) || String(a.name).localeCompare(String(b.name), 'fr'));
+    return out;
+  }
+
+  /** Ajoute une carte retirée à la file de fin, sans doublon (la plus récente gagne). */
+  function autoSellReturnAdd(returns, entry, options = {}) {
+    const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+    const ttl = Math.max(0, Number(options.ttlMs) || AUTOSELL_RETURN_TTL_MS);
+    const list = (Array.isArray(returns) ? returns : []).filter(
+      (item) => item && item.characterId != null && item.characterId !== '' && now - Number(item.at || 0) <= ttl
+    );
+    const characterId = String(entry?.characterId ?? '');
+    if (!characterId) return list;
+    const at = Number.isFinite(Number(entry.at)) && Number(entry.at) > 0 ? Number(entry.at) : now;
+    const next = { ...entry, characterId, at };
+    const index = list.findIndex((item) => String(item.characterId) === characterId);
+    if (index >= 0) list[index] = next;
+    else list.push(next);
+    return list;
+  }
+
+  /** Retire une carte de la file de retour : elle a été resélectionnée. */
+  function autoSellReturnClear(returns, characterId) {
+    const key = String(characterId ?? '');
+    if (!key) return Array.isArray(returns) ? returns : [];
+    return (Array.isArray(returns) ? returns : []).filter((entry) => String(entry?.characterId ?? '') !== key);
+  }
+
+  /** Le délai anti-boucle d'une carte retirée est-il écoulé ? */
+  function autoSellReturnReady(entry, now = Date.now(), cooldownMs = AUTOSELL_RETURN_COOLDOWN_MS) {
+    const at = Number(entry?.at);
+    if (!(at > 0)) return false;
+    return Number(now) >= at + Math.max(0, Number(cooldownMs) || 0);
+  }
+
+  /**
+   * Réintégration en fin de classement. Les cartes retirées pour expiration
+   * passent **après toutes les autres**, dans l'ordre de leur retrait (stable).
+   * Une carte encore dans son délai anti-boucle est écartée de la sélection
+   * (`heldBack`) : elle n'est donc jamais retirée puis remise en vente aussitôt.
+   */
+  function autoSellApplyReturns(rows, returns, options = {}) {
+    const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+    const cooldownMs = Number.isFinite(Number(options.cooldownMs))
+      ? Math.max(0, Number(options.cooldownMs))
+      : AUTOSELL_RETURN_COOLDOWN_MS;
+    const list = Array.isArray(rows) ? rows : [];
+    const byCard = new Map();
+    for (const entry of Array.isArray(returns) ? returns : []) {
+      const key = String(entry?.characterId ?? '');
+      if (!key) continue;
+      const previous = byCard.get(key);
+      if (!previous || Number(entry.at) > Number(previous.at)) byCard.set(key, entry);
+    }
+    const head = [];
+    const tail = [];
+    let heldBack = 0;
+    for (const row of list) {
+      const key = String(row?.characterId ?? row?.id ?? '');
+      const entry = byCard.get(key);
+      if (!entry) {
+        head.push(row);
+        continue;
+      }
+      if (!autoSellReturnReady(entry, now, cooldownMs)) {
+        heldBack += 1;
+        continue;
+      }
+      tail.push({ ...row, expiredReturn: true, returnedAt: Number(entry.at) });
+    }
+    tail.sort(
+      (a, b) => (a.returnedAt ?? 0) - (b.returnedAt ?? 0) || String(a.name ?? '').localeCompare(String(b.name ?? ''), 'fr')
+    );
+    return { rows: [...head, ...tail], returned: tail.length, heldBack };
+  }
+
+  /** Lecture tolérante d'une file de retours persistée (aucune donnée inventée). */
+  function autoSellExpiryReturnsSanitize(raw) {
+    const out = [];
+    for (const item of Array.isArray(raw) ? raw : []) {
+      if (!item || item.characterId == null || item.characterId === '') continue;
+      const at = Number(item.at);
+      if (!(at > 0)) continue;
+      out.push({
+        characterId: String(item.characterId),
+        listingId: item.listingId == null ? null : String(item.listingId),
+        name: String(item.name ?? ''),
+        rarity: String(item.rarity ?? ''),
+        price: Number(item.price) > 0 ? Math.round(Number(item.price)) : null,
+        at,
+        ageMs: Math.max(0, Number(item.ageMs) || 0),
+        thresholdMs: Math.max(0, Number(item.thresholdMs) || 0)
+      });
+    }
+    return out.sort((a, b) => a.at - b.at).slice(-AUTOSELL_EXPIRY_HISTORY_MAX);
+  }
+
+  /** Lecture tolérante du journal des retraits et remises en vente. */
+  function autoSellExpiryHistorySanitize(raw) {
+    const out = [];
+    for (const item of Array.isArray(raw) ? raw : []) {
+      if (!item) continue;
+      const at = Number(item.at);
+      if (!(at > 0)) continue;
+      const kind = item.kind === 'relist' ? 'relist' : 'remove';
+      out.push({
+        kind,
+        at,
+        listingId: item.listingId == null ? null : String(item.listingId),
+        characterId: item.characterId == null ? null : String(item.characterId),
+        name: String(item.name ?? ''),
+        rarity: String(item.rarity ?? ''),
+        price: Number(item.price) > 0 ? Math.round(Number(item.price)) : null,
+        ageMs: Math.max(0, Number(item.ageMs) || 0),
+        thresholdMs: Math.max(0, Number(item.thresholdMs) || 0),
+        reason: String(item.reason ?? '')
+      });
+    }
+    return out.sort((a, b) => a.at - b.at).slice(-AUTOSELL_EXPIRY_HISTORY_MAX);
   }
   /* AUTOSELL:END */
 
@@ -4345,7 +4682,12 @@
       price: autoSellPrice(row, s.autoSellStrategy),
       floor: recycleFloor(row.rarity)
     }));
-    const candidates = autoSellSelect(priced, { ...options, now: Date.now() });
+    // Classement normal, puis réintégration en fin de file des cartes retirées
+    // pour expiration (celles encore en délai anti-boucle sont écartées).
+    const applied = autoSellApplyReturns(autoSellSelect(priced, { ...options, now: Date.now() }), a.expiry.returns, {
+      now: Date.now()
+    });
+    const candidates = applied.rows;
     // Un classement complet est refait ici, donc avant chaque vente : c'est ce
     // qui garantit que l'ordre suit les dernières stats de marché.
     a.rankCount = Number(a.rankCount || 0) + 1;
@@ -4372,7 +4714,13 @@
       // déjà en vente. La boucle attend qu'une vente libère une place.
       errorKind = 'full';
     } else if (!candidates.length) {
-      if (withoutPrice > 0) {
+      if (applied.heldBack > 0) {
+        // Toutes les cartes disponibles viennent d'être retirées pour
+        // expiration : elles restent en fin de file pendant le délai
+        // anti-boucle, aucune n'est remise en vente aussitôt.
+        errorKind = 'returning';
+        error = `${fmt(applied.heldBack)} carte(s) retirée(s) pour expiration · remise en file après le délai anti-boucle.`;
+      } else if (withoutPrice > 0) {
         errorKind = 'price';
         error = autoSellSortError(withoutPrice, Math.max(eligible.length, duplicates.length));
       } else {
@@ -4532,6 +4880,7 @@
           at: Date.now(),
           previous: item.previousPrice
         };
+        autoSellMarkRelisted(key, single.name, price);
         if (!result.matched) {
           autoSellRememberListing(single, result.posted, type, autoSellDuration(), activeQty);
         }
@@ -4605,6 +4954,21 @@
           error: message,
           errorKind: 'listings'
         };
+      }
+    }
+
+    // Retrait des annonces créées par la vente auto qui dépassent la durée
+    // réglée : la carte revient dans l'inventaire et repart en fin de file,
+    // jamais tout de suite. Le mode aperçu et la simulation ne retirent rien.
+    let purged = { checked: 0, removed: 0, skipped: 0, errors: 0 };
+    if (!preview && a.running && !a.stop) {
+      purged = await autoSellPurgeExpired({ refresh: false });
+      if (purged.removed) {
+        try {
+          prep = await autoSellPrepare({ refresh: false });
+        } catch {
+          /* le plan initial reste valable */
+        }
       }
     }
 
@@ -4753,6 +5117,9 @@
 
       if (result.created) {
         plan.push(single);
+        // Carte resélectionnée : elle quitte la file de retour, son nouveau
+        // délai repart de zéro (nouvelle annonce, nouvel horodatage).
+        autoSellMarkRelisted(single.characterId ?? single.id, single.name, single.price);
         if (!result.matched) {
           // L'annonce est active immédiatement : on la bloque localement pour
           // ne pas la relancer avant que /api/me/market ne la renvoie.
@@ -4866,6 +5233,291 @@
     }
   }
 
+  /* --- Retrait des annonces restées trop longtemps en vente --------------- */
+
+  /** Un retrait en échec n'est pas retenté avant ce délai. */
+  const AUTOSELL_EXPIRY_RETRY_MS = 5 * 60 * 1000;
+
+  /** Retraits traités par vérification : évite une rafale de requêtes. */
+  const AUTOSELL_EXPIRY_BATCH = 5;
+
+  let expirySaveTimer = null;
+
+  /** Écrit la file de retour et le journal des retraits (throttlé). */
+  function saveExpirySoon() {
+    if (expirySaveTimer) clearTimeout(expirySaveTimer);
+    expirySaveTimer = setTimeout(() => {
+      expirySaveTimer = null;
+      const e = state.autoSell.expiry;
+      storageSet(AUTOSELL_EXPIRY_KEY, {
+        savedAt: Date.now(),
+        returns: e.returns.slice(-AUTOSELL_EXPIRY_HISTORY_MAX),
+        history: e.history.slice(-AUTOSELL_EXPIRY_HISTORY_MAX)
+      }).catch(() => {});
+    }, 700);
+  }
+
+  /** Recharge la file de retour et le journal après un rechargement de page. */
+  async function loadExpiryJournal() {
+    try {
+      const saved = await storageGet(AUTOSELL_EXPIRY_KEY, null);
+      if (!saved || typeof saved !== 'object') return;
+      const e = state.autoSell.expiry;
+      e.returns = autoSellExpiryReturnsSanitize(saved.returns);
+      e.history = autoSellExpiryHistorySanitize(saved.history);
+    } catch {
+      /* journal illisible : on repart d'une file vide */
+    }
+  }
+
+  /** Réglage effectif du retrait (valeur validée + seuil en millisecondes). */
+  function autoSellExpirySettings() {
+    const s = state.settings;
+    const raw = autoSellExpireSettings({
+      enabled: s.autoSellExpireEnabled,
+      value: s.autoSellExpireValue,
+      unit: s.autoSellExpireUnit
+    });
+    return { ...raw, maxAgeMs: autoSellExpireDelayMs(raw) };
+  }
+
+  /** Identifiants d'annonces écartés par un verrou de retrait encore valide. */
+  function autoSellExpiryLocks(now = Date.now()) {
+    const locks = state.autoSell.expiry.locks;
+    const skip = new Set();
+    for (const [id, at] of Object.entries(locks)) {
+      if (now - Number(at) < AUTOSELL_EXPIRY_RETRY_MS) skip.add(String(id));
+    }
+    return skip;
+  }
+
+  /** Une annonce suivie atteint-elle le seuil de retrait ? (lecture locale) */
+  function autoSellExpiryDueSoon(now = Date.now()) {
+    const cfg = autoSellExpirySettings();
+    if (!cfg.enabled || !state.autoSell.running || state.autoSell.stop) return false;
+    if (state.settings.autoSellDryRun) return false;
+    return (
+      autoSellExpiredListings(autoSellListingRows(state.mine), {
+        now,
+        maxAgeMs: cfg.maxAgeMs,
+        track: state.salesTrack,
+        skipIds: autoSellExpiryLocks(now)
+      }).length > 0
+    );
+  }
+
+  /**
+   * Relit les ventes actives et renvoie l'annonce demandée si elle est encore
+   * active. C'est la vérification « état réel » faite juste avant un retrait :
+   * une carte vendue entre-temps n'est jamais touchée.
+   */
+  async function autoSellFindActiveListing(listingId) {
+    const mine = await api('/api/me/market', { timeout: 20000 });
+    if (!autoSellHasListings(mine)) throw new Error('Ventes actives illisibles');
+    state.mine = mine;
+    state.autoSell.listingsAt = Date.now();
+    reconcilePendingSales();
+    const key = String(listingId);
+    return autoSellListingRows(mine).find((listing) => autoSellListingIds(listing).includes(key)) ?? null;
+  }
+
+  /** Retire une annonce de l'état local (la carte, elle, n'est jamais supprimée). */
+  function autoSellDropLocalListing(listingId) {
+    const key = String(listingId);
+    const rows = autoSellListingRows(state.mine).filter((listing) => !autoSellListingIds(listing).includes(key));
+    if (Array.isArray(state.mine)) state.mine = rows;
+    else if (state.mine && typeof state.mine === 'object') state.mine = { ...state.mine, listings: rows };
+    state.autoSell.pendingListings = (state.autoSell.pendingListings ?? []).filter(
+      (listing) => !autoSellListingIds(listing).includes(key)
+    );
+  }
+
+  /**
+   * Retire les annonces **créées par la vente auto** qui dépassent la durée
+   * réglée, puis rend la carte au pool disponible en la classant en fin de file.
+   *
+   * Garde-fous :
+   *  - une seule vérification à la fois (`expiry.purging`) et un verrou par
+   *    annonce : jamais de double retrait ni de conflit entre deux contrôles ;
+   *  - chaque candidat est relu sur le site juste avant le retrait ; une annonce
+   *    vendue, terminée ou introuvable est laissée telle quelle ;
+   *  - les annonces manuelles ne sont jamais touchées (origine inconnue = rien) ;
+   *  - la carte et sa quantité restent dans la collection : seule l'annonce part.
+   */
+  async function autoSellPurgeExpired({ refresh = false } = {}) {
+    const a = state.autoSell;
+    const report = { checked: 0, removed: 0, skipped: 0, errors: 0, disabled: false, simulated: false };
+    const cfg = autoSellExpirySettings();
+    if (!cfg.enabled) {
+      report.disabled = true;
+      return report;
+    }
+    if (!a.running || a.stop) return report;
+    // Le mode simulation ne doit jamais retirer une annonce réelle.
+    if (state.settings.autoSellDryRun) {
+      report.simulated = true;
+      return report;
+    }
+    if (a.expiry.purging) return a.expiry.purging;
+
+    const task = (async () => {
+      if (refresh) {
+        try {
+          const mine = await api('/api/me/market', { timeout: 20000 });
+          if (!autoSellHasListings(mine)) throw new Error('Ventes actives illisibles');
+          state.mine = mine;
+          a.listingsAt = Date.now();
+          reconcilePendingSales();
+        } catch (err) {
+          report.errors += 1;
+          a.lastError = `Retrait automatique · ${friendlyError(err)}`;
+          return report;
+        }
+      }
+
+      const now = Date.now();
+      const due = autoSellExpiredListings(autoSellListingRows(state.mine), {
+        now,
+        maxAgeMs: cfg.maxAgeMs,
+        track: state.salesTrack,
+        skipIds: autoSellExpiryLocks(now)
+      });
+      report.checked = due.length;
+      a.expiry.lastAt = now;
+      a.expiry.lastCheck = { at: now, checked: due.length, removed: 0, thresholdMs: cfg.maxAgeMs };
+      if (!due.length) return report;
+
+      for (const item of due.slice(0, AUTOSELL_EXPIRY_BATCH)) {
+        if (!a.running || a.stop) break;
+        try {
+          // État réel : l'annonce doit toujours exister et être active.
+          const fresh = await autoSellFindActiveListing(item.id);
+          if (!fresh) {
+            a.expiry.locks[item.id] = Date.now();
+            report.skipped += 1;
+            autoSellLog(`⏱ ${item.name || 'Carte'} · déjà terminée sur le site, retrait annulé`, 'info');
+            continue;
+          }
+          const origin = autoSellOriginOf(fresh, state.salesTrack);
+          const recheck = autoSellExpiryCheck(fresh, {
+            now: Date.now(),
+            maxAgeMs: cfg.maxAgeMs,
+            auto: origin.auto,
+            trackAt: origin.entry?.createdAt
+          });
+          if (!recheck.due) {
+            a.expiry.locks[item.id] = Date.now();
+            report.skipped += 1;
+            if (recheck.reason === 'enchère avec offre') {
+              autoSellLog(`⏱ ${item.name || 'Carte'} · retrait impossible, enchère déjà engagée`, 'err');
+            }
+            continue;
+          }
+
+          const canceled = await api(`/api/market/listings/${encodeURIComponent(item.id)}/cancel`, {
+            method: 'POST',
+            timeout: 20000
+          });
+          if (canceled && canceled.ok === false) throw new ApiError(0, 'Annonce introuvable ou déjà terminée.');
+
+          // L'annonce seulement : la collection garde la carte et sa quantité.
+          autoSellDropLocalListing(item.id);
+          untrackPendingSale(item.id, item.characterId);
+          const at = Date.now();
+          a.expiry.returns = autoSellReturnAdd(
+            a.expiry.returns,
+            {
+              characterId: item.characterId,
+              listingId: item.id,
+              name: item.name,
+              rarity: item.rarity,
+              price: item.price,
+              at,
+              startedAt: recheck.startAt,
+              ageMs: recheck.ageMs,
+              thresholdMs: cfg.maxAgeMs
+            },
+            { now: at }
+          );
+          a.expiry.history = [
+            ...a.expiry.history,
+            {
+              kind: 'remove',
+              at,
+              listingId: item.id,
+              characterId: item.characterId,
+              name: item.name,
+              rarity: item.rarity,
+              price: item.price,
+              ageMs: recheck.ageMs,
+              thresholdMs: cfg.maxAgeMs,
+              reason: 'durée dépassée'
+            }
+          ].slice(-AUTOSELL_EXPIRY_HISTORY_MAX);
+          a.expiry.locks[item.id] = at;
+          a.expiry.lastCheck.removed += 1;
+          a.lastError = null;
+          report.removed += 1;
+          saveExpirySoon();
+          autoSellLog(
+            `⏱ ${item.name || 'Carte'} · retirée après ${autoSellExpireLabel(recheck.ageMs)} (seuil ${autoSellExpireLabel(
+              cfg.maxAgeMs
+            )}) · carte rendue à l’inventaire, classée en fin de file`,
+            'ok'
+          );
+        } catch (err) {
+          a.expiry.locks[item.id] = Date.now();
+          report.errors += 1;
+          const message = friendlyError(err);
+          if (String(err?.code ?? '') === 'has_bids' || /enchère/i.test(message)) {
+            autoSellLog(`⏱ ${item.name || 'Carte'} · retrait impossible, enchère déjà engagée`, 'err');
+          } else {
+            a.lastError = `Retrait automatique · ${item.name || 'Carte'} : ${message}`;
+            autoSellLog(`⏱ ${item.name || 'Carte'} · retrait impossible · ${message}`, 'err');
+          }
+        }
+      }
+      return report;
+    })();
+
+    a.expiry.purging = task;
+    try {
+      return await task;
+    } finally {
+      if (a.expiry.purging === task) a.expiry.purging = null;
+    }
+  }
+
+  /**
+   * Une carte « retour après expiration » vient d'être resélectionnée : elle
+   * quitte la file de fin et son nouveau délai repart de zéro (nouvelle
+   * annonce, donc nouvel horodatage de mise en vente).
+   */
+  function autoSellMarkRelisted(characterId, name = '', price = null) {
+    const a = state.autoSell;
+    const key = String(characterId ?? '');
+    if (!key) return;
+    const entry = a.expiry.returns.find((item) => String(item.characterId) === key);
+    if (!entry) return;
+    a.expiry.returns = autoSellReturnClear(a.expiry.returns, key);
+    a.expiry.history = [
+      ...a.expiry.history,
+      {
+        kind: 'relist',
+        at: Date.now(),
+        listingId: null,
+        characterId: key,
+        name: name || entry.name,
+        rarity: entry.rarity,
+        price: price ?? entry.price,
+        ageMs: 0,
+        thresholdMs: entry.thresholdMs,
+        reason: 'remise en vente après expiration'
+      }
+    ].slice(-AUTOSELL_EXPIRY_HISTORY_MAX);
+    saveExpirySoon();
+  }
+
   async function startAutoSell() {
     const a = state.autoSell;
     if (a.running || a.starting) return;
@@ -4893,6 +5545,10 @@
     a.log = [];
     // Nouvelle session : file de remise en vente repartie de zéro.
     a.relist = { queue: [], last: null, count: 0, locks: {}, ids: {} };
+    // Verrous de retrait repartis de zéro ; la file des cartes retirées pour
+    // expiration est conservée (elles restent classées en fin de file).
+    a.expiry.purging = null;
+    a.expiry.locks = {};
     render();
 
     let prep;
@@ -5085,6 +5741,18 @@
         await autoSellWait(chunk, alive);
         elapsed += chunk;
         if (!alive() || elapsed >= pause) break;
+        // Une annonce créée par la vente auto dépasse la durée réglée : elle est
+        // retirée sans attendre le prochain cycle complet, et la carte revient
+        // dans l'inventaire, classée en fin de file.
+        if (autoSellExpiryDueSoon()) {
+          const purged = await autoSellPurgeExpired({ refresh: true });
+          if (purged.removed) {
+            a.nextAt = 0;
+            a.status = `Retrait auto · ${fmt(purged.removed)} annonce(s) trop ancienne(s) · carte(s) de retour en fin de file`;
+            render();
+            break;
+          }
+        }
         if (full && (await autoSellCheckFreeSlot())) {
           a.nextAt = 0;
           a.status = 'Place libre · reprise du remplissage';
@@ -7513,11 +8181,14 @@
       price: autoSellPrice(row, strategy),
       floor: recycleFloor(row.rarity)
     }));
-    return autoSellSelect(priced, {
+    const ranked = autoSellSelect(priced, {
       includeM: Boolean(state.settings.autoSellIncludeM),
       order: state.settings.autoSellOrder,
       now: Date.now()
     });
+    // Même règle que la boucle : les cartes retirées pour expiration passent en
+    // fin de classement, et celles encore en délai anti-boucle sont écartées.
+    return autoSellApplyReturns(ranked, state.autoSell.expiry.returns, { now: Date.now() }).rows;
   }
 
   /** Valeur totale des doublons **disponibles** selon la stratégie choisie. */
@@ -7562,6 +8233,10 @@
   function autoSellPanel(all, slots) {
     const a = state.autoSell;
     const s = state.settings;
+    const expire = autoSellExpirySettings();
+    const returned = a.expiry.returns.length;
+    const lastRemoval =
+      [...a.expiry.history].reverse().find((entry) => entry.kind === 'remove') ?? null;
     const estimate = autoSellEstimate();
     const scoreMode = s.autoSellOrder === 'score';
     const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
@@ -7604,6 +8279,9 @@
     const runnerUp = scoreMode ? estimate.candidates[1] ?? null : null;
     const pickWhy = (row) => {
       if (!row) return '';
+      if (row.expiredReturn) {
+        return 'Retour après expiration : classée après toutes les autres cartes, en fin de file.';
+      }
       if (row.volume7Status === 'missing') {
         return 'Ventes 7 j inconnues : aucun bonus de demande, score plafonné à 30/100.';
       }
@@ -7643,6 +8321,17 @@
                 a.relist.last.name
               )}</b> · ◆ ${fmt(a.relist.last.price)} · ${nowTime(a.relist.last.at)}${
                 a.relist.count > 1 ? ` · ${fmt(a.relist.count)} au total` : ''
+              }</div>`
+            : ''
+        }
+        ${
+          lastRemoval
+            ? `<div class="kp-autosell-expire-note">⏱ Retrait auto · <b>${esc(
+                lastRemoval.name || 'Carte'
+              )}</b> · après ${esc(autoSellExpireLabel(lastRemoval.ageMs))} (seuil ${esc(
+                autoSellExpireLabel(lastRemoval.thresholdMs)
+              )}) · ${nowTime(lastRemoval.at)} · carte rendue à l’inventaire${
+                returned ? ` · ${fmt(returned)} en fin de file` : ''
               }</div>`
             : ''
         }
@@ -7690,6 +8379,32 @@
             </select>
           </label>
         </div>
+        <div class="kp-autosell-expire">
+          <label class="kp-check">
+            <input type="checkbox" data-autosell-expire ${s.autoSellExpireEnabled ? 'checked' : ''} ${locked ? 'disabled' : ''}>
+            Retirer les annonces après
+          </label>
+          <input
+            class="kp-input"
+            type="number"
+            min="1"
+            max="${expire.unit === 'min' ? 43200 : 720}"
+            step="1"
+            value="${expire.value}"
+            data-autosell-expire-value
+            ${locked || !expire.enabled ? 'disabled' : ''}
+          >
+          <select class="kp-select" data-autosell-expire-unit ${locked || !expire.enabled ? 'disabled' : ''}>
+            ${AUTOSELL_EXPIRE_UNIT_OPTIONS.map(
+              ([value, label]) => `<option value="${value}" ${expire.unit === value ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+          <small>${
+            expire.enabled
+              ? `seuil ${autoSellExpireLabel(expire.maxAgeMs)} · ventes auto uniquement · carte rendue à l’inventaire et classée en fin de file`
+              : 'désactivé · aucune annonce n’est retirée pour ancienneté'
+          }</small>
+        </div>
         ${scoreHint}
         ${
           pick
@@ -7702,8 +8417,8 @@
                    <b>${esc(pick.name)}</b>
                    <span class="kp-pick-cell">◆ ${fmt(pick.price)}</span>
                    <span class="kp-pick-cell">${esc(autoSellVolumeLabel(pick))}</span>
-                   <em class="kp-pick-tag ${pick.volume7Status === 'ok' ? '' : 'is-warn'}">${esc(
-                     autoSellPriorityLabel(pick)
+                   <em class="kp-pick-tag ${pick.volume7Status === 'ok' && !pick.expiredReturn ? '' : 'is-warn'}">${esc(
+                     pick.expiredReturn ? 'retour après expiration · fin de file' : autoSellPriorityLabel(pick)
                    )}</em>
                  </div>
                  <div class="kp-pick-why">${esc(pickWhy(pick))}</div>
@@ -7849,28 +8564,94 @@
             const stateText = autoSellListingLabel(listing);
             const pending = Boolean(listing.pending);
             const relisted = Boolean(state.autoSell.relist.ids[String(listing.id)]);
-            return `<button class="kp-listed-card ${pending ? 'is-pending' : ''}" type="button" style="--rc:${esc(
-              info.color
-            )}" data-act="sell-detail" data-id="${esc(id)}" data-hide-recommend="1" title="Voir l'étude de marché de cette carte">
+            // Temps réellement écoulé depuis la mise en vente, et échéance du
+            // retrait automatique — uniquement pour les annonces de la vente auto.
+            const expire = autoSellExpirySettings();
+            const origin = autoSellOriginOf(listing, state.salesTrack);
+            const startedAt = autoSellListingStartAt(listing, { trackAt: origin.entry?.createdAt });
+            const ageMs = startedAt == null ? null : Math.max(0, Date.now() - startedAt);
+            const autoListing = origin.auto && !pending;
+            const remainMs = expire.enabled && autoListing && ageMs != null ? expire.maxAgeMs - ageMs : null;
+            const ageText = autoListing && ageMs != null ? `En vente depuis ${autoSellExpireLabel(ageMs)}` : '';
+            const expireText =
+              remainMs == null
+                ? ''
+                : remainMs <= 0
+                  ? ' · retrait auto dépassé'
+                  : ` · retrait auto dans ${autoSellExpireLabel(remainMs)}`;
+            const dueSoon = remainMs != null && remainMs <= 0;
+            return `<button class="kp-listed-card ${pending ? 'is-pending' : ''} ${
+              dueSoon ? 'is-due' : ''
+            }" type="button" style="--rc:${esc(info.color)}" data-act="sell-detail" data-id="${esc(
+              id
+            )}" data-hide-recommend="1" title="Voir l'étude de marché de cette carte${
+              ageText ? ` — ${esc(ageText)}${esc(expireText)}` : ''
+            }">
               <img src="${esc(imgSrc(card))}" alt="" loading="lazy">
               <span class="kp-listed-info">
                 <b>${esc(card?.name ?? `Carte #${listing.characterId ?? '?'}`)}${
                   relisted
                     ? ' <i class="kp-listed-relist" title="Remise en vente automatique après expiration">↻</i>'
                     : ''
-                }</b>
-                <small>${esc(info.label)} · ${type} · ×${fmt(qty)}</small>
+                }${autoListing ? ' <i class="kp-listed-auto" title="Annonce créée par la vente auto">auto</i>' : ''}</b>
+                <small>${esc(info.label)} · ${type} · ×${fmt(qty)}${ageText ? ` · ${esc(ageText)}` : ''}</small>
                 <em>◆ ${fmt(unit)}${
                   qty > 1 && total != null ? ` <i>· total ◆ ${fmt(total)}</i>` : ''
                 }</em>
-                <span class="kp-listed-state ${pending ? 'is-pending' : ''}">${esc(stateText)}${
-                  left ? ` · ${esc(left)}` : ''
-                }</span>
+                <span class="kp-listed-state ${pending ? 'is-pending' : ''} ${dueSoon ? 'is-due' : ''}">${esc(
+                  stateText
+                )}${left ? ` · ${esc(left)}` : ''}${expireText ? esc(expireText) : ''}</span>
               </span>
             </button>`;
           })
           .join('')}
       </div>
+    </section>`;
+  }
+
+  /**
+   * Journal des retraits automatiques : heure, carte, motif, et file des cartes
+   * « retour après expiration » classées en fin de sélection.
+   */
+  function autoSellExpiryBlock() {
+    const a = state.autoSell;
+    const cfg = autoSellExpirySettings();
+    const history = a.expiry.history.slice(-6).reverse();
+    const returned = a.expiry.returns;
+    if (!cfg.enabled && !history.length && !returned.length) return '';
+    const rows = history
+      .map((entry) => {
+        const relist = entry.kind === 'relist';
+        const what = relist
+          ? `remise en vente${entry.price ? ` · ◆ ${fmt(entry.price)}` : ''}`
+          : `retirée après ${autoSellExpireLabel(entry.ageMs)} (seuil ${autoSellExpireLabel(entry.thresholdMs)})`;
+        return `<div class="kp-expiry-row ${relist ? 'is-relist' : 'is-remove'}">
+          <span class="kp-expiry-time">${nowTime(entry.at)}</span>
+          <b>${esc(entry.name || 'Carte')}</b>
+          <span class="kp-expiry-what">${esc(what)}</span>
+        </div>`;
+      })
+      .join('');
+    const queue = returned.length
+      ? `<div class="kp-expiry-queue">${fmt(returned.length)} carte(s) en fin de file · ${returned
+          .slice(-3)
+          .reverse()
+          .map((entry) => `${esc(entry.name || 'Carte')} (${nowTime(entry.at)})`)
+          .join(' · ')}</div>`
+      : '';
+    return `<section class="kp-expiry">
+      <div class="kp-expiry-head">
+        <b>Retraits automatiques</b>
+        <span>${
+          cfg.enabled ? `seuil ${autoSellExpireLabel(cfg.maxAgeMs)}` : 'désactivé'
+        } · annonces de la vente auto uniquement</span>
+      </div>
+      ${
+        rows
+          ? `<div class="kp-expiry-list">${rows}</div>`
+          : '<div class="kp-listed-empty">Aucun retrait automatique pour le moment.</div>'
+      }
+      ${queue}
     </section>`;
   }
 
@@ -8059,6 +8840,7 @@
       return `
         ${sellModeSwitch()}
         ${listedCardsBlock()}
+        ${autoSellExpiryBlock()}
         <div class="kp-hint">Doublons uniquement · une copie conservée.</div>
         ${autoSellPanel(all, slots)}
         ${salesChart()}`;
@@ -12356,7 +13138,20 @@
     const autoDuration = target.closest('[data-autosell-duration]');
     const autoIncludeM = target.closest('[data-autosell-include-m]');
     const autoDryRun = target.closest('[data-autosell-dryrun]');
-    if (autoType || autoStrategy || autoOrder || autoDuration || autoIncludeM || autoDryRun) {
+    const autoExpire = target.closest('[data-autosell-expire]');
+    const autoExpireValue = target.closest('[data-autosell-expire-value]');
+    const autoExpireUnit = target.closest('[data-autosell-expire-unit]');
+    if (
+      autoType ||
+      autoStrategy ||
+      autoOrder ||
+      autoDuration ||
+      autoIncludeM ||
+      autoDryRun ||
+      autoExpire ||
+      autoExpireValue ||
+      autoExpireUnit
+    ) {
       if (state.autoSell.running) return;
       state.autoSell.armed = false;
       if (autoType) state.settings.autoSellType = autoType.value === 'auction' ? 'auction' : 'fixed';
@@ -12376,6 +13171,31 @@
       }
       if (autoIncludeM) state.settings.autoSellIncludeM = Boolean(autoIncludeM.checked);
       if (autoDryRun) state.settings.autoSellDryRun = Boolean(autoDryRun.checked);
+      if (autoExpire) state.settings.autoSellExpireEnabled = Boolean(autoExpire.checked);
+      if (autoExpireUnit) {
+        const previousUnit = state.settings.autoSellExpireUnit === 'min' ? 'min' : 'h';
+        const nextUnit = autoExpireUnit.value === 'min' ? 'min' : 'h';
+        if (previousUnit !== nextUnit) {
+          // Change d'unité sans changer la durée réelle : 72 h → 4 320 min.
+          const current = Math.max(1, Math.round(Number(state.settings.autoSellExpireValue) || (previousUnit === 'min' ? 60 : 72)));
+          state.settings.autoSellExpireValue = nextUnit === 'min' ? current * 60 : Math.max(1, Math.round(current / 60));
+        }
+        state.settings.autoSellExpireUnit = nextUnit;
+      }
+      if (autoExpireValue) {
+        // Valeur validée : entière, entre 1 minute et 30 jours selon l'unité.
+        state.settings.autoSellExpireValue = autoExpireValue.value;
+      }
+      // Normalise toujours le couple valeur/unité avant de persister : une
+      // saisie vide ou aberrante ne peut pas désactiver silencieusement le seuil.
+      const expire = autoSellExpireSettings({
+        enabled: state.settings.autoSellExpireEnabled,
+        value: state.settings.autoSellExpireValue,
+        unit: state.settings.autoSellExpireUnit
+      });
+      state.settings.autoSellExpireEnabled = expire.enabled;
+      state.settings.autoSellExpireValue = expire.value;
+      state.settings.autoSellExpireUnit = expire.unit;
       persistSettings();
       render();
       return;
@@ -12715,6 +13535,9 @@
       armAutoSell,
       disarmAutoSell,
       autoSellPanel,
+      autoSellPurgeExpired,
+      autoSellExpirySettings,
+      autoSellApplyReturns,
       loadAutoLog,
       // Ventes confirmées et graphique du profit réalisé
       loadSalesLog,

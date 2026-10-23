@@ -1214,6 +1214,191 @@ async function visualPass() {
       { label: 'arrêt de la vente auto', timeout: 5000 }
     );
 
+    // — Retrait automatique d'une annonce restée trop longtemps en vente —
+    const expiry = await evaluate(
+      cdp,
+      sessionId,
+      `(async () => {
+         const kp = window.__kyaraPlus;
+         const state = kp.state;
+         const market = window.__marketState || {};
+         const listings = Array.isArray(market.listings) ? market.listings : [];
+         const collection = Array.isArray(market.collection) ? market.collection : [];
+         const settings = state.settings;
+         const saved = {
+           enabled: settings.autoSellExpireEnabled,
+           value: settings.autoSellExpireValue,
+           unit: settings.autoSellExpireUnit
+         };
+         settings.autoSellExpireEnabled = true;
+         settings.autoSellExpireValue = 1;
+         settings.autoSellExpireUnit = 'min';
+
+         const actives = kp.autoSellActiveEntries().filter((l) => l.characterId && !l.pending);
+         const target = actives[0];
+         if (!target) return { ok: false, reason: 'aucune annonce active' };
+         const targetId = String(target.id);
+         const targetCard = String(target.characterId);
+         // Deuxième annonce, sans aucune trace d'origine : annonce manuelle.
+         const manual = actives.find((l) => String(l.characterId) !== targetCard) || null;
+         const manualId = manual ? String(manual.id) : null;
+         const old = new Date(Date.now() - 2 * 3600000).toISOString();
+         for (const listing of listings) {
+           if (String(listing.id) === targetId || (manualId && String(listing.id) === manualId)) {
+             listing.createdAt = old;
+           }
+         }
+         // Seule la cible est suivie comme créée par la vente auto.
+         state.salesTrack = [
+           {
+             id: targetId,
+             characterId: targetCard,
+             name: target.character?.name || '',
+             rarity: target.character?.rarity || '',
+             price: Number(target.price) || null,
+             source: 'auto',
+             createdAt: Date.now() - 2 * 3600000,
+             endsAt: Date.now() + 3600000
+           }
+         ];
+         const rowBefore = collection.find((item) => String(item.characterId) === targetCard);
+         const qtyBefore = Number(rowBefore?.qty);
+         const activeBefore = kp.listingSlots().active;
+
+         state.autoSell.stop = false;
+         state.autoSell.running = true;
+         let result = null;
+         let failure = null;
+         try {
+           await kp.autoSellRefresh();
+           result = await kp.autoSellPurgeExpired({ refresh: true });
+         } catch (err) {
+           failure = err && err.message ? err.message : String(err);
+         }
+         state.autoSell.running = false;
+         state.autoSell.stop = true;
+
+         // Nouvelle lecture : l'exemplaire doit être revenu dans le pool.
+         state.autoSell.running = true;
+         try {
+           await kp.autoSellRefresh();
+         } catch (err) {
+           failure = failure || (err && err.message ? err.message : String(err));
+         }
+         state.autoSell.running = false;
+         state.autoSell.stop = true;
+         const poolRow =
+           state.collection.find((item) => String(item.characterId ?? item.id) === targetCard) || null;
+         const listableAfter = Number(poolRow?.listable);
+
+         const marketIds = (window.__marketState?.listings || []).map((l) => String(l.id));
+         const rowAfter = (window.__marketState?.collection || []).find(
+           (item) => String(item.characterId) === targetCard
+         );
+         const returned =
+           state.autoSell.expiry.returns.find((entry) => String(entry.characterId) === targetCard) || null;
+         // Tout de suite après le retrait, la carte ne doit pas être resélectionnable.
+         const appearsNow = kp
+           .autoSellRankedCandidates()
+           .some((row) => String(row.id) === targetCard);
+         // Délai anti-boucle écoulé : elle réapparaît, en toute fin de classement.
+         if (returned) returned.at = Date.now() - 11 * 60000;
+         const rankedLater = kp.autoSellRankedCandidates();
+         const lastRow = rankedLater[rankedLater.length - 1] || null;
+         state.sellView.mode = 'auto';
+         state.tab = 'sell';
+         state.open = true;
+         kp.render();
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const expiryPanel = root.querySelector('.kp-expiry')?.innerText || '';
+         const note = root.querySelector('.kp-autosell-expire-note')?.innerText || '';
+         const logText = state.autoSell.log.map((entry) => entry.text).join(' | ');
+         settings.autoSellExpireEnabled = saved.enabled;
+         settings.autoSellExpireValue = saved.value;
+         settings.autoSellExpireUnit = saved.unit;
+         return {
+           ok: true,
+           failure,
+           removed: result ? result.removed : null,
+           targetId,
+           targetCard,
+           manualId,
+           removedFromServer: !marketIds.includes(targetId),
+           manualStillThere: manualId ? marketIds.includes(manualId) : null,
+           qtyBefore,
+           qtyAfter: Number(rowAfter?.qty),
+           inventoryHasCard: Boolean(rowAfter) && Number(rowAfter?.qty) >= 1,
+           listableAfter,
+           returned: returned ? { at: returned.at, name: returned.name } : null,
+           activeBefore,
+           activeAfter: kp.listingSlots().active,
+           appearsNow,
+           lastId: lastRow ? String(lastRow.id) : null,
+           lastExpired: Boolean(lastRow?.expiredReturn),
+           history: state.autoSell.expiry.history.map((entry) => entry.kind),
+           logText,
+           expiryPanel,
+           note
+         };
+       })()`
+    );
+    check('Retrait auto : aucune erreur pendant le retrait', expiry.ok === true && expiry.failure === null, JSON.stringify(expiry.failure));
+    check(
+      'Retrait auto : annonce trop ancienne retirée des ventes actives',
+      expiry.removed === 1 && expiry.removedFromServer === true,
+      `removed=${expiry.removed} · serveur=${expiry.removedFromServer}`
+    );
+    check(
+      'Retrait auto : annonce manuelle jamais retirée',
+      Boolean(expiry.manualId) && expiry.manualStillThere === true,
+      `manuelle=${expiry.manualId} · présente=${expiry.manualStillThere}`
+    );
+    check(
+      'Retrait auto : carte et quantité conservées dans l’inventaire',
+      expiry.inventoryHasCard === true && expiry.qtyAfter === expiry.qtyBefore,
+      `qty ${expiry.qtyBefore} → ${expiry.qtyAfter}`
+    );
+    check(
+      'Retrait auto : carte de retour dans le pool disponible',
+      Number.isFinite(expiry.listableAfter) && expiry.listableAfter > 0,
+      `listable=${expiry.listableAfter}`
+    );
+    check(
+      'Retrait auto : place d’annonce libérée',
+      expiry.activeAfter === expiry.activeBefore - 1,
+      `${expiry.activeBefore} → ${expiry.activeAfter}`
+    );
+    check(
+      'Retrait auto : pas de resélection immédiate',
+      expiry.appearsNow === false,
+      String(expiry.appearsNow)
+    );
+    check(
+      'Retrait auto : statut « retour après expiration » classé en fin de file',
+      expiry.lastId === expiry.targetCard && expiry.lastExpired === true,
+      `dernière=${expiry.lastId} · statut=${expiry.lastExpired}`
+    );
+    check(
+      'Retrait auto : journal horodaté et encart dans le panneau',
+      expiry.history.includes('remove') &&
+        /retirée après/i.test(expiry.logText) &&
+        /retrait auto/i.test(expiry.note) &&
+        /retraits automatiques/i.test(expiry.expiryPanel),
+      `${expiry.note.replace(/\s+/g, ' ')} | ${expiry.expiryPanel.replace(/\s+/g, ' ').slice(0, 120)}`
+    );
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const a = window.__kyaraPlus.state.autoSell;
+         a.expiry.returns = [];
+         a.expiry.history = [];
+         a.expiry.locks = {};
+         window.__kyaraPlus.render();
+         return true;
+       })()`
+    );
+
     await evaluate(cdp, sessionId, `window.__kyaraPlus.setTab('market')`);
     await waitFor(
       () => evaluate(cdp, sessionId, 'window.__kyaraPlus.state.marketView.items !== null'),
