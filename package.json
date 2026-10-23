@@ -1,12 +1,12 @@
 {
   "name": "kyareeh-plus",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "description": "Extension Firefox : tableau de bord, vente assistée et analyse du marché pour kyara.games",
   "scripts": {
     "start": "web-ext run --source-dir .",
     "lint": "web-ext lint --source-dir .",
-    "build": "web-ext build --source-dir . --filename kyareeh-plus-2.4.0.zip --overwrite-dest",
+    "build": "web-ext build --source-dir . --filename kyareeh-plus-2.5.0.zip --overwrite-dest",
     "build:chrome": "node scripts/build-chrome.mjs",
     "sign": "web-ext sign --source-dir . --channel unlisted --artifacts-dir web-ext-artifacts --overwrite-dest",
     "release": "node scripts/release.mjs",
@@ -22,7 +22,8 @@
     "sim:duel": "node test/sim-duel.mjs 2000",
     "relay": "node relay/server.mjs",
     "verify:chrome": "node test/chrome-smoke.mjs",
-    "verify:autosell-expiry": "node test/verify-autosell-expiry.mjs"
+    "verify:autosell-expiry": "node test/verify-autosell-expiry.mjs",
+    "verify:recycle": "node test/verify-recycle.mjs"
   },
   "devDependencies": {
     "web-ext": "^8.3.0"

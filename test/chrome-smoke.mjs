@@ -255,6 +255,7 @@ async function visualPass() {
     for (const [tab, file] of [
       ['account', 'chrome-compte.png'],
       ['sell', 'chrome-vente.png'],
+      ['recycle', 'chrome-recyclage.png'],
       ['stat', 'chrome-stat.png']
     ]) {
       await evaluate(
@@ -305,6 +306,140 @@ async function visualPass() {
       writeFileSync(join(SHOTS, file), Buffer.from(shot.data, 'base64'));
       check(`Onglet ${tab} rendu`, rect.width > 300 && rect.height > 400, `${file}`);
     }
+
+    console.log('\n— Recyclage ciblé (harness) —');
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => { window.__kyaraPlus.setOpen(true); window.__kyaraPlus.setTab('recycle'); return true; })()`
+    );
+    await sleep(450);
+    // Le recyclage détruit des exemplaires du harness : on photographie la
+    // collection pour la restaurer avant les tests de vente auto.
+    const recycleCollection = await evaluate(cdp, sessionId, 'JSON.stringify(window.__marketState.collection)');
+    const recycleChakra = await evaluate(cdp, sessionId, 'window.__chakra ?? 12345');
+    const recycleBefore = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         return {
+           rows: root.querySelectorAll('.kp-recycle-row').length,
+           dimmed: root.querySelectorAll('.kp-recycle-row.is-locked').length,
+           chakra: Number(window.__kyaraPlus.state.user?.chakra) || 0
+         };
+       })()`
+    );
+    check('recyclage : des doublons sont listés', recycleBefore.rows > 0, `${recycleBefore.rows} ligne(s)`);
+    check('recyclage : les cartes bloquées sont grisées', recycleBefore.dimmed >= 1, `${recycleBefore.dimmed}`);
+
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="recycle-select-all"]')?.click();
+         return true;
+       })()`
+    );
+    await sleep(250);
+    const recycleSelected = await evaluate(cdp, sessionId, 'window.__kyaraPlus.state.recycle.selection.size');
+    check('recyclage : sélection remplie', recycleSelected >= 1, `${recycleSelected} carte(s)`);
+
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="recycle-start"]')?.click();
+         return true;
+       })()`
+    );
+    await sleep(250);
+    const recyclePreview = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         return {
+           open: Boolean(window.__kyaraPlus.state.recycle.open),
+           rows: root.querySelectorAll('#kp-modal-card .kp-plan-row').length,
+           label: root.querySelector('[data-act="recycle-run"]')?.textContent?.trim() || ''
+         };
+       })()`
+    );
+    check(
+      'recyclage : aperçu ouvert',
+      recyclePreview.open && recyclePreview.rows === recycleSelected,
+      `${recyclePreview.rows}/${recycleSelected}`
+    );
+    check('recyclage : bouton de confirmation', /Recycler/.test(recyclePreview.label), recyclePreview.label);
+
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="recycle-run"]')?.click();
+         return true;
+       })()`
+    );
+    await waitFor(() => evaluate(cdp, sessionId, '(window.__recycled || []).length > 0'), {
+      label: 'POST recycle',
+      timeout: 20000
+    });
+    await waitFor(() => evaluate(cdp, sessionId, 'window.__kyaraPlus.state.recycle.done === true'), {
+      label: 'fin du recyclage',
+      timeout: 30000
+    });
+    const recycleAfter = await evaluate(
+      cdp,
+      sessionId,
+      `(() => ({
+         calls: (window.__recycled || []).length,
+         copies: (window.__recycled || []).reduce((sum, call) => sum + Number(call.qty || 0), 0),
+         chakra: Number(window.__kyaraPlus.state.user?.chakra) || 0,
+         selection: window.__kyaraPlus.state.recycle.selection.size
+       }))()`
+    );
+    check('recyclage : une requête par carte', recycleAfter.calls >= 1, `${recycleAfter.calls} appel(s)`);
+    check(
+      'recyclage : chakra crédité',
+      recycleAfter.chakra > recycleBefore.chakra,
+      `${recycleBefore.chakra} → ${recycleAfter.chakra}`
+    );
+    check('recyclage : sélection vidée', recycleAfter.selection === 0);
+
+    // Referme l'aperçu pour ne pas masquer les écrans suivants.
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="recycle-close"]')?.click();
+         return true;
+       })()`
+    );
+    await sleep(200);
+
+    // Restaure l'inventaire simulé (les tests de vente auto comptent sur ses quantités).
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const saved = ${recycleCollection};
+         window.__marketState.collection.length = 0;
+         for (const row of saved) window.__marketState.collection.push(row);
+         window.__chakra = ${JSON.stringify(recycleChakra)};
+         window.__recycled = [];
+         const state = window.__kyaraPlus.state;
+         state.collection = window.__marketState.collection.map((row) => ({ ...row }));
+         if (state.user) state.user.chakra = window.__chakra;
+         window.__kyaraPlus.render();
+         return true;
+       })()`
+    );
+    await sleep(200);
 
     console.log('\n— Vente auto (harness) —');
     await evaluate(

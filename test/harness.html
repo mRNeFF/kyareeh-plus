@@ -244,7 +244,7 @@
           return json({
             id: 'u-axel',
             pseudo: 'Axel',
-            chakra: 12345,
+            chakra: window.__chakra ?? 12345,
             freePacks: 7,
             bonusPacks: 2,
             freePacksMax: 10,
@@ -271,7 +271,7 @@
               avatar: null,
               title: 'Collectionneur',
               rank: { id: 'expert', label: 'Expert', points: 9819 },
-              chakra: 12345,
+              chakra: window.__chakra ?? 12345,
               freePacks: 7,
               freePacksMax: 10,
               nextFreeAt: new Date(Date.now() + (window.__nextFreeMin ?? 10) * 60000).toISOString(),
@@ -280,6 +280,37 @@
             },
             wishlist: []
           });
+        }
+        if (path.includes('/api/me/collection/') && path.endsWith('/recycle')) {
+          const characterId = Number(
+            decodeURIComponent(path.split('/api/me/collection/')[1].split('/recycle')[0])
+          );
+          const body = JSON.parse(init?.body || '{}');
+          const qty = Math.max(1, Math.floor(Number(body.qty) || 1));
+          const row = MARKET_STATE.collection.find((item) => Number(item.characterId) === characterId);
+          if (!row) {
+            return new Response(JSON.stringify({ error: 'not_found' }), {
+              status: 404,
+              headers: { 'content-type': 'application/json' }
+            });
+          }
+          const rarity = CHARACTERS.find((c) => Number(c.id) === characterId)?.rarity ?? 'C';
+          const before = Math.max(0, Number(row.qty ?? 1));
+          const listableBefore = Math.max(0, Math.min(before, Number(row.listable ?? before)));
+          const engaged = Math.max(0, before - listableBefore);
+          const spare = Math.max(0, before - Number(row.locked ?? 0) - 1);
+          if (row.pinned || qty > spare) {
+            return new Response(JSON.stringify({ error: 'not_enough_copies' }), {
+              status: 400,
+              headers: { 'content-type': 'application/json' }
+            });
+          }
+          row.qty = Math.max(1, before - qty);
+          row.listable = Math.max(0, row.qty - engaged);
+          const gained = (CONFIG.recycle[rarity] || 0) * qty;
+          window.__chakra = (window.__chakra ?? 12345) + gained;
+          (window.__recycled = window.__recycled || []).push({ characterId, qty, gained, at: Date.now() });
+          return json({ user: { id: 'u-axel', chakra: window.__chakra }, entry: { ...row }, gained });
         }
         if (url.includes('/api/me/collection')) {
           // ?duel=1 : le compte simulé possède aussi les 8 premières Mythiques du duel

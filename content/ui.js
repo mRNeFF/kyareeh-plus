@@ -249,6 +249,30 @@
       refreshing: false,
       lastRefresh: 0
     },
+    // Onglet Recyclage : sélection ciblée des exemplaires en trop.
+    recycleView: {
+      query: '',
+      rarity: 'all',
+      series: 'all',
+      sort: 'value_desc',
+      limit: 40,
+      onlyDupes: true,
+      includeML: false
+    },
+    recycle: {
+      // Sélection en cours, par carte : id → nombre d'exemplaires à recycler.
+      selection: new Map(),
+      // Aperçu figé au moment de l'ouverture de la modale.
+      plan: [],
+      open: false,
+      running: false,
+      done: false,
+      stop: false,
+      gained: 0,
+      planned: 0,
+      processed: 0,
+      log: []
+    },
     // Onglet Marché : deux vues internes, sans doublon avec l'onglet Vente.
     marketMode: 'global',
     marketView: {
@@ -1579,6 +1603,109 @@
       .filter((r) => r.sellable > 0);
   }
 
+  /* RECYCLE:BEGIN — sélection et totaux purs du recyclage ciblé, testés par verify-recycle.mjs */
+  /**
+   * Le site conserve **toujours un exemplaire** de chaque carte : le recyclage
+   * ne porte que sur les exemplaires en trop.
+   */
+  const RECYCLE_KEEP_COPIES = 1;
+
+  /**
+   * Exemplaires qu'on ne peut pas recycler : les verrouillés (`locked`) et les
+   * exemplaires engagés (annonce, offre, échange) que `listable` exclut déjà.
+   * Aucune donnée inventée : sans `listable`, seuls les verrouillés sont retirés.
+   */
+  function recycleBlockedCopies(row) {
+    const qty = Math.max(0, Number(row?.qty ?? row?.quantity) || 0);
+    if (!qty) return 0;
+    const rawListable = row?.listable ?? row?.listableQty;
+    const listable = rawListable == null ? qty : Math.max(0, Math.min(qty, Number(rawListable) || 0));
+    const engaged = Math.max(0, qty - listable);
+    const locked = Math.max(0, Number(row?.lockedQty ?? row?.locked) || 0);
+    return Math.min(qty, Math.max(engaged, locked));
+  }
+
+  /**
+   * Exemplaires recyclables d'une carte : tout sauf les exemplaires bloqués et
+   * l'exemplaire conservé. Une carte verrouillée (`pinned`) n'en a aucun : le
+   * site indique qu'elle « ne peut être ni vendue, ni échangée, ni recyclée ».
+   */
+  function recycleSpareOf(row) {
+    if (!row || row.pinned) return 0;
+    const qty = Math.max(0, Number(row?.qty ?? row?.quantity) || 0);
+    return Math.max(0, qty - recycleBlockedCopies(row) - RECYCLE_KEEP_COPIES);
+  }
+
+  /** Pourquoi une carte n'est pas recyclable (null = sélectionnable). */
+  function recycleBlockOf(row, options = {}) {
+    if (!row) return 'Carte introuvable';
+    if (row.pinned) return 'Verrouillée : le site refuse le recyclage';
+    const qty = Math.max(0, Number(row.qty) || 0);
+    if (qty <= 1) return 'Seul exemplaire : conservé';
+    if (recycleSpareOf(row) <= 0) {
+      const locked = Math.max(0, Number(row.lockedQty ?? row.locked) || 0);
+      if (locked > 0) return `${locked} exemplaire(s) verrouillé(s)`;
+      return 'Tous les exemplaires sont engagés';
+    }
+    const rarity = String(row.rarity || 'C').toUpperCase();
+    if (!options.includeML && (rarity === 'M' || rarity === 'L')) {
+      return rarity === 'M' ? 'Mythique exclue par défaut' : 'Légendaire exclue par défaut';
+    }
+    return null;
+  }
+
+  /** Quantité retenue pour une carte : jamais plus que ce qui reste à recycler. */
+  function recycleQtyOf(row, wanted) {
+    const qty = Math.max(0, Math.floor(Number(wanted) || 0));
+    return Math.min(recycleSpareOf(row), qty);
+  }
+
+  /**
+   * Plan de recyclage à partir d'une sélection `Map<id, quantité>` (ou objet).
+   * `rates` = barème de recyclage par rareté (`/api/config` → `recycle`).
+   * Les cartes bloquées sont écartées : aucune destruction sans ligne valide.
+   */
+  function recycleBuildPlan(rows, selection, rates = {}) {
+    const wanted = (id) => {
+      if (!selection) return 0;
+      if (typeof selection.get === 'function') return selection.get(String(id));
+      return selection[String(id)];
+    };
+    const plan = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const qty = recycleQtyOf(row, wanted(row.id));
+      if (qty <= 0) continue;
+      const rarity = String(row.rarity || 'C').toUpperCase();
+      const unit = Math.max(0, Number(rates?.[rarity]) || 0);
+      plan.push({
+        id: String(row.id),
+        characterId: row.rawId ?? row.id,
+        name: row.name,
+        rarity,
+        qty,
+        maxQty: recycleSpareOf(row),
+        totalQty: Math.max(0, Number(row.qty) || 0),
+        unit,
+        total: unit * qty
+      });
+    }
+    return plan;
+  }
+
+  /** Totaux d'un plan : cartes, exemplaires, chakra attendu. */
+  function recycleTotals(plan) {
+    let cards = 0;
+    let copies = 0;
+    let chakra = 0;
+    for (const row of Array.isArray(plan) ? plan : []) {
+      cards += 1;
+      copies += Math.max(0, Number(row.qty) || 0);
+      chakra += Math.max(0, Number(row.total) || 0);
+    }
+    return { cards, copies, chakra };
+  }
+  /* RECYCLE:END */
+
   /* AUTOSELL:BEGIN — sélection pure des doublons, testée par verify-autosell.mjs */
   /**
    * Toutes les annonces connues de `/api/me/market`, quel que soit le nom du
@@ -2399,7 +2526,7 @@
   const SALES_DEAD_STATUSES = ['expired', 'ended', 'cancelled', 'canceled'];
 
   /** Lecture normalisée d'une annonce de `/api/me/market` (pure). */
-  function salesListingSnapshot(listing) {
+  function salesListingSnapshot(listing, now = Date.now()) {
     if (!listing || typeof listing !== 'object') return null;
     const status = autoSellListingStatus(listing);
     const rawEnd = listing.endsAt ?? listing.expiresAt ?? null;
@@ -2412,7 +2539,7 @@
     return {
       ids: autoSellListingIds(listing),
       status,
-      active: autoSellListingIsActive(listing),
+      active: autoSellListingIsActive(listing, now),
       sold: SALES_SOLD_STATUSES.includes(status),
       dead: SALES_DEAD_STATUSES.includes(status),
       at: Number.isFinite(end) ? end : null,
@@ -2465,7 +2592,9 @@
     const graceMs = Number.isFinite(Number(options.graceMs))
       ? Math.max(0, Number(options.graceMs))
       : 90 * 1000;
-    const snaps = (Array.isArray(listings) ? listings : []).map(salesListingSnapshot).filter(Boolean);
+    const snaps = (Array.isArray(listings) ? listings : [])
+      .map((listing) => salesListingSnapshot(listing, current))
+      .filter(Boolean);
     const byId = new Map();
     const byCard = new Map();
     for (const snap of snaps) {
@@ -4505,6 +4634,193 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Recyclage ciblé : préparation et exécution                          */
+  /* ------------------------------------------------------------------ */
+
+  function closeRecycleModal() {
+    const rec = state.recycle;
+    if (rec.running) return;
+    rec.open = false;
+    rec.plan = [];
+    rec.done = false;
+    rec.gained = 0;
+    rec.planned = 0;
+    rec.processed = 0;
+    rec.log = [];
+    render();
+  }
+
+  /** Ouvre l'aperçu de la sélection en cours (aucune requête, aucune action). */
+  function prepareRecycle() {
+    const plan = recyclePlan();
+    if (!plan.length) {
+      notify('Sélectionne au moins un exemplaire à recycler.');
+      return;
+    }
+    const rec = state.recycle;
+    rec.plan = plan;
+    rec.open = true;
+    rec.running = false;
+    rec.done = false;
+    rec.stop = false;
+    rec.gained = 0;
+    rec.processed = 0;
+    rec.planned = plan.reduce((sum, row) => sum + row.qty, 0);
+    rec.log = [];
+    render();
+  }
+
+  /** Relit la collection et renvoie l'état réel de chaque carte, par identifiant. */
+  async function recycleFreshCollection() {
+    const data = await api('/api/me/collection?lean=1', { timeout: 25000 });
+    const items = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : null;
+    if (!items) throw new ApiError(0, 'Collection illisible');
+    const map = new Map();
+    for (const item of items) {
+      const rawId = item?.characterId ?? item?.id;
+      if (rawId == null) continue;
+      const id = String(rawId);
+      const character = state.characters.get(id) ?? {};
+      map.set(id, {
+        id,
+        rawId,
+        qty: Math.max(0, Number(item.qty ?? item.quantity ?? 1) || 0),
+        listable: item.listable == null ? null : Math.max(0, Number(item.listable) || 0),
+        lockedQty: Math.max(0, Number(item.locked) || 0),
+        pinned: Boolean(item.pinned),
+        rarity: String(character.rarity ?? item.rarity ?? 'C').toUpperCase()
+      });
+    }
+    return map;
+  }
+
+  /** Applique la ligne renvoyée par le site à la collection locale. */
+  function applyRecycleEntry(entry) {
+    if (!entry || typeof entry !== 'object') return;
+    const rawId = entry.characterId ?? entry.id;
+    if (rawId == null) return;
+    const id = String(rawId);
+    const index = state.collection.findIndex((item) => String(item?.characterId ?? item?.id) === id);
+    if (index < 0) return;
+    state.collection[index] = { ...state.collection[index], ...entry };
+  }
+
+  /**
+   * Exécute le plan affiché. Le site ne fournit qu'un endpoint **par carte** :
+   * les requêtes partent une par une, dans la file anti-rafale existante.
+   * Une relecture de la collection précède toute destruction : si les
+   * quantités ont changé, rien n'est recyclé.
+   */
+  async function executeRecycle() {
+    const rec = state.recycle;
+    if (!rec.open || rec.running || !rec.plan.length) return;
+
+    rec.running = true;
+    rec.stop = false;
+    rec.done = false;
+    rec.gained = 0;
+    rec.processed = 0;
+    rec.log = [];
+    render();
+
+    const log = (text, kind = 'info') => {
+      rec.log.push({ text, kind });
+      render();
+    };
+
+    let fresh;
+    try {
+      fresh = await recycleFreshCollection();
+    } catch (err) {
+      rec.running = false;
+      rec.done = true;
+      log(`✗ Relecture impossible : ${friendlyError(err)} — rien n'a été recyclé.`, 'err');
+      render();
+      return;
+    }
+
+    const changed = [];
+    for (const row of rec.plan) {
+      const live = fresh.get(String(row.id));
+      const max = recycleSpareOf(live);
+      if (!live || max < row.qty) changed.push(`${row.name} (${row.qty} → ${max})`);
+    }
+    if (changed.length) {
+      rec.running = false;
+      rec.done = true;
+      log(
+        `✗ Collection modifiée entre-temps : ${changed.slice(0, 3).join(', ')}${
+          changed.length > 3 ? '…' : ''
+        }. Rien n'a été recyclé, vérifie l'aperçu.`,
+        'err'
+      );
+      render();
+      await loadData({ keepPrices: true });
+      return;
+    }
+
+    let gained = 0;
+    let copies = 0;
+    let stopped = null;
+    let consecutiveErrors = 0;
+    const gap = Math.max(350, Number(state.settings.gapMs) || 1200);
+
+    for (const row of rec.plan) {
+      if (rec.stop) {
+        stopped = 'user';
+        break;
+      }
+      try {
+        const posted = await api(
+          `/api/me/collection/${encodeURIComponent(String(row.characterId))}/recycle`,
+          { method: 'POST', timeout: 20000, body: { qty: row.qty } }
+        );
+        const reward = Math.max(0, Math.round(Number(posted?.gained ?? row.total) || 0));
+        gained += reward;
+        copies += row.qty;
+        rec.gained = gained;
+        rec.processed += row.qty;
+        if (posted?.user && typeof posted.user === 'object') {
+          state.user = { ...state.user, ...posted.user };
+        }
+        applyRecycleEntry(posted?.entry);
+        log(`✓ ${row.name} ×${fmt(row.qty)} · +◆ ${fmt(reward)}`, 'ok');
+        consecutiveErrors = 0;
+      } catch (err) {
+        consecutiveErrors += 1;
+        log(`✗ ${row.name} · ${friendlyError(err)}`, 'err');
+        const status = Number(err?.status);
+        if (status === 401 || status === 403 || status === 429) {
+          stopped = 'auth';
+          break;
+        }
+        if (consecutiveErrors >= 3) {
+          stopped = 'errors';
+          break;
+        }
+      }
+      if (rec.stop) {
+        stopped = 'user';
+        break;
+      }
+      await sleep(gap);
+    }
+
+    rec.running = false;
+    rec.done = true;
+    if (stopped === 'user') log('Arrêt demandé.', 'info');
+    else if (stopped === 'auth') log('Arrêt : session expirée ou limite API atteinte.', 'err');
+    else if (stopped === 'errors') log('Arrêt après 3 erreurs consécutives.', 'err');
+    log(`Terminé · ${fmt(copies)} exemplaire(s) recyclé(s) · +◆ ${fmt(gained)}.`, 'ok');
+
+    // Les cartes sorties de la sélection ne peuvent plus être recyclées : on
+    // repart d'une sélection propre et d'une collection relue.
+    state.recycle.selection.clear();
+    render();
+    await loadData({ keepPrices: true });
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Vente auto des doublons                                             */
   /* ------------------------------------------------------------------ */
 
@@ -5784,10 +6100,17 @@
 
   function renderUnsafe() {
     if (!state.mounted || !ui) return;
+    // L'aperçu de recyclage ne doit jamais masquer un autre onglet : hors action,
+    // changer d'onglet le referme.
+    if (state.tab !== 'recycle' && state.recycle.open && !state.recycle.running) {
+      state.recycle.open = false;
+      state.recycle.plan = [];
+      state.recycle.done = false;
+    }
     syncSoundControls();
     ui.panel.hidden = !state.open;
-    // Les onglets denses (Vente, Stat) gardent un peu plus de largeur.
-    ui.panel.classList.toggle('is-wide', state.tab === 'sell' || state.tab === 'stat');
+    // Les onglets denses (Vente, Recyclage, Stat) gardent un peu plus de largeur.
+    ui.panel.classList.toggle('is-wide', state.tab === 'sell' || state.tab === 'recycle' || state.tab === 'stat');
     // +Duel : l'application occupe toute la hauteur (pas de stats ni d'onglets au-dessus).
     ui.panel.classList.toggle('is-duel', duelState().mode === 'duel');
     ui.fab.classList.toggle('is-open', state.open);
@@ -6221,6 +6544,7 @@
     const tabs = [
       ['account', 'Compte'],
       ['sell', sellable ? `Vente (${sellable})` : 'Vente'],
+      ['recycle', 'Recyclage'],
       ['market', 'Marché'],
       ['cards', '%Drop'],
       ['auto', 'Auto-Open'],
@@ -6272,6 +6596,7 @@
     const fn = {
       account: viewAccount,
       sell: viewSell,
+      recycle: viewRecycle,
       market: viewMarket,
       cards: viewCards,
       auto: viewAuto,
@@ -8164,6 +8489,248 @@
         </div>
         <button class="kp-btn is-primary" type="button" data-act="prepare-sell" ${selected.length ? '' : 'disabled'}>Préparer la vente</button>
       </div>`;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Onglet Recyclage : doublons ciblés                                  */
+  /* ------------------------------------------------------------------ */
+
+  const RECYCLE_SORTS = [
+    ['value_desc', 'Valeur de recyclage ↓'],
+    ['qty_desc', 'Doublons ↓'],
+    ['price_desc', 'Prix ↓'],
+    ['sales_desc', 'Ventes 7 j ↓'],
+    ['rarity_desc', 'Rareté ↓'],
+    ['name_asc', 'Nom A→Z']
+  ];
+
+  /** Barème réel de recyclage par rareté (`/api/config` → `recycle`). */
+  function recycleRates() {
+    const rates = {};
+    for (const code of RARITY_ORDER) rates[code] = recycleOf(code);
+    return rates;
+  }
+
+  function recycleRows() {
+    return sellRows().map((row) => {
+      const spare = recycleSpareOf(row);
+      return {
+        ...row,
+        spare,
+        unit: recycleOf(row.rarity),
+        blockReason: recycleBlockOf(row, { includeML: state.recycleView.includeML })
+      };
+    });
+  }
+
+  /** Cartes réellement sélectionnables (aucun blocage, au moins un exemplaire en trop). */
+  function recycleSelectableRows(rows = recycleRows()) {
+    return rows.filter((row) => !row.blockReason && row.spare > 0);
+  }
+
+  function recyclePlan() {
+    return recycleBuildPlan(recycleSelectableRows(), state.recycle.selection, recycleRates());
+  }
+
+  /** Retire de la sélection les cartes devenues non recyclables (verrou, filtre). */
+  function recyclePruneSelection() {
+    const rows = new Map(recycleRows().map((row) => [String(row.id), row]));
+    for (const [id, qty] of [...state.recycle.selection]) {
+      const row = rows.get(String(id));
+      if (!row || row.blockReason) {
+        state.recycle.selection.delete(id);
+        continue;
+      }
+      const next = Math.min(row.spare, Math.max(0, Math.floor(Number(qty) || 0)));
+      if (next > 0) state.recycle.selection.set(id, next);
+      else state.recycle.selection.delete(id);
+    }
+  }
+
+  function recycleSeriesOptions() {
+    const set = new Set();
+    for (const row of sellRows()) if (row.series) set.add(row.series);
+    return [...set].sort((a, b) => a.localeCompare(b, 'fr'));
+  }
+
+  function filteredRecycleRows(base = recycleRows()) {
+    const view = state.recycleView;
+    const query = view.query.trim().toLowerCase();
+    let rows = base;
+    if (view.onlyDupes) rows = rows.filter((row) => row.qty > 1);
+    if (query) rows = rows.filter((row) => `${row.name} ${row.series}`.toLowerCase().includes(query));
+    if (view.rarity !== 'all') rows = rows.filter((row) => String(row.rarity) === view.rarity);
+    if (view.series !== 'all') rows = rows.filter((row) => String(row.series) === view.series);
+
+    const rarityRank = (code) => RARITY_ORDER.indexOf(String(code || 'C').toUpperCase());
+    const valueOf = (row) => row.unit * row.spare;
+    const priceOfRow = (row) => (row.price == null ? -1 : row.price);
+    const salesOf = (row) => toNum(state.prices[String(row.id)]?.sales7d) ?? -1;
+
+    const comparators = {
+      value_desc: (a, b) => valueOf(b) - valueOf(a) || b.qty - a.qty,
+      qty_desc: (a, b) => b.qty - a.qty || valueOf(b) - valueOf(a),
+      price_desc: (a, b) => priceOfRow(b) - priceOfRow(a) || valueOf(b) - valueOf(a),
+      sales_desc: (a, b) => salesOf(b) - salesOf(a) || valueOf(b) - valueOf(a),
+      rarity_desc: (a, b) => rarityRank(b.rarity) - rarityRank(a.rarity) || valueOf(b) - valueOf(a),
+      name_asc: (a, b) => a.name.localeCompare(b.name, 'fr')
+    };
+    return rows.sort(comparators[view.sort] ?? comparators.value_desc);
+  }
+
+  function recycleRarityChips(counts) {
+    const view = state.recycleView;
+    return `<div class="kp-rarities ${view.rarity !== 'all' ? 'is-focus' : ''}">
+      <button class="kp-rchip ${view.rarity === 'all' ? 'is-active' : ''}" type="button" data-act="recycle-rarity" data-rarity="all">Toutes ${counts.all ? `<em>${fmt(counts.all)}</em>` : ''}</button>
+      ${RARITY_ORDER.map((code) => {
+        const info = rarityInfo(code);
+        const count = counts[code] ?? 0;
+        return `<button class="kp-rchip ${view.rarity === code ? 'is-active' : ''}" type="button" data-act="recycle-rarity" data-rarity="${code}" style="--rc:${info.color}" ${count === 0 ? 'disabled' : ''}>
+          ${esc(info.label)} ${count ? `<em>${fmt(count)}</em>` : ''}
+        </button>`;
+      }).join('')}
+    </div>`;
+  }
+
+  /** Une ligne de l'onglet : carte, exemplaires en trop, quantité choisie. */
+  function recycleRowHTML(row) {
+    const checked = Number(state.recycle.selection.get(String(row.id)) || 0);
+    const info = rarityInfo(row.rarity);
+    const blocked = Boolean(row.blockReason);
+    const unit = row.unit;
+    const total = unit * checked;
+    const price = row.price;
+    return `
+      <div class="kp-recycle-row ${checked ? 'is-selected' : ''} ${blocked ? 'is-locked' : ''}">
+        <input type="checkbox" data-recycle-sel="${esc(row.id)}" ${checked ? 'checked' : ''} ${blocked ? 'disabled' : ''}
+          aria-label="Recycler des exemplaires de ${esc(row.name)}" ${blocked ? `title="${esc(row.blockReason)}"` : ''}>
+        <div class="kp-sell-thumb">
+          <img src="${esc(row.image)}" alt="" loading="lazy">
+          ${row.qty > 1 ? `<span class="kp-dupe-count" title="${fmt(row.qty)} exemplaires">×${fmt(row.qty)}</span>` : ''}
+        </div>
+        <div class="kp-sell-main">
+          <div class="kp-row-name">
+            ${esc(row.name)}
+            ${row.qty > 1 ? '<span class="kp-dupe-tag">doublon</span>' : ''}
+          </div>
+          <div class="kp-row-meta">
+            <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
+            ${fmt(row.qty)} ex. · ${fmt(row.spare)} recyclable${row.spare > 1 ? 's' : ''}
+            ${price != null ? ` · vente ◆ ${fmt(price)}` : ''}
+          </div>
+          ${blocked ? `<span class="kp-recycle-note">${esc(row.blockReason)}</span>` : ''}
+        </div>
+        <div class="kp-recycle-stepper" aria-label="Exemplaires à recycler">
+          <button class="kp-step" type="button" data-act="recycle-dec" data-id="${esc(row.id)}" ${!checked ? 'disabled' : ''} aria-label="Un exemplaire de moins">−</button>
+          <b>${checked || 0}<small>/${fmt(row.spare)}</small></b>
+          <button class="kp-step" type="button" data-act="recycle-inc" data-id="${esc(row.id)}" ${blocked || checked >= row.spare ? 'disabled' : ''} aria-label="Un exemplaire de plus">+</button>
+        </div>
+        <div class="kp-recycle-gain">
+          <b>${checked ? `◆ ${fmt(total)}` : unit ? `◆ ${fmt(unit)}` : '—'}</b>
+          <small>${checked ? `${fmt(checked)} × ◆ ${fmt(unit)}` : unit ? 'par exemplaire' : 'barème inconnu'}</small>
+        </div>
+      </div>`;
+  }
+
+  function recycleBar() {
+    const plan = recyclePlan();
+    const totals = recycleTotals(plan);
+    const disabled = !plan.length || state.recycle.running;
+    return `
+      <div class="kp-sellbar">
+        <div class="kp-sellbar-info">
+          <b>${totals.cards} carte(s) · ${totals.copies} exemplaire(s) · ≈ ◆ ${fmt(totals.chakra)}</b>
+          <span>1 copie de chaque carte conservée · action définitive</span>
+        </div>
+        <div class="kp-sellbar-actions">
+          <button class="kp-btn is-ghost" type="button" data-act="recycle-clear" ${totals.cards ? '' : 'disabled'}>Vider</button>
+          <button class="kp-btn is-primary" type="button" data-act="recycle-start" ${disabled ? 'disabled' : ''}>Recycler</button>
+        </div>
+      </div>`;
+  }
+
+  function viewRecycle() {
+    if (!state.user) return loginHTML();
+    const view = state.recycleView;
+    const all = recycleRows();
+    const rows = filteredRecycleRows(all);
+    const visible = rows.slice(0, view.limit);
+    const selectable = recycleSelectableRows(all);
+    const recyclableCopies = selectable.reduce((sum, row) => sum + row.spare, 0);
+
+    // Prix de vente des premières lignes : même lecture que l'onglet Vente, par
+    // petits lots, pour comparer « recycler » et « vendre » sans tout scanner.
+    if (visible.length) loadMarketInfo(visible.slice(0, 12).map((row) => row.id), 12);
+
+    const counts = { all: all.length };
+    for (const row of all) counts[row.rarity] = (counts[row.rarity] ?? 0) + 1;
+
+    if (!all.length) {
+      return `<div class="kp-empty"><b>Collection vide</b>Le site n'a renvoyé aucune carte pour ce compte.</div>`;
+    }
+
+    return `
+      <div class="kp-hint">
+        Le site conserve <b>toujours 1 exemplaire</b> de chaque carte. Le recyclage ne porte que sur
+        les exemplaires en trop : les cartes verrouillées et les exemplaires déjà engagés
+        (annonce, échange) sont exclus. <b>Action définitive</b>, sans annulation possible.
+      </div>
+      <div class="kp-toolbar kp-toolbar-search">
+        <input class="kp-input" type="search" data-role="recycle-search" autocomplete="off"
+          placeholder="Filtrer les doublons…" value="${esc(view.query)}">
+        <button class="kp-btn" type="button" data-act="recycle-refresh" ${state.loading ? 'disabled' : ''}>
+          ${state.loading ? '<span class="kp-spinner"></span> Actualisation…' : 'Actualiser'}
+        </button>
+      </div>
+      <div class="kp-filters">
+        <label class="kp-filter">
+          <span>Trier</span>
+          <select class="kp-select" data-recycle-sort>
+            ${RECYCLE_SORTS.map(
+              ([value, label]) => `<option value="${value}" ${view.sort === value ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </label>
+        <label class="kp-filter">
+          <span>Série</span>
+          <select class="kp-select" data-recycle-series>
+            <option value="all">Toutes</option>
+            ${recycleSeriesOptions()
+              .map(
+                (name) => `<option value="${esc(name)}" ${view.series === name ? 'selected' : ''}>${esc(name)}</option>`
+              )
+              .join('')}
+          </select>
+        </label>
+      </div>
+      <div class="kp-sell-toggles">
+        <label class="kp-check">
+          <input type="checkbox" data-recycle-only-dupes ${view.onlyDupes ? 'checked' : ''}>
+          <span>Doublons <small>plus d'un exemplaire</small></span>
+        </label>
+        <label class="kp-check">
+          <input type="checkbox" data-recycle-include-ml ${view.includeML ? 'checked' : ''}>
+          <span>Inclure L et M <small>exclues par défaut</small></span>
+        </label>
+      </div>
+      ${recycleRarityChips(counts)}
+      <div class="kp-hint">
+        ${rows.length === all.length ? `${fmt(all.length)} carte(s)` : `${fmt(rows.length)} / ${fmt(all.length)} carte(s)`}
+        · ${fmt(selectable.length)} carte(s) recyclable(s) · ${fmt(recyclableCopies)} exemplaire(s) en trop
+        · ◆ ${fmt(recycleOf('C'))} à ◆ ${fmt(recycleOf('M'))} selon la rareté
+      </div>
+      <div class="kp-recycle-list">${visible.map(recycleRowHTML).join('')}</div>
+      ${
+        rows.length > visible.length
+          ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="recycle-more">Afficher plus (${fmt(rows.length - visible.length)})</button></div>`
+          : ''
+      }
+      <div class="kp-toolbar">
+        <button class="kp-btn" type="button" data-act="recycle-select-all" ${selectable.length ? '' : 'disabled'}>
+          Tout sélectionner${rows.length !== all.length ? ' (filtré)' : ''}
+        </button>
+      </div>
+      ${recycleBar()}`;
   }
 
   /**
@@ -12141,8 +12708,91 @@
     return chunks.join(' · ');
   }
 
+  /**
+   * Aperçu du recyclage ciblé : ce qui va être détruit, ce qui reste, et le
+   * chakra attendu (estimation du barème, puis gain réel renvoyé par le site).
+   */
+  function renderRecycleModal() {
+    const rec = state.recycle;
+    const plan = rec.plan;
+    const totals = recycleTotals(plan);
+    const running = rec.running;
+    const done = rec.done;
+    const remaining = plan.reduce((sum, row) => sum + Math.max(0, row.totalQty - row.qty), 0);
+    const heavy = plan.filter((row) => row.rarity === 'M' || row.rarity === 'L');
+
+    ui.modal.hidden = false;
+    ui.modalCard.classList.add('is-wide');
+    ui.modalCard.innerHTML = `
+      <div class="kp-modal-head">
+        <b>Recyclage ciblé · ${totals.cards} carte(s)</b>
+        <button class="kp-icon-btn" type="button" data-act="recycle-close" ${running ? 'disabled' : ''}>✕</button>
+      </div>
+      <div class="kp-modal-body">
+        ${
+          heavy.length
+            ? `<div class="kp-alert is-bad">
+                 <b>Cartes de valeur</b><br>
+                 Tu vas recycler ${fmt(heavy.reduce((sum, row) => sum + row.qty, 0))} exemplaire(s)
+                 de rareté Légendaire ou Mythique. Ils seront perdus contre du chakra.
+               </div>`
+            : ''
+        }
+        <div class="kp-alert is-bad">
+          <b>Action définitive</b><br>
+          Les exemplaires recyclés quittent définitivement ta collection : il n'y a
+          <b>aucune annulation</b>. Une copie de chaque carte est toujours conservée.
+        </div>
+        <div class="kp-summary">
+          <div><span>Exemplaires</span><b>${fmt(totals.copies)}</b></div>
+          <div><span>Chakra ${done ? 'gagné' : 'attendu'}</span><b>◆ ${fmt(done ? rec.gained : totals.chakra)}</b></div>
+          <div><span>Cartes</span><b>${fmt(totals.cards)}</b></div>
+          <div><span>Restant</span><b>${fmt(remaining)} ex.</b></div>
+        </div>
+        <div class="kp-hint">
+          ${running ? `Progression ${fmt(rec.processed)}/${fmt(rec.planned)} exemplaire(s).` : 'Vérifie la liste, puis confirme.'}
+          Le gain réel est celui renvoyé par le site.
+        </div>
+        <div class="kp-plan">
+          ${plan
+            .map(
+              (row) => `
+            <div class="kp-plan-row">
+              <div class="kp-name">${esc(row.name)} <small>${esc(rarityInfo(row.rarity).label)} · reste ${
+                Math.max(0, row.totalQty - row.qty)
+              } ex.${row.unit ? ` · ◆ ${fmt(row.unit)}/ex.` : ' · barème inconnu'}</small></div>
+              <div class="kp-net">×${fmt(row.qty)} · ◆ ${fmt(row.total)}</div>
+            </div>`
+            )
+            .join('')}
+        </div>
+        ${rec.log.length ? `<div class="kp-log">${rec.log.map((l) => `<div class="is-${l.kind}">${esc(l.text)}</div>`).join('')}</div>` : ''}
+      </div>
+      <div class="kp-modal-foot">
+        <button class="kp-btn is-ghost" type="button" data-act="recycle-close" ${running ? 'disabled' : ''}>Annuler</button>
+        ${
+          running
+            ? `<button class="kp-btn is-danger" type="button" data-act="recycle-stop">Arrêter</button>`
+            : done
+              ? `<button class="kp-btn is-primary" type="button" data-act="recycle-close">Fermer</button>`
+              : `<button class="kp-btn is-primary" type="button" data-act="recycle-run">Recycler ${fmt(
+                  totals.copies
+                )} exemplaire(s)</button>`
+        }
+      </div>
+    `;
+    ui.modalCard.dataset.kind = 'recycle';
+  }
+
   function renderModal() {
     if (!ui) return;
+
+    // L'aperçu de recyclage prend la modale tant qu'il est ouvert (il suit la
+    // progression de l'action, même si l'utilisateur change d'onglet).
+    if (state.recycle.open) {
+      renderRecycleModal();
+      return;
+    }
 
     const kind = !state.sell && state.sellView.detailId ? 'detail' : state.sell ? 'sell' : 'closed';
     const kindKey = kind === 'detail' ? `detail:${state.sellView.detailId ?? ''}` : kind;
@@ -12514,6 +13164,12 @@
         break;
       case 'tab':
         state.tab = el.getAttribute('data-tab') || 'account';
+        // Quitter l'onglet ferme l'aperçu de recyclage, sauf pendant l'action.
+        if (state.tab !== 'recycle' && state.recycle.open && !state.recycle.running) {
+          state.recycle.open = false;
+          state.recycle.plan = [];
+          state.recycle.done = false;
+        }
         if (state.tab === 'account') {
           state.profile.view = 'self';
           state.profile.error = null;
@@ -12753,6 +13409,57 @@
         break;
       case 'prepare-sell':
         prepareSell();
+        break;
+      case 'recycle-rarity':
+        state.recycleView.rarity = el.getAttribute('data-rarity') || 'all';
+        state.recycleView.limit = 40;
+        recyclePruneSelection();
+        render();
+        break;
+      case 'recycle-inc':
+      case 'recycle-dec': {
+        const id = String(el.getAttribute('data-id') || '');
+        const row = recycleRows().find((r) => String(r.id) === id);
+        if (!row || row.blockReason) break;
+        const current = Number(state.recycle.selection.get(id) || 0);
+        const next = act === 'recycle-inc' ? Math.min(row.spare, current + 1) : Math.max(0, current - 1);
+        if (next > 0) state.recycle.selection.set(id, next);
+        else state.recycle.selection.delete(id);
+        render();
+        break;
+      }
+      case 'recycle-select-all':
+        for (const row of recycleSelectableRows(filteredRecycleRows())) {
+          state.recycle.selection.set(String(row.id), row.spare);
+        }
+        render();
+        break;
+      case 'recycle-clear':
+        state.recycle.selection.clear();
+        render();
+        break;
+      case 'recycle-start':
+        prepareRecycle();
+        break;
+      case 'recycle-run':
+        executeRecycle();
+        break;
+      case 'recycle-stop':
+        if (state.recycle.open && state.recycle.running) {
+          state.recycle.stop = true;
+          state.recycle.log.push({ text: 'Arrêt demandé…', kind: 'info' });
+          render();
+        }
+        break;
+      case 'recycle-close':
+        closeRecycleModal();
+        break;
+      case 'recycle-more':
+        state.recycleView.limit += 40;
+        render();
+        break;
+      case 'recycle-refresh':
+        loadData({ keepPrices: true });
         break;
       case 'sell-close':
         if (state.sell?.running) return;
@@ -13025,6 +13732,56 @@
   function onChange(event) {
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
+
+    // --- Onglet Recyclage : sélection et options ---
+    const recycleSel = target.closest('input[data-recycle-sel]');
+    if (recycleSel) {
+      const id = String(recycleSel.getAttribute('data-recycle-sel') || '');
+      const row = recycleRows().find((r) => String(r.id) === id);
+      if (!row || row.blockReason) {
+        state.recycle.selection.delete(id);
+        render();
+        return;
+      }
+      if (recycleSel.checked) state.recycle.selection.set(id, row.spare);
+      else state.recycle.selection.delete(id);
+      render();
+      return;
+    }
+
+    const recycleSort = target.closest('[data-recycle-sort]');
+    if (recycleSort) {
+      state.recycleView.sort = String(recycleSort.value) || 'value_desc';
+      state.recycleView.limit = 40;
+      render();
+      return;
+    }
+
+    const recycleSeries = target.closest('[data-recycle-series]');
+    if (recycleSeries) {
+      state.recycleView.series = String(recycleSeries.value) || 'all';
+      state.recycleView.limit = 40;
+      recyclePruneSelection();
+      render();
+      return;
+    }
+
+    const recycleOnlyDupes = target.closest('[data-recycle-only-dupes]');
+    if (recycleOnlyDupes) {
+      state.recycleView.onlyDupes = Boolean(recycleOnlyDupes.checked);
+      state.recycleView.limit = 40;
+      render();
+      return;
+    }
+
+    const recycleIncludeML = target.closest('[data-recycle-include-ml]');
+    if (recycleIncludeML) {
+      state.recycleView.includeML = Boolean(recycleIncludeML.checked);
+      recyclePruneSelection();
+      render();
+      return;
+    }
+
     const checkbox = target.closest('input[data-sel]');
     if (checkbox) {
       const id = checkbox.getAttribute('data-sel');
@@ -13426,6 +14183,30 @@
       return;
     }
 
+    const recycleSearch = target.closest('[data-role="recycle-search"]');
+    if (recycleSearch) {
+      state.recycleView.query = recycleSearch.value;
+      state.recycleView.limit = 40;
+      const restoreRecycleFocus = () => {
+        const again = qs('[data-role="recycle-search"]');
+        if (!again) return;
+        again.focus();
+        const pos = again.value.length;
+        try {
+          again.setSelectionRange(pos, pos);
+        } catch {
+          /* type=search may not support it */
+        }
+      };
+      if (recycleRenderTimer) clearTimeout(recycleRenderTimer);
+      recycleRenderTimer = setTimeout(() => {
+        recycleRenderTimer = null;
+        render();
+        restoreRecycleFocus();
+      }, 160);
+      return;
+    }
+
     const search = target.closest('[data-role="sell-search"]');
     if (!search) return;
     state.sellView.query = search.value;
@@ -13454,6 +14235,7 @@
 
   let sellSearchTimer = null;
   let sellRenderTimer = null;
+  let recycleRenderTimer = null;
 
   async function copyText(text) {
     try {
