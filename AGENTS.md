@@ -13,7 +13,7 @@ auto-open de boosters et statistiques.
 - Version actuelle : **2.3.0** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
-- Dernier commit de référence : `40737ab`
+- Dernier commit de référence : `fb0e689`
 
 ## 2. Démarrage rapide
 
