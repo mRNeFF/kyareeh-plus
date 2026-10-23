@@ -202,6 +202,8 @@
           { id: 'mine-3', characterId: 999002, character: CHARACTERS[5], type: 'fixed', price: 25, status: 'active', qty: 1, endsAt: new Date(Date.now() + 6 * 3600e3).toISOString() }
         ]
       };
+      // Accès direct pour les tests du graphique de profit (vente confirmée).
+      window.__marketState = MARKET_STATE;
 
       const CONFIG = {
         catalogSize: 6736,
@@ -594,6 +596,13 @@
           };
           MARKET_STATE.listings.unshift(listing);
           log('   -> listing créé: ' + (init?.body || ''));
+          // Test du graphique : une annonce achetée immédiatement est confirmée
+          // par `matched: true`, comme le renvoie le vrai site.
+          if (window.__kyaraForceMatched) {
+            listing.status = 'sold';
+            listing.soldAt = new Date().toISOString();
+            return json({ ok: true, id: listing.id, listing, matched: true });
+          }
           if (window.__kyaraNoListingId) return json({ ok: true, matched: false });
           return json({ ok: true, id: listing.id, listing, matched: false });
         }

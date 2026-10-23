@@ -168,11 +168,11 @@ check(
   `quick=${reco.quick.price} balanced=${reco.balanced.price} max=${reco.max.price}`
 );
 check('prix ≥ plancher de recyclage', reco.quick.price >= 40 && reco.balanced.price >= 40 && reco.max.price >= 40);
-check('vente rapide au niveau de la concurrence', reco.quick.price <= 150, `quick=${reco.quick.price}`);
+check('vente rapide 1 chakra sous la concurrence', reco.quick.price === 149, `quick=${reco.quick.price}`);
 check('justification chiffrée', /médiane/.test(reco.balanced.reason) && /vente/.test(reco.balanced.reason));
 check('net après frais', reco.balanced.net < reco.balanced.price);
 
-// Vente rapide : uniquement la vente la plus basse (fixe ou achat immédiat).
+// Vente rapide : 1 chakra sous la vente la plus basse (fixe ou achat immédiat).
 const quickMarket = api.buildRecommendations({
   median: 100,
   median7: 100,
@@ -182,17 +182,24 @@ const quickMarket = api.buildRecommendations({
   fixedHigh: 15,
   floor: 1
 });
-check('vente rapide = vente la plus basse', quickMarket.quick.price === 20, String(quickMarket.quick.price));
+check('vente rapide = 1 chakra sous la vente la plus basse', quickMarket.quick.price === 19, String(quickMarket.quick.price));
 check(
   'vente rapide ignore la médiane et le meilleur ordre',
-  quickMarket.quick.price === 20 && quickMarket.quick.price !== 50,
+  quickMarket.quick.price === 19 && quickMarket.quick.price !== 50,
   String(quickMarket.quick.price)
 );
 check(
   'vente rapide explique le prix bas',
-  /vente la plus basse/.test(quickMarket.quick.reason),
+  /vente la plus basse/.test(quickMarket.quick.reason) && /1 ◆ en dessous/.test(quickMarket.quick.reason),
   quickMarket.quick.reason
 );
+
+// Plancher : impossible de descendre sous le prix de recyclage ni sous 1 chakra.
+const quickFloor = api.buildRecommendations({ median: 100, median7: 100, lowest: 40, floor: 40 });
+check('vente rapide bornée au plancher', quickFloor.quick.price === 40, String(quickFloor.quick.price));
+check('vente rapide au plancher : mention explicite', /plancher/.test(quickFloor.quick.reason), quickFloor.quick.reason);
+const quickOne = api.buildRecommendations({ median: 100, median7: 100, lowest: 1, floor: 1 });
+check('vente rapide jamais sous 1 chakra', quickOne.quick.price === 1, String(quickOne.quick.price));
 
 const onlyBid = api.analyzeCard({
   prices: { median7d: 100, median30d: 100 },
@@ -213,7 +220,7 @@ const fixedAndBuyout = api.analyzeCard({
   card: { id: 'fixed-buyout', floor: 1 }
 });
 check('prix de référence = minimum fixe/achat immédiat', fixedAndBuyout.lowest === 15, String(fixedAndBuyout.lowest));
-check('vente rapide au niveau de 15', fixedAndBuyout.recommend?.quick.price === 15, String(fixedAndBuyout.recommend?.quick.price));
+check('vente rapide 1 chakra sous 15', fixedAndBuyout.recommend?.quick.price === 14, String(fixedAndBuyout.recommend?.quick.price));
 
 /* --- 7. Cas sans données --------------------------------------------- */
 

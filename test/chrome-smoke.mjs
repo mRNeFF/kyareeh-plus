@@ -901,24 +901,30 @@ async function visualPass() {
          return {
            count: window.__kyaraPlus.state.salesLog.length,
            auto: window.__kyaraPlus.state.salesLog.filter((e) => e.source === 'auto').length,
-           chart: text.toLowerCase().includes('ventes') && text.toLowerCase().includes('net estimé'),
+           chart: text.toLowerCase().includes('profit réalisé') && text.toLowerCase().includes('ventes confirmées'),
            ranges: Array.from(chart?.querySelectorAll('[data-sales-range] option') || []).map((o) => o.value),
            lines: chart?.querySelectorAll('.kp-sales-line').length || 0,
            legend: chart?.querySelector('.kp-sales-legend')?.innerText || '',
+           profit: chart?.querySelector('.kp-sales-kpis b')?.innerText || '',
            labels: chart?.querySelector('.kp-sales-svg')?.textContent || ''
          };
        })()`
     );
-    check('Ventes auto enregistrées', sales.auto > 0, `${sales.auto} auto · ${sales.count} total`);
-    check('Graphique de ventes affiché', sales.chart === true);
+    // Une simple mise en vente ne doit créer aucune vente : le graphique reste à zéro.
+    check(
+      'Mise en vente sans vente confirmée : aucun point',
+      sales.count === 0 && sales.auto === 0 && /◆ 0/.test(sales.profit),
+      `${sales.auto} auto · ${sales.count} total · profit ${sales.profit}`
+    );
+    check('Graphique du profit réalisé affiché', sales.chart === true);
     check(
       'Graphique : choix 1 jour / 7 jours / total',
       ['1d', '7d', 'total'].every((value) => sales.ranges.includes(value)),
       sales.ranges.join(',')
     );
     check(
-      'Graphique : une seule courbe « Vente »',
-      sales.lines === 1 && sales.legend.includes('Vente') && !/Auto|Manuelle/.test(sales.legend),
+      'Graphique : une seule courbe « Profit réalisé »',
+      sales.lines === 1 && sales.legend.includes('Profit réalisé') && !/Auto|Manuelle/.test(sales.legend),
       `${sales.lines} courbe(s) · ${sales.legend.replace(/\s+/g, ' ')}`
     );
     await evaluate(

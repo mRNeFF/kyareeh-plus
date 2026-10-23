@@ -43,8 +43,15 @@
   const PACK_AVG_KEY = 'kyareeh.packavg.v1';
   const PACK_POOLS_KEY = 'kyareeh.packpools.v1';
   const STATS_KEY = 'kyareeh.statboard.v1';
+  // v1 = ancien journal des annonces créées (faux positif : une mise en vente
+  // n'est pas une vente). v2 = ventes réellement confirmées, seules comptées.
   const SALES_KEY = 'kyareeh.sales.v1';
+  const SALES_LEDGER_KEY = 'kyareeh.sales.v2';
+  const SALES_TRACK_KEY = 'kyareeh.salestrack.v1';
   const SALES_MAX = 2000;
+  const SALES_TRACK_MAX = 200;
+  // Délai laissé au site pour indexer une annonce qui vient d'être créée.
+  const SALES_TRACK_GRACE_MS = 90 * 1000;
   const SOUND_KEY = 'kyareeh.sound.v1';
   const UI_KEY = 'kyareeh.ui.v1';
   const PANEL_WINDOW_KEY = 'kyareeh.panel.window';
@@ -262,8 +269,10 @@
     selected: new Set(),
     sell: null,
     listingCancelId: null,
-    // Journal local des annonces créées par Kyareeh+ (pas d'historique côté site).
+    // Ventes réellement confirmées (le site ne fournit aucun historique).
     salesLog: [],
+    // Annonces créées par Kyareeh+ en attente de confirmation (vendue ou non).
+    salesTrack: [],
     salesLogLoaded: false,
     salesChart: null,
     // Son global, partagé par les onglets Global et par +Duel.
@@ -1148,6 +1157,9 @@
       state.mine = mine;
       state.ready = true;
       state.lastSync = Date.now();
+      // Recalcul de l'historique à chaque chargement : une annonce vendue (ou
+      // expirée) pendant l'absence de l'extension est confirmée ici.
+      reconcilePendingSales();
 
       const ids = new Set(state.collection.map((c) => String(c.characterId ?? c.id)));
       state.selected = new Set([...state.selected].filter((id) => ids.has(id)));
@@ -1408,11 +1420,11 @@
   }
   function feeOf(price) {
     const cfg = getCfg();
-    return Math.max(cfg.feeMin, Math.ceil((price * cfg.feePct) / 100));
+    return salesFeeOf(price, { feePct: cfg.feePct, feeMin: cfg.feeMin });
   }
 
   function taxOf(price) {
-    return Math.ceil((price * getCfg().taxPct) / 100);
+    return salesTaxOf(price, { taxPct: getCfg().taxPct });
   }
 
   function netOf(price) {
@@ -1860,11 +1872,49 @@
   }
   /* AUTOSELL:END */
 
-  /* SALES:BEGIN — cumuls purs du graphique de ventes, testés par verify-sales-chart.mjs */
-  function salesTotals(log) {
-    const totals = { net: 0, count: 0, matched: 0, auto: 0, manual: 0, autoNet: 0, manualNet: 0 };
+  /* SALES:BEGIN — ventes confirmées, profit réalisé et courbe cumulée.
+     Bloc pur, testé par verify-sales-chart.mjs. Il réutilise les helpers
+     d'annonce du bloc AUTOSELL (juste au-dessus) : les tests extraient les deux
+     blocs. Aucune donnée inventée : le profit n'est calculé qu'à partir du prix
+     réellement encaissé et du barème de frais du site. */
+
+  /** Frais de mise en vente (barème du site), appliqués à un prix encaissé. */
+  function salesFeeOf(price, rates = {}) {
+    const value = Math.max(0, Number(price) || 0);
+    const pct = Number.isFinite(Number(rates.feePct)) ? Number(rates.feePct) : 2;
+    const min = Number.isFinite(Number(rates.feeMin)) ? Number(rates.feeMin) : 1;
+    return Math.max(min, Math.ceil((value * pct) / 100));
+  }
+
+  /** Taxe de vente (barème du site), appliquée à un prix encaissé. */
+  function salesTaxOf(price, rates = {}) {
+    const value = Math.max(0, Number(price) || 0);
+    const pct = Number.isFinite(Number(rates.taxPct)) ? Number(rates.taxPct) : 5;
+    return Math.ceil((value * pct) / 100);
+  }
+
+  /**
+   * Profit net d'une vente confirmée : encaissé − frais − taxe.
+   * Le site ne fournit **aucun coût d'acquisition** : il n'est donc jamais
+   * inventé ni déduit (affiché comme non fourni dans l'interface).
+   */
+  function salesProfitOf(gross, rates = {}) {
+    const value = Math.max(0, Number(gross) || 0);
+    const fees = salesFeeOf(value, rates);
+    const tax = salesTaxOf(value, rates);
+    return { gross: value, fees, tax, net: Math.max(0, value - fees - tax) };
+  }
+
+  function salesLedgerTotals(log) {
+    const totals = { gross: 0, fees: 0, tax: 0, net: 0, count: 0, matched: 0, auto: 0, manual: 0, autoNet: 0, manualNet: 0 };
     for (const entry of Array.isArray(log) ? log : []) {
+      const gross = Math.max(0, Number(entry?.gross) || 0);
+      const fees = Math.max(0, Number(entry?.fees) || 0);
+      const tax = Math.max(0, Number(entry?.tax) || 0);
       const net = Math.max(0, Number(entry?.net) || 0);
+      totals.gross += gross;
+      totals.fees += fees;
+      totals.tax += tax;
       totals.net += net;
       totals.count += 1;
       if (entry?.source === 'auto') {
@@ -1879,19 +1929,207 @@
     return totals;
   }
 
+  /** Statuts d'annonce qui prouvent une vente, puis ceux qui l'excluent. */
+  const SALES_SOLD_STATUSES = ['sold', 'completed', 'filled'];
+  const SALES_DEAD_STATUSES = ['expired', 'ended', 'cancelled', 'canceled'];
+
+  /** Lecture normalisée d'une annonce de `/api/me/market` (pure). */
+  function salesListingSnapshot(listing) {
+    if (!listing || typeof listing !== 'object') return null;
+    const status = autoSellListingStatus(listing);
+    const rawEnd = listing.endsAt ?? listing.expiresAt ?? null;
+    const end = rawEnd == null ? NaN : Date.parse(rawEnd);
+    const rawSold = listing.soldAt ?? listing.soldOn ?? listing.completedAt ?? null;
+    const sold = rawSold == null ? NaN : Date.parse(rawSold);
+    const bid = Number(listing.currentBid);
+    const bids = Number(listing.bidCount);
+    const characterId = listing.characterId ?? listing.character?.id ?? listing.cardId ?? listing.card?.id ?? null;
+    return {
+      ids: autoSellListingIds(listing),
+      status,
+      active: autoSellListingIsActive(listing),
+      sold: SALES_SOLD_STATUSES.includes(status),
+      dead: SALES_DEAD_STATUSES.includes(status),
+      at: Number.isFinite(end) ? end : null,
+      soldAt: Number.isFinite(sold) ? sold : null,
+      price: autoSellListingPrice(listing),
+      bid: Number.isFinite(bid) && bid > 0 ? bid : null,
+      bids: Number.isFinite(bids) && bids > 0 ? bids : null,
+      characterId: characterId == null || characterId === '' ? null : characterId
+    };
+  }
+
+  /** Transforme une annonce suivie en vente confirmée (profit net compris). */
+  function salesEntryFromTrack(track, snapshot, at, rates) {
+    const auction = String(track?.type ?? '').toLowerCase() === 'auction';
+    const raw = auction
+      ? snapshot?.bid ?? track?.bid ?? snapshot?.price ?? track?.price
+      : snapshot?.price ?? track?.price;
+    const profit = salesProfitOf(raw, rates);
+    return {
+      id: `sale:${track.id}`,
+      listingId: String(track.id),
+      at: Math.max(0, Number(at) || Date.now()),
+      name: String(track.name ?? ''),
+      rarity: String(track.rarity ?? ''),
+      characterId: track.characterId ?? null,
+      accountId: track.accountId ?? null,
+      source: track.source === 'auto' ? 'auto' : 'manual',
+      matched: false,
+      ...profit
+    };
+  }
+
   /**
-   * Net cumulé par **heure** sur la fenêtre demandée (`1d`, `7d`, `total`).
-   * Une seule série : le graphique ne sépare plus auto et manuel.
+   * Confronte les annonces suivies au dernier instantané de `/api/me/market`.
+   *
+   * Règles, sans jamais deviner :
+   *  - annonce encore active → conservée (avec son prix et sa meilleure offre) ;
+   *  - annonce au statut « vendue » → vente confirmée tout de suite ;
+   *  - annonce annulée / expirée → abandonnée, aucun point ;
+   *  - annonce **disparue avant son échéance** → vente confirmée (le site ne
+   *    fournit aucun historique : c'est la seule trace d'une vente) ;
+   *  - annonce disparue à/après son échéance → expiration, sauf enchère ayant
+   *    reçu au moins une offre (l'adjudication est alors une vente).
+   * Un délai de grâce couvre l'indexation d'une annonce qui vient d'être créée.
    */
-  function salesChartSeries(log, now = Date.now(), range = '7d') {
+  function salesTrackReconcile(track, listings, now = Date.now(), options = {}) {
+    const current = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const rates = options.rates ?? {};
+    const accountId = options.accountId == null ? null : String(options.accountId);
+    const graceMs = Number.isFinite(Number(options.graceMs))
+      ? Math.max(0, Number(options.graceMs))
+      : 90 * 1000;
+    const snaps = (Array.isArray(listings) ? listings : []).map(salesListingSnapshot).filter(Boolean);
+    const byId = new Map();
+    const byCard = new Map();
+    for (const snap of snaps) {
+      for (const id of snap.ids) byId.set(String(id), snap);
+      if (snap.characterId != null) {
+        const key = String(snap.characterId);
+        if (!byCard.has(key)) byCard.set(key, []);
+        byCard.get(key).push(snap);
+      }
+    }
+
+    // Identifiant local (l'API n'a rien renvoyé) : on reconnaît l'annonce par
+    // carte et par prix, et seulement si le rapprochement est unique.
+    const findSnap = (entry) => {
+      const direct = byId.get(String(entry.id));
+      if (direct) return direct;
+      if (!String(entry.id).startsWith('local-')) return null;
+      const candidates = byCard.get(String(entry.characterId ?? '')) ?? [];
+      const priced = candidates.filter(
+        (snap) => entry.price == null || snap.price == null || Number(snap.price) === Number(entry.price)
+      );
+      return priced.length === 1 ? priced[0] : null;
+    };
+
+    const sales = [];
+    const keep = [];
+    const dropped = [];
+    for (const entry of Array.isArray(track) ? track : []) {
+      if (!entry || entry.id == null) continue;
+      // Suivi d'un autre compte : on n'y touche pas depuis celui-ci.
+      if (accountId && entry.accountId != null && String(entry.accountId) !== accountId) {
+        keep.push(entry);
+        continue;
+      }
+      const createdAt = Number(entry.createdAt ?? entry.at) || 0;
+      const endsAt = Number(entry.endsAt) || 0;
+      const snap = findSnap(entry);
+
+      if (snap) {
+        if (snap.sold) {
+          sales.push(salesEntryFromTrack(entry, snap, snap.soldAt ?? current, rates));
+          continue;
+        }
+        if (snap.dead) {
+          dropped.push({ id: entry.id, reason: 'annulée ou expirée' });
+          continue;
+        }
+        if (snap.active) {
+          keep.push({
+            ...entry,
+            id: snap.ids.length && String(entry.id).startsWith('local-') ? snap.ids[0] : entry.id,
+            price: snap.price ?? entry.price,
+            bid: snap.bid ?? entry.bid ?? null,
+            bids: snap.bids ?? entry.bids ?? null,
+            endsAt: snap.at ?? entry.endsAt,
+            lastSeenAt: current
+          });
+          continue;
+        }
+      }
+
+      // Annonce absente du dernier instantané.
+      if (createdAt && current - createdAt < graceMs) {
+        keep.push(entry);
+        continue;
+      }
+      const seen = Number(entry.lastSeenAt) > 0;
+      const serverId = !String(entry.id).startsWith('local-');
+      const auction = String(entry.type ?? '').toLowerCase() === 'auction';
+      const bestBid = Math.max(Number(entry.bid) || 0, Number(entry.price) || 0);
+      const hadBid = (Number(entry.bids) || 0) > 0 || (Number(entry.bid) || 0) > Number(entry.price) || false;
+
+      if (!endsAt || current < endsAt) {
+        // Disparue avant son échéance : vendue. Sans identifiant serveur et
+        // sans jamais l'avoir vue, on ne peut pas l'affirmer : on attend
+        // l'échéance plutôt que d'inventer une vente.
+        if (seen || serverId) {
+          sales.push(salesEntryFromTrack(entry, null, current, rates));
+        } else {
+          keep.push(entry);
+        }
+        continue;
+      }
+      if (auction && hadBid) {
+        sales.push(salesEntryFromTrack({ ...entry, price: bestBid }, null, endsAt, rates));
+        continue;
+      }
+      dropped.push({ id: entry.id, reason: 'expirée' });
+    }
+    return { sales, keep, dropped };
+  }
+
+  /**
+   * Fusionne des ventes dans le journal en garantissant **une seule ligne par
+   * vente** (identifiant d'annonce). Renvoie le journal trié et les ajouts.
+   */
+  function salesMergeEntries(log, entries) {
+    const list = Array.isArray(log) ? log.slice() : [];
+    const seen = new Set(list.map((entry) => String(entry?.id ?? '')));
+    const added = [];
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (!entry || entry.id == null) continue;
+      const key = String(entry.id);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      list.push(entry);
+      added.push(entry);
+    }
+    list.sort((a, b) => Number(a.at) - Number(b.at) || String(a.id).localeCompare(String(b.id)));
+    return { log: list, added };
+  }
+
+  /**
+   * Profit réalisé **cumulé** par tranche horaire sur la fenêtre demandée
+   * (`1d`, `7d`, `total`). Chaque point porte le cumul et les ventes de la
+   * tranche (nom, heure, profit) pour l'infobulle.
+   */
+  function salesChartSeries(log, now = Date.now(), range = '7d', options = {}) {
     const normalized = ['1d', '7d', 'total'].includes(range) ? range : '7d';
+    const accountId = options.accountId == null ? null : String(options.accountId);
     const hour = 3600000;
     const current = new Date(Number(now) || Date.now());
     current.setMinutes(0, 0, 0);
     const lastAt = current.getTime();
     const entries = (Array.isArray(log) ? log : [])
       .map((entry) => ({ ...entry, at: Number(entry?.at) }))
-      .filter((entry) => Number.isFinite(entry.at) && entry.at <= now);
+      .filter((entry) => Number.isFinite(entry.at) && entry.at <= now)
+      // Les ventes d'un autre compte ne polluent pas la courbe du compte courant.
+      .filter((entry) => !accountId || entry.accountId == null || String(entry.accountId) === accountId);
 
     let startAt;
     let stepHours = 1;
@@ -1913,10 +2151,14 @@
     const count = Math.max(1, Math.floor((lastAt - startAt) / (hour * stepHours)) + 1);
     const buckets = Array.from({ length: count }, (_, index) => ({
       at: startAt + index * hour * stepHours,
-      net: 0
+      profit: 0,
+      sales: []
     }));
 
     let net = 0;
+    let gross = 0;
+    let fees = 0;
+    let tax = 0;
     let included = 0;
     let matched = 0;
     for (const entry of entries) {
@@ -1924,25 +2166,36 @@
       const index = Math.floor((entry.at - startAt) / (hour * stepHours));
       if (index < 0 || index >= count) continue;
       const value = Math.max(0, Number(entry.net) || 0);
-      buckets[index].net += value;
+      buckets[index].profit += value;
+      buckets[index].sales.push({
+        at: entry.at,
+        name: String(entry.name ?? ''),
+        net: value,
+        matched: Boolean(entry.matched)
+      });
       net += value;
+      gross += Math.max(0, Number(entry.gross) || 0);
+      fees += Math.max(0, Number(entry.fees) || 0);
+      tax += Math.max(0, Number(entry.tax) || 0);
       included += 1;
       if (entry.matched) matched += 1;
     }
 
     let cumulative = 0;
     const points = buckets.map((bucket) => {
-      cumulative += bucket.net;
-      // Chaque point est le net gagné sur la tranche, pas un cumul : la courbe
-      // ne doit pas être exponentielle.
-      return { at: bucket.at, value: bucket.net };
+      cumulative += bucket.profit;
+      // Cumul : la courbe ne monte qu'au moment d'une vente confirmée, et ne
+      // redescend jamais (une annulation ou une expiration n'ajoute rien).
+      return { at: bucket.at, value: cumulative, profit: bucket.profit, sales: bucket.sales };
     });
-    const max = Math.max(1, ...points.map((point) => point.value));
     return {
       points,
-      max,
+      max: Math.max(1, cumulative),
       range: normalized,
       net: cumulative,
+      gross,
+      fees,
+      tax,
       count: included,
       matched,
       stepHours,
@@ -2362,24 +2615,97 @@
 
   let salesSaveTimer = null;
 
-  /** Le site ne fournit aucun historique : on garde seulement ce que Kyareeh+ a créé. */
+  /** Barème réel des frais et de la taxe, lu dans `/api/config`. */
+  function salesRates() {
+    const cfg = getCfg();
+    return { feePct: cfg.feePct, feeMin: cfg.feeMin, taxPct: cfg.taxPct };
+  }
+
+  /** Nettoie une vente relue du stockage (jamais de valeur inventée). */
+  function salesSanitizeEntry(entry) {
+    if (!entry || !Number.isFinite(Number(entry.at))) return null;
+    if (!Number.isFinite(Number(entry.net))) return null;
+    const gross = Math.max(0, Math.round(Number(entry.gross) || 0));
+    const fees = Math.max(0, Math.round(Number(entry.fees) || 0));
+    const tax = Math.max(0, Math.round(Number(entry.tax) || 0));
+    return {
+      id: String(entry.id ?? `sale:${entry.at}:${entry.name ?? ''}`),
+      listingId: entry.listingId == null ? null : String(entry.listingId),
+      at: Number(entry.at),
+      source: entry.source === 'auto' ? 'auto' : 'manual',
+      name: String(entry.name ?? ''),
+      rarity: String(entry.rarity ?? ''),
+      characterId: entry.characterId ?? null,
+      accountId: entry.accountId ?? null,
+      gross,
+      fees,
+      tax,
+      net: Math.max(0, Math.round(Number(entry.net) || 0)),
+      matched: Boolean(entry.matched)
+    };
+  }
+
+  function salesSanitizeTrack(entry) {
+    if (!entry || entry.id == null) return null;
+    const price = Number(entry.price);
+    return {
+      id: String(entry.id),
+      characterId: entry.characterId ?? null,
+      name: String(entry.name ?? ''),
+      rarity: String(entry.rarity ?? ''),
+      type: entry.type === 'auction' ? 'auction' : 'fixed',
+      price: Number.isFinite(price) && price > 0 ? price : null,
+      bid: Number.isFinite(Number(entry.bid)) && Number(entry.bid) > 0 ? Number(entry.bid) : null,
+      bids: Number.isFinite(Number(entry.bids)) && Number(entry.bids) > 0 ? Number(entry.bids) : null,
+      accountId: entry.accountId ?? null,
+      source: entry.source === 'auto' ? 'auto' : 'manual',
+      createdAt: Number(entry.createdAt) || 0,
+      endsAt: Number(entry.endsAt) || 0,
+      lastSeenAt: Number(entry.lastSeenAt) || 0
+    };
+  }
+
+  /**
+   * Charge les ventes **confirmées** (v2) et les annonces encore en attente.
+   * L'ancien journal v1 ne contenait que des mises en vente : seules celles
+   * vendues immédiatement (`matched`) sont reprises, le reste est écarté pour
+   * que d'anciennes annonces non vendues ne faussent pas la courbe.
+   */
   async function loadSalesLog() {
     try {
-      const saved = await storageGet(SALES_KEY, []);
+      const saved = await storageGet(SALES_LEDGER_KEY, null);
       if (Array.isArray(saved)) {
-        state.salesLog = saved
-          .filter((entry) => entry && Number.isFinite(Number(entry.at)) && Number.isFinite(Number(entry.net)))
-          .map((entry) => ({
-            at: Number(entry.at),
-            source: entry.source === 'auto' ? 'auto' : 'manual',
-            name: String(entry.name ?? ''),
-            rarity: String(entry.rarity ?? ''),
-            price: Math.max(0, Math.round(Number(entry.price) || 0)),
-            net: Math.max(0, Math.round(Number(entry.net) || 0)),
-            matched: Boolean(entry.matched)
-          }))
-          .slice(-SALES_MAX);
+        state.salesLog = saved.map(salesSanitizeEntry).filter(Boolean).slice(-SALES_MAX);
+      } else {
+        const legacy = await storageGet(SALES_KEY, []);
+        const migrated = (Array.isArray(legacy) ? legacy : [])
+          .filter((entry) => entry && entry.matched === true)
+          .map((entry) => {
+            const gross = Math.max(0, Math.round(Number(entry.price) || 0));
+            const net = Math.max(0, Math.round(Number(entry.net) || 0));
+            return salesSanitizeEntry({
+              id: `legacy:${entry.at}:${entry.name ?? ''}`,
+              at: Number(entry.at),
+              source: entry.source,
+              name: entry.name,
+              rarity: entry.rarity,
+              gross,
+              fees: Math.max(0, gross - net),
+              tax: 0,
+              net,
+              matched: true
+            });
+          })
+          .filter(Boolean);
+        state.salesLog = migrated.slice(-SALES_MAX);
+        if (migrated.length) storageSet(SALES_LEDGER_KEY, state.salesLog).catch(() => {});
       }
+
+      const tracked = await storageGet(SALES_TRACK_KEY, []);
+      state.salesTrack = (Array.isArray(tracked) ? tracked : [])
+        .map(salesSanitizeTrack)
+        .filter(Boolean)
+        .slice(-SALES_TRACK_MAX);
     } catch {
       /* pas de journal : le graphique reste vide */
     } finally {
@@ -2391,27 +2717,89 @@
     if (salesSaveTimer) clearTimeout(salesSaveTimer);
     salesSaveTimer = setTimeout(() => {
       salesSaveTimer = null;
-      storageSet(SALES_KEY, state.salesLog.slice(-SALES_MAX)).catch(() => {});
+      storageSet(SALES_LEDGER_KEY, state.salesLog.slice(-SALES_MAX)).catch(() => {});
+      storageSet(SALES_TRACK_KEY, state.salesTrack.slice(-SALES_TRACK_MAX)).catch(() => {});
     }, 700);
   }
 
-  /** Enregistre une annonce réellement créée (jamais en simulation). */
-  function recordSale(entry) {
-    const price = Math.max(0, Math.round(Number(entry?.price) || 0));
-    const net = Math.max(0, Math.round(Number(entry?.net) || 0));
-    if (!price && !net) return;
-    state.salesLog.push({
-      at: Number(entry?.at) || Date.now(),
-      source: entry?.source === 'auto' ? 'auto' : 'manual',
-      name: String(entry?.name ?? ''),
-      rarity: String(entry?.rarity ?? ''),
-      price,
-      net,
-      matched: Boolean(entry?.matched)
-    });
-    if (state.salesLog.length > SALES_MAX) state.salesLog.splice(0, state.salesLog.length - SALES_MAX);
-    if (entry?.matched) playSaleSound();
+  /** Ajoute des ventes confirmées, sans jamais compter deux fois la même. */
+  function recordConfirmedSales(entries) {
+    const merged = salesMergeEntries(state.salesLog, entries);
+    if (!merged.added.length) return [];
+    state.salesLog = merged.log.slice(-SALES_MAX);
+    if (merged.added.some((entry) => entry.matched)) playSaleSound();
     saveSalesSoon();
+    render();
+    return merged.added;
+  }
+
+  /** Mémorise une annonce créée par Kyareeh+ en attendant sa confirmation. */
+  function trackPendingSale(row, posted, type, duration, source = 'auto') {
+    const characterId = apiId(row?.characterId ?? row?.id);
+    if (characterId == null || characterId === '') return;
+    const id =
+      posted?.listing?.id ?? posted?.id ?? posted?.listingId ?? `local-${Date.now()}-${state.salesTrack.length}`;
+    if (state.salesTrack.some((entry) => String(entry.id) === String(id))) return;
+    const now = Date.now();
+    state.salesTrack.push({
+      id: String(id),
+      characterId,
+      name: String(row?.name ?? ''),
+      rarity: String(row?.rarity ?? ''),
+      type: type === 'auction' ? 'auction' : 'fixed',
+      price: Math.max(0, Math.round(Number(row?.price) || 0)) || null,
+      bid: null,
+      bids: null,
+      accountId: state.user?.id ?? null,
+      source: source === 'auto' ? 'auto' : 'manual',
+      createdAt: now,
+      endsAt: now + Math.max(1, Number(duration) || 12) * 3600000,
+      lastSeenAt: 0
+    });
+    if (state.salesTrack.length > SALES_TRACK_MAX) {
+      state.salesTrack.splice(0, state.salesTrack.length - SALES_TRACK_MAX);
+    }
+    saveSalesSoon();
+  }
+
+  /** Oublie une annonce retirée depuis Kyareeh+ : ce n'est pas une vente. */
+  function untrackPendingSale(listingId, characterId = null) {
+    const before = state.salesTrack.length;
+    state.salesTrack = state.salesTrack.filter((entry) => {
+      if (listingId != null && String(entry.id) === String(listingId)) return false;
+      if (listingId == null || String(entry.id).startsWith('local-')) {
+        if (characterId != null && String(entry.characterId) === String(characterId)) return false;
+      }
+      return true;
+    });
+    if (state.salesTrack.length !== before) saveSalesSoon();
+  }
+
+  /**
+   * Confronte les annonces suivies au dernier `/api/me/market` : c'est le seul
+   * signal de vente du site (aucun historique). À appeler après chaque lecture
+   * d'annonces valide.
+   */
+  function reconcilePendingSales() {
+    if (!state.salesLogLoaded) return [];
+    if (!autoSellHasListings(state.mine)) return [];
+    const result = salesTrackReconcile(state.salesTrack, autoSellListingRows(state.mine), Date.now(), {
+      rates: salesRates(),
+      graceMs: SALES_TRACK_GRACE_MS,
+      accountId: state.user?.id ?? null
+    });
+    state.salesTrack = result.keep.slice(-SALES_TRACK_MAX);
+    saveSalesSoon();
+    if (!result.sales.length) return [];
+    const added = recordConfirmedSales(result.sales);
+    if (added.length) {
+      const profit = added.reduce((sum, entry) => sum + entry.net, 0);
+      autoSellLog(
+        `✓ ${fmt(added.length)} vente(s) confirmée(s) · profit ◆ ${fmt(profit)}`,
+        'ok'
+      );
+    }
+    return added;
   }
 
   function computeStats(rows) {
@@ -2871,12 +3259,13 @@
     const vol = Number.isFinite(volatility) ? volatility : null;
     const safe = (value) => Math.max(min, Math.round(value));
 
-    // 1) Vente rapide : on se met exactement au prix de la vente la plus basse
-    //    (prix fixe ou achat immédiat d'enchère). Sans aucune des deux, on prend
-    //    la médiane. Aucune décote supplémentaire, aucun meilleur ordre.
+    // 1) Vente rapide : **1 chakra sous** la vente la plus basse (prix fixe ou
+    //    achat immédiat d'enchère) pour passer devant. Si le site refuse ce
+    //    prix (« price_too_low »), la mise en vente se remet exactement au prix
+    //    le plus bas (voir runSalePlan). Sans concurrence, on prend la médiane.
     let quickRaw;
     if (lowest != null && lowest > 0) {
-      quickRaw = lowest;
+      quickRaw = Math.max(1, lowest - 1);
     } else {
       quickRaw = base;
     }
@@ -2924,8 +3313,8 @@
         delay: liquidity === 'lent' ? 'délai incertain' : 'le plus rapide',
         reason:
           lowest != null
-            ? `vente la plus basse ◆ ${fmt(lowest)} · aligné${
-                quick > lowest ? ' (plancher)' : ''
+            ? `vente la plus basse ◆ ${fmt(lowest)} · 1 ◆ en dessous${
+                quick < lowest ? '' : ' (plancher)'
               }`
             : `médiane ◆ ${fmt(base)} · aucune vente fixe/immédiate`
       },
@@ -3462,6 +3851,9 @@
         try {
           let salePrice = Math.max(1, Math.round(Number(row.price) || 1));
           let posted = null;
+          // Vente rapide : le premier refus « prix trop bas » se règle en se
+          // remettant exactement au prix le plus bas, avant toute majoration.
+          let quickAligned = false;
           for (let attempt = 0; ; attempt += 1) {
             try {
               const buyout = saleType === 'auction' ? buyoutPriceFor(salePrice, buyoutPct) : null;
@@ -3483,6 +3875,20 @@
               const tooLow = code === 'price_too_low' || /trop bas|too low|minimum/i.test(message);
               if (!tooLow || attempt >= 11) throw err;
               const floor = Math.max(1, Math.round(Number(row.floor) || recycleFloor(row.rarity) || 1));
+              if (options.quick && !quickAligned) {
+                const key = String(row.characterId ?? row.id ?? '');
+                const lowest = Number(state.lowest[key] ?? state.fixedLow[key]);
+                if (Number.isFinite(lowest) && lowest > 0) {
+                  const aligned = Math.max(floor, Math.round(lowest));
+                  quickAligned = true;
+                  log(
+                    `↻ ${row.name} · ◆ ${fmt(salePrice)} refusé (trop bas) · aligné sur le prix le plus bas ◆ ${fmt(aligned)}`,
+                    'info'
+                  );
+                  salePrice = aligned;
+                  continue;
+                }
+              }
               const minimum = message.match(/(?:minimum|min\.?)\s*:?\s*(\d+)/i);
               const nextPrice = Math.max(
                 salePrice + 1,
@@ -3500,14 +3906,28 @@
           result.created += 1;
           result.posted = posted;
           if (posted?.matched) result.matched += 1;
-          recordSale({
-            source,
-            name: row.name,
-            rarity: row.rarity,
-            price: salePrice,
-            net: Math.max(0, Number(salePrice) - feeOf(salePrice) - taxOf(salePrice)),
-            matched: Boolean(posted?.matched)
-          });
+          // Une mise en vente n'est pas une vente : on ne l'ajoute au graphique
+          // que si elle est achetée immédiatement, sinon on la met sous
+          // surveillance jusqu'à sa confirmation (ou son échéance).
+          if (posted?.matched) {
+            const profit = salesProfitOf(salePrice, salesRates());
+            recordConfirmedSales([
+              {
+                id: `sale:${posted?.listing?.id ?? posted?.id ?? `${Date.now()}-${salePrice}`}`,
+                listingId: posted?.listing?.id ?? posted?.id ?? null,
+                at: Date.now(),
+                name: row.name,
+                rarity: row.rarity,
+                characterId: apiId(row.characterId ?? row.id),
+                accountId: state.user?.id ?? null,
+                source,
+                matched: true,
+                ...profit
+              }
+            ]);
+          } else {
+            trackPendingSale(row, posted, saleType, duration, source);
+          }
           log(`✓ ${row.name} · ${label}${posted?.matched ? ' · vendue immédiatement' : ''}`, 'ok');
           consecutiveErrors = 0;
         } catch (err) {
@@ -3562,6 +3982,7 @@
       type: saleType,
       duration,
       buyoutPct,
+      quick: sell.method === 'quick',
       dryRun: state.settings.dryRun,
       gapMs: state.settings.gapMs,
       source: 'manual',
@@ -3622,6 +4043,8 @@
       state.sellView.lastRefresh = Date.now();
       a.listingsAt = Date.now();
       a.listingsError = null;
+      // Chaque relecture des annonces peut révéler une vente confirmée.
+      reconcilePendingSales();
     } catch (err) {
       const message = friendlyError(err);
       a.listingsError = message;
@@ -3973,6 +4396,7 @@
         type,
         duration: autoSellDuration(),
         buyoutPct: s.buyoutPct,
+        quick: s.autoSellStrategy === 'quick',
         dryRun: false,
         gap: autoSellGapMs,
         source: 'auto',
@@ -4209,6 +4633,7 @@
       state.mine = mine;
       a.listingsAt = Date.now();
       a.listingsError = null;
+      reconcilePendingSales();
       render();
       return listingSlots().remaining > 0;
     } catch {
@@ -7068,8 +7493,10 @@
     const range = ['1d', '7d', 'total'].includes(state.settings.salesRange)
       ? state.settings.salesRange
       : '7d';
-    const model = salesChartSeries(state.salesLog, Date.now(), range);
-    const { points, max, net, count, matched } = model;
+    const model = salesChartSeries(state.salesLog, Date.now(), range, {
+      accountId: state.user?.id ?? null
+    });
+    const { points, max, net, count, matched, fees, tax } = model;
     const W = 720;
     const H = 230;
     const pad = { l: 70, r: 16, t: 18, b: 36 };
@@ -7079,9 +7506,26 @@
     const plotH = H - pad.t - pad.b;
     const x = (index) => pad.l + (index / Math.max(1, points.length - 1)) * plotW;
     const y = (value) => H - pad.b - (value / yMax) * plotH;
+    // Courbe en marches : le profit cumulé ne monte qu'à l'instant d'une vente,
+    // il ne faut donc pas laisser croire à une progression continue.
     const line = points
-      .map((point, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)} ${y(point.value).toFixed(1)}`)
-      .join(' ');
+      .map((point, index) => {
+        const px = x(index).toFixed(1);
+        const py = y(point.value).toFixed(1);
+        if (!index) return `M${px} ${py}`;
+        const previous = y(points[index - 1].value).toFixed(1);
+        return ` L${px} ${previous} L${px} ${py}`;
+      })
+      .join('');
+    const saleDots = points
+      .map((point, index) =>
+        point.profit > 0
+          ? `<circle class="kp-sales-dot is-sales" cx="${x(index).toFixed(1)}" cy="${y(point.value).toFixed(
+              1
+            )}" r="2.4"></circle>`
+          : ''
+      )
+      .join('');
 
     // Lignes horizontales : 50 = fine, 100 = moyenne, 1000 = épaisse.
     const chakraStep = plotH / yMax;
@@ -7155,7 +7599,7 @@
       })
       .join('');
 
-    const rangeLabel = { '1d': '24 h', '7d': '7 jours', total: 'Total' }[range];
+    const rangeLabel = { '1d': '24 h', '7d': '7 jours', total: "tout l'historique" }[range];
     state.salesChart = {
       points,
       pad,
@@ -7171,10 +7615,10 @@
     return `
       <section class="kp-sales">
         <div class="kp-sales-head">
-          <b>Ventes</b>
+          <b>Profit réalisé (chakra)</b>
           <div class="kp-sales-head-right">
-            <span>${rangeLabel} · via Kyareeh+</span>
-            <select class="kp-select kp-sales-range" data-sales-range aria-label="Période du graphique de ventes">
+            <span>cumulé sur ${esc(rangeLabel)} · ventes confirmées via Kyareeh+</span>
+            <select class="kp-select kp-sales-range" data-sales-range aria-label="Période du profit réalisé">
               <option value="1d" ${range === '1d' ? 'selected' : ''}>1 jour</option>
               <option value="7d" ${range === '7d' ? 'selected' : ''}>7 jours</option>
               <option value="total" ${range === 'total' ? 'selected' : ''}>Total</option>
@@ -7182,32 +7626,33 @@
           </div>
         </div>
         <div class="kp-sales-kpis">
-          <span><b>◆ ${fmt(net)}</b><small>net estimé</small></span>
-          <span><b>${fmt(count)}</b><small>ventes</small></span>
-          <span><b>${fmt(matched)}</b><small>immédiates</small></span>
+          <span><b>◆ ${fmt(net)}</b><small>profit réalisé</small></span>
+          <span><b>${fmt(count)}</b><small>ventes confirmées</small></span>
+          <span><b>${fmt(matched)}</b><small>dont immédiates</small></span>
+          <span><b>◆ ${fmt(fees + tax)}</b><small>frais + taxe déduits</small></span>
         </div>
-        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Chakra gagné par heure">
+        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Profit réalisé cumulé en chakra">
           ${yGrid}
           ${xGrid}
           ${yText}
           <path class="kp-sales-line is-sales" d="${line}"></path>
-          <circle class="kp-sales-dot is-sales" cx="${x(points.length - 1).toFixed(1)}" cy="${y(
-            points[points.length - 1].value
-          ).toFixed(1)}" r="3"></circle>
+          ${saleDots}
           <g class="kp-sales-hover" style="display:none">
             <line class="kp-sales-hover-line" x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}"></line>
             <circle class="kp-sales-hover-dot" cx="${pad.l}" cy="${H - pad.b}" r="4"></circle>
-            <rect class="kp-sales-tip-bg" x="${pad.l}" y="${pad.t}" width="140" height="21" rx="5"></rect>
-            <text class="kp-sales-tip" x="${pad.l + 70}" y="${pad.t + 14}" text-anchor="middle"></text>
+            <rect class="kp-sales-tip-bg" x="${pad.l}" y="${pad.t}" width="180" height="21" rx="5"></rect>
+            <text class="kp-sales-tip" x="${pad.l + 8}" y="${pad.t + 14}" text-anchor="start"></text>
           </g>
           ${xLabels}
         </svg>
         <div class="kp-sales-legend">
-          <span><i class="is-sales"></i>Vente <b>◆ ${fmt(net)}</b></span>
+          <span><i class="is-sales"></i>Profit réalisé <b>◆ ${fmt(net)}</b></span>
         </div>
-        <div class="kp-sales-note">Chakra gagné par heure${
-          model.stepHours > 1 ? ` (tranches de ${fmt(model.stepHours)} h)` : ''
-        } · net estimé.</div>
+        <div class="kp-sales-note">
+          Profit cumulé sur la période : prix encaissé − frais de mise en vente − taxe de vente${
+            model.stepHours > 1 ? ` · tranches de ${fmt(model.stepHours)} h` : ' · une tranche par heure'
+          }. Une mise en vente n'ajoute rien ; le point apparaît à la vente confirmée. Coût d'acquisition non fourni par le site : non déduit.
+        </div>
       </section>`;
   }
 
@@ -10753,8 +11198,7 @@
     const position = ((vx - chart.pad.l) / chart.plotW) * Math.max(1, chart.points.length - 1);
     const index = Math.max(0, Math.min(chart.points.length - 1, Math.round(position)));
     const point = chart.points[index];
-    // On affiche uniquement le résultat de la tranche horaire, jamais une
-    // interpolation au pixel : pas de décimales.
+    // Cumul exact de la tranche, jamais une interpolation au pixel.
     const value = Math.round(Number(point.value) || 0);
     const at = point.at;
     const snapX = chart.pad.l + (index / Math.max(1, chart.points.length - 1)) * chart.plotW;
@@ -10780,17 +11224,49 @@
     const hh = `${String(date.getHours()).padStart(2, '0')} h`;
     const day = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}`;
     const when = chart.range === '1d' ? hh : `${day} ${hh}`;
-    const text = `◆ ${fmt(value)} · ${when}`;
-    const width = Math.max(116, Math.min(chart.plotW, text.length * 6.4 + 18));
-    const tipX = Math.max(chart.pad.l, Math.min(snapX - width / 2, chart.W - chart.pad.r - width));
-    const tipY = Math.max(chart.pad.t + 2, cy - 32);
+    // Date + cumul, puis chaque vente de la tranche (nom + profit généré).
+    const lines = [`Profit cumulé ◆ ${fmt(value)} · ${when}`];
+    const sales = Array.isArray(point.sales) ? point.sales : [];
+    if (!sales.length) {
+      lines.push('Aucune vente sur cette tranche');
+    } else {
+      for (const sale of sales.slice(0, 5)) {
+        const saleDate = new Date(Number(sale.at) || at);
+        const clock = `${String(saleDate.getHours()).padStart(2, '0')}:${String(saleDate.getMinutes()).padStart(
+          2,
+          '0'
+        )}`;
+        const name = String(sale.name || 'Vente');
+        lines.push(`${clock} · ${name.length > 26 ? `${name.slice(0, 25)}…` : name} · ◆ ${fmt(Math.round(sale.net))}`);
+      }
+      if (sales.length > 5) lines.push(`+ ${fmt(sales.length - 5)} autre(s) vente(s)`);
+    }
+    const lineHeight = 14;
+    const width = Math.max(
+      150,
+      Math.min(chart.W - 8, Math.max(...lines.map((text) => text.length)) * 5.6 + 20)
+    );
+    const height = 8 + lines.length * lineHeight;
+    const tipX = Math.max(
+      chart.pad.l - 40,
+      Math.min(snapX - width / 2, chart.W - chart.pad.r - width + 24)
+    );
+    const tipY = Math.max(chart.pad.t + 2, Math.min(cy - height - 8, chart.H - chart.pad.b - height));
     bg.setAttribute('x', tipX.toFixed(1));
     bg.setAttribute('y', tipY.toFixed(1));
     bg.setAttribute('width', width.toFixed(1));
-    bg.setAttribute('height', '21');
-    tip.setAttribute('x', (tipX + width / 2).toFixed(1));
-    tip.setAttribute('y', (tipY + 14.5).toFixed(1));
-    tip.textContent = text;
+    bg.setAttribute('height', String(height));
+    tip.setAttribute('x', (tipX + 9).toFixed(1));
+    tip.setAttribute('y', (tipY + 13).toFixed(1));
+    // Une ligne par élément : `<text>` ne revient pas à la ligne tout seul.
+    while (tip.firstChild) tip.removeChild(tip.firstChild);
+    lines.forEach((text, lineIndex) => {
+      const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+      tspan.setAttribute('x', (tipX + 9).toFixed(1));
+      tspan.setAttribute('dy', lineIndex ? String(lineHeight) : '0');
+      tspan.textContent = text;
+      tip.appendChild(tspan);
+    });
   }
 
   async function onClick(event) {
@@ -11024,6 +11500,9 @@
                 (listing) => String(listing.id) !== String(listingId)
               );
             }
+            // Un retrait volontaire n'est pas une vente : on l'oublie aussi dans
+            // le suivi du graphique, sinon sa disparition passerait pour un achat.
+            untrackPendingSale(listingId, characterId);
           };
           removeLocally();
           notify(`Annonce retirée : ${name}.`);
@@ -11843,6 +12322,13 @@
       disarmAutoSell,
       autoSellPanel,
       loadAutoLog,
+      // Ventes confirmées et graphique du profit réalisé
+      loadSalesLog,
+      reconcilePendingSales,
+      recordConfirmedSales,
+      trackPendingSale,
+      untrackPendingSale,
+      salesChartSeries,
       trackBestCards,
       recordAutoResults,
       refreshAutoAccount,
