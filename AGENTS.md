@@ -13,7 +13,7 @@ auto-open de boosters et statistiques.
 - Version actuelle : **2.4.0** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
-- Dernier commit de référence : `à compléter`
+- Dernier commit de référence : `c14a2e4`
 
 ## 2. Démarrage rapide
 
@@ -25,7 +25,7 @@ npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
 npm run verify:chrome       # 97 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 53 contrôles
 node test/verify-autosell.mjs    # 95 contrôles (sélection pure + stratégies + ordre + ventes actives + classement optimisé + remise en vente + tableau 2)
-node test/verify-autosell-expiry.mjs # 80 contrôles (délai configurable, retrait, carte conservée, vente protégée, retour en fin de file, anti-boucle)
+node test/verify-autosell-expiry.mjs # 81 contrôles (délai configurable, retrait, carte conservée, vente protégée, retour en fin de file, anti-boucle)
 node test/verify-sales-chart.mjs # 74 contrôles (profit net, ventes confirmées, bénéfice par heure, cumul 1 j / 7 j / total, dédoublonnage)
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
