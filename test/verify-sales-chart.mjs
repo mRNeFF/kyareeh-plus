@@ -106,7 +106,33 @@ check('total : pas de division en jours', all.stepHours === 1, String(all.stepHo
 const zero = api.salesChartSeries([], now, '7d');
 check('maximum minimal à 1', zero.max === 1);
 check('courbe à zéro', zero.points.every((p) => p.value === 0));
+check('bénéfice horaire nul sans vente', zero.maxProfit === 0 && zero.points.every((p) => p.profit === 0));
 check('fenêtre vide sans vente', zero.count === 0 && zero.net === 0);
+
+/* --- 3 bis. bénéfice par heure (et non cumul) --------------------------- */
+// 58 chakra à 9 h, 187 à 10 h, 29 à 11 h : la courbe doit monter à 10 h puis
+// redescendre à 11 h, alors que le cumul ne ferait que monter.
+const spikes = [
+  { id: 's1', at: new Date(2026, 9, 20, 9, 10).getTime(), net: 58, gross: 62, fees: 2, tax: 2 },
+  { id: 's2', at: new Date(2026, 9, 20, 10, 20).getTime(), net: 187, gross: 200, fees: 4, tax: 9 },
+  { id: 's3', at: new Date(2026, 9, 20, 11, 30).getTime(), net: 29, gross: 31, fees: 1, tax: 1 }
+];
+const perHour = api.salesChartSeries(spikes, now, '1d');
+check(
+  'bénéfice par heure : valeurs de chaque tranche',
+  perHour.points[14].profit === 58 && perHour.points[15].profit === 187 && perHour.points[16].profit === 29,
+  perHour.points
+    .slice(13, 18)
+    .map((p) => p.profit)
+    .join(',')
+);
+check('bénéfice par heure : max sur une seule tranche', perHour.maxProfit === 187, String(perHour.maxProfit));
+check(
+  'bénéfice par heure : la courbe redescend après le pic',
+  perHour.points[16].profit < perHour.points[15].profit &&
+    perHour.points[15].profit > perHour.points[14].profit
+);
+check('bénéfice par heure : cumul conservé pour le total', perHour.points[23].value === 274, String(perHour.points[23].value));
 
 const otherAccount = api.salesChartSeries(
   [

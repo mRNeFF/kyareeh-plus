@@ -916,15 +916,15 @@ async function visualPass() {
       sales.count === 0 && sales.auto === 0 && /◆ 0/.test(sales.profit),
       `${sales.auto} auto · ${sales.count} total · profit ${sales.profit}`
     );
-    check('Graphique du profit réalisé affiché', sales.chart === true);
+    check('Graphique du bénéfice par heure affiché', sales.chart === true);
     check(
       'Graphique : choix 1 jour / 7 jours / total',
       ['1d', '7d', 'total'].every((value) => sales.ranges.includes(value)),
       sales.ranges.join(',')
     );
     check(
-      'Graphique : une seule courbe « Profit réalisé »',
-      sales.lines === 1 && sales.legend.includes('Profit réalisé') && !/Auto|Manuelle/.test(sales.legend),
+      'Graphique : une seule courbe « Gain de l’heure »',
+      sales.lines === 1 && /Gain de l/.test(sales.legend) && !/Auto|Manuelle/.test(sales.legend),
       `${sales.lines} courbe(s) · ${sales.legend.replace(/\s+/g, ' ')}`
     );
     await evaluate(
@@ -955,8 +955,7 @@ async function visualPass() {
       chartDay.range === '1d' &&
         chartDay.lines === 1 &&
         /\d{2} h/.test(chartDay.labels) &&
-        chartDay.labels.includes('◆ 50') &&
-        chartDay.labels.includes('◆ 100'),
+        chartDay.labels.includes('◆ 50'),
       `${chartDay.range} · ${chartDay.labels.replace(/\s+/g, ' ').slice(0, 120)}`
     );
     const hover = await evaluate(
@@ -982,6 +981,60 @@ async function visualPass() {
       hover.visible && /◆/.test(hover.text) && /\d{2} h/.test(hover.text) && !hover.text.includes(','),
       hover.text
     );
+
+    // La courbe doit refléter le bénéfice de CHAQUE heure : elle monte quand une
+    // heure rapporte plus, redescend quand la suivante rapporte moins.
+    // 58 ◆ à H-3, 187 ◆ à H-2, 29 ◆ à H-1.
+    const curve = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const kp = window.__kyaraPlus;
+         const now = Date.now();
+         const accountId = kp.state.user?.id ?? null;
+         kp.state.salesLog = [
+           { id: 't1', at: now - 3 * 3600e3, net: 58, gross: 62, fees: 2, tax: 2, accountId },
+           { id: 't2', at: now - 2 * 3600e3, net: 187, gross: 200, fees: 4, tax: 9, accountId },
+           { id: 't3', at: now - 1 * 3600e3, net: 29, gross: 31, fees: 1, tax: 1, accountId }
+         ];
+         kp.state.settings.salesRange = '1d';
+         kp.render();
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const path = root.querySelector('.kp-sales-line');
+         const d = path ? path.getAttribute('d') || '' : '';
+         const ys = [...d.matchAll(/[ML]([\\d.]+) ([\\d.]+)/g)].map((m) => Number(m[2]));
+         const minY = Math.min(...ys);
+         const peak = ys.indexOf(minY);
+         const out = {
+           points: ys.length,
+           distinct: new Set(ys).size,
+           peak,
+           before: ys[peak - 1],
+           after: ys[peak + 1],
+           title: root.querySelector('.kp-sales-head b')?.innerText || ''
+         };
+         // On remet l'état de départ (aucune vente confirmée dans le harness).
+         kp.state.salesLog = [];
+         kp.render();
+         return out;
+       })()`
+    );
+    check(
+      'Graphique : bénéfice par heure, la courbe monte puis redescend',
+      curve.points === 24 &&
+        curve.distinct >= 3 &&
+        Number.isFinite(curve.before) &&
+        Number.isFinite(curve.after) &&
+        curve.before > curve.peak &&
+        curve.after > curve.peak,
+      JSON.stringify(curve)
+    );
+    check(
+      'Graphique : intitulé « Bénéfice par heure »',
+      /bénéfice par heure/i.test(curve.title),
+      curve.title
+    );
+
     // — Remise en vente automatique d'une annonce revenue sans acheteur —
     // Simulation : l'annonce expire (elle quitte le marché), l'échéance est
     // dépassée et la copie redevient listable. Le cycle de vente auto doit la

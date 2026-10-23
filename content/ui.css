@@ -2151,6 +2151,14 @@ img.kp-avatar {
   stroke-linejoin: round;
 }
 
+/* Aire sous la courbe du bénéfice par heure. */
+.kp-sales-area.is-sales {
+  fill: var(--kp-accent);
+  opacity: 0.12;
+  stroke: none;
+  pointer-events: none;
+}
+
 .kp-sales-line.is-sales,
 .kp-sales-dot.is-sales {
   stroke: var(--kp-accent);

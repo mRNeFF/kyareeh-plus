@@ -32,7 +32,8 @@ const api = new Function(`${source.slice(begin, end)}
     autoSellActiveQtyFor,
     autoSellRelistPrice,
     autoSellRelistCheck,
-    autoSellRelistEnqueue
+    autoSellRelistEnqueue,
+    AUTOSELL_RELIST_TABLE
   };
 `)();
 
@@ -340,6 +341,36 @@ check(
   relistPrice({ floor: 1, lowest: null, median: 20, previous: null }) === 20
 );
 check('remise en vente : sans aucune donnée, plancher', relistPrice({ floor: 3 }) === 3);
+
+// Tableau 2 : prix fixe le plus bas réellement pratiqué, par rareté. C'est la
+// référence de la remise en vente (relevé du 23/10/2026).
+const table = api.AUTOSELL_RELIST_TABLE;
+check(
+  'tableau 2 : valeurs du relevé',
+  table.C === 3 && table.U === 3 && table.R === 5 && table.E === 15 && table.L === 100 && table.M === 815,
+  JSON.stringify(table)
+);
+check(
+  'remise en vente : prix cible du tableau 2',
+  relistPrice({ floor: 1, rarity: 'M', previous: 900, lowest: 700, median: 1200, table }) === 815,
+  String(relistPrice({ floor: 1, rarity: 'M', previous: 900, lowest: 700, median: 1200, table }))
+);
+check(
+  'remise en vente : déjà au plancher du tableau, même prix',
+  relistPrice({ floor: 1, rarity: 'R', previous: 5, table }) === 5
+);
+check(
+  'remise en vente : carte sous le tableau, on ne remonte pas',
+  relistPrice({ floor: 1, rarity: 'E', previous: 12, table }) === 12
+);
+check(
+  'remise en vente : le tableau ne passe jamais sous le recyclage',
+  relistPrice({ floor: 100, rarity: 'C', previous: 3, table }) === 100
+);
+check(
+  'remise en vente : rareté sans tableau, repli vente rapide',
+  relistPrice({ floor: 40, rarity: 'H', lowest: 200, median: 300, table }) === 199
+);
 
 const expired = { id: 'l-exp', reason: 'expirée', characterId: '1' };
 const canRelist = (over = {}) =>

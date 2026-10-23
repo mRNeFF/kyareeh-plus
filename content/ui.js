@@ -1880,20 +1880,43 @@
   const AUTOSELL_RELIST_TTL_MS = 6 * 3600 * 1000;
 
   /**
-   * Prix d'une remise en vente : **le plus bas autorisé**, c'est-à-dire le prix
-   * de la stratégie « Vente rapide » (1 chakra sous la vente la plus basse),
-   * jamais sous la valeur de recyclage de la rareté.
+   * Tableau 2 — prix le plus bas réellement pratiqué sur le marché, par rareté
+   * (relevé `price_asc` du 23/10/2026 vers 14:50, heure de Paris).
+   *
+   * C'est la référence de la remise en vente automatique : une carte qui revient
+   * sans acheteur repart à ce prix, jamais en dessous. Si elle y était déjà
+   * (ou moins cher), elle repart exactement au même prix.
+   *
+   * À rafraîchir quand le marché bouge : `GET /api/market/listings?rarity=…&
+   * type=fixed&sort=price_asc&pageSize=1`.
+   */
+  const AUTOSELL_RELIST_TABLE = Object.freeze({
+    C: 3,
+    U: 3,
+    R: 5,
+    E: 15,
+    L: 100,
+    M: 815
+  });
+
+  /**
+   * Prix d'une remise en vente : **le plus bas autorisé**, c'est-à-dire la
+   * valeur du tableau 2 pour la rareté (prix fixe le plus bas réellement
+   * pratiqué), jamais sous la valeur de recyclage. Sans entrée dans le tableau
+   * (Héritage), repli sur la stratégie « Vente rapide » : 1 chakra sous la vente
+   * la plus basse, sinon la médiane.
    *
    * Une carte déjà proposée à ce prix (ou en dessous) repart **exactement au
    * même prix** : inutile de descendre plus bas, le site refuserait la mise en
    * vente (`price_too_low`).
    */
-  function autoSellRelistPrice({ floor, lowest, median, previous } = {}) {
+  function autoSellRelistPrice({ floor, lowest, median, previous, rarity, table } = {}) {
     const min = Math.max(1, Math.round(Number(floor) || 1));
     const prev = Number(previous) > 0 ? Math.round(Number(previous)) : null;
     const low = Number(lowest) > 0 ? Math.round(Number(lowest)) : null;
     const med = Number(median) > 0 ? Math.round(Number(median)) : null;
-    let target = low != null ? low - 1 : med;
+    const reference = Number((table ?? AUTOSELL_RELIST_TABLE)[String(rarity ?? '').toUpperCase()]);
+    let target = reference > 0 ? Math.round(reference) : low != null ? low - 1 : med;
     if (target == null) target = prev;
     if (target == null) target = min;
     target = Math.max(min, Math.round(target));
@@ -2309,15 +2332,19 @@
     }
 
     let cumulative = 0;
+    let maxProfit = 0;
     const points = buckets.map((bucket) => {
       cumulative += bucket.profit;
-      // Cumul : la courbe ne monte qu'au moment d'une vente confirmée, et ne
-      // redescend jamais (une annulation ou une expiration n'ajoute rien).
+      maxProfit = Math.max(maxProfit, bucket.profit);
+      // `value` = cumul (comptabilité du total), `profit` = gain de la tranche :
+      // c'est cette valeur que la courbe trace, heure par heure.
       return { at: bucket.at, value: cumulative, profit: bucket.profit, sales: bucket.sales };
     });
     return {
       points,
       max: Math.max(1, cumulative),
+      // Plus gros gain d'une seule tranche : échelle de la courbe par heure.
+      maxProfit: Math.max(0, maxProfit),
       range: normalized,
       net: cumulative,
       gross,
@@ -4465,8 +4492,11 @@
       }
       const floor = recycleFloor(row.rarity);
       const prices = state.prices[key] ?? {};
+      const hasTable = Number(AUTOSELL_RELIST_TABLE[String(row.rarity ?? '').toUpperCase()]) > 0;
       const price = autoSellRelistPrice({
         floor,
+        rarity: row.rarity,
+        table: AUTOSELL_RELIST_TABLE,
         lowest: Number(state.lowest[key] ?? state.fixedLow[key]),
         median: Number(prices.m7 ?? prices.m30),
         previous: item.previousPrice
@@ -4510,7 +4540,11 @@
         report.rows.push(single);
         autoSellLog(
           `↻ ${single.name} · remise en vente auto · ◆ ${fmt(price)}${
-            alreadyLowest ? ' · déjà au prix le plus bas, même prix' : ''
+            alreadyLowest
+              ? ' · déjà au plancher, même prix'
+              : hasTable
+                ? ' · plancher du tableau 2'
+                : ''
           }`,
           'ok'
         );
@@ -7847,33 +7881,37 @@
     const model = salesChartSeries(state.salesLog, Date.now(), range, {
       accountId: state.user?.id ?? null
     });
-    const { points, max, net, count, matched, fees, tax } = model;
+    const { points, net, count, matched, fees, tax, maxProfit } = model;
     const W = 720;
     const H = 230;
     const pad = { l: 70, r: 16, t: 18, b: 36 };
-    // Échelle en chakra, arrondie à 100 pour que les lignes de 50 restent nettes.
-    const yMax = Math.max(100, Math.ceil(max / 100) * 100);
+    // Échelle en chakra : le plus gros gain d'une seule heure fixe le plafond,
+    // arrondi à 50 pour garder des repères lisibles.
+    const yMax = Math.max(50, Math.ceil(Math.max(1, maxProfit) / 50) * 50);
     const plotW = W - pad.l - pad.r;
     const plotH = H - pad.t - pad.b;
     const x = (index) => pad.l + (index / Math.max(1, points.length - 1)) * plotW;
-    const y = (value) => H - pad.b - (value / yMax) * plotH;
-    // Courbe en marches : le profit cumulé ne monte qu'à l'instant d'une vente,
-    // il ne faut donc pas laisser croire à une progression continue.
+    const y = (value) => H - pad.b - (Math.max(0, Number(value) || 0) / yMax) * plotH;
+    // Courbe du **bénéfice par heure** : chaque point est le gain de la tranche,
+    // pas un cumul — la courbe monte quand une heure rapporte, redescend quand
+    // l'heure suivante rapporte moins.
     const line = points
-      .map((point, index) => {
-        const px = x(index).toFixed(1);
-        const py = y(point.value).toFixed(1);
-        if (!index) return `M${px} ${py}`;
-        const previous = y(points[index - 1].value).toFixed(1);
-        return ` L${px} ${previous} L${px} ${py}`;
-      })
+      .map(
+        (point, index) =>
+          `${index ? ' L' : 'M'}${x(index).toFixed(1)} ${y(point.profit).toFixed(1)}`
+      )
       .join('');
+    const area = points.length > 1
+      ? `${line} L${x(points.length - 1).toFixed(1)} ${(H - pad.b).toFixed(1)} L${x(0).toFixed(1)} ${(
+          H - pad.b
+        ).toFixed(1)} Z`
+      : '';
     const saleDots = points
       .map((point, index) =>
         point.profit > 0
-          ? `<circle class="kp-sales-dot is-sales" cx="${x(index).toFixed(1)}" cy="${y(point.value).toFixed(
+          ? `<circle class="kp-sales-dot is-sales" cx="${x(index).toFixed(1)}" cy="${y(point.profit).toFixed(
               1
-            )}" r="2.4"></circle>`
+            )}" r="2.6"></circle>`
           : ''
       )
       .join('');
@@ -7966,10 +8004,10 @@
     return `
       <section class="kp-sales">
         <div class="kp-sales-head">
-          <b>Profit réalisé (chakra)</b>
+          <b>Bénéfice par heure (chakra)</b>
           <div class="kp-sales-head-right">
-            <span>cumulé sur ${esc(rangeLabel)} · ventes confirmées via Kyareeh+</span>
-            <select class="kp-select kp-sales-range" data-sales-range aria-label="Période du profit réalisé">
+            <span>gain de chaque heure sur ${esc(rangeLabel)} · ventes confirmées via Kyareeh+</span>
+            <select class="kp-select kp-sales-range" data-sales-range aria-label="Période du bénéfice par heure">
               <option value="1d" ${range === '1d' ? 'selected' : ''}>1 jour</option>
               <option value="7d" ${range === '7d' ? 'selected' : ''}>7 jours</option>
               <option value="total" ${range === 'total' ? 'selected' : ''}>Total</option>
@@ -7982,10 +8020,11 @@
           <span><b>${fmt(matched)}</b><small>dont immédiates</small></span>
           <span><b>◆ ${fmt(fees + tax)}</b><small>frais + taxe déduits</small></span>
         </div>
-        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Profit réalisé cumulé en chakra">
+        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Bénéfice généré par heure en chakra">
           ${yGrid}
           ${xGrid}
           ${yText}
+          ${area ? `<path class="kp-sales-area is-sales" d="${area}"></path>` : ''}
           <path class="kp-sales-line is-sales" d="${line}"></path>
           ${saleDots}
           <g class="kp-sales-hover" style="display:none">
@@ -7997,12 +8036,15 @@
           ${xLabels}
         </svg>
         <div class="kp-sales-legend">
-          <span><i class="is-sales"></i>Profit réalisé <b>◆ ${fmt(net)}</b></span>
+          <span><i class="is-sales"></i>Gain de l'heure</span>
+          <span>meilleure heure <b>◆ ${fmt(maxProfit)}</b></span>
         </div>
         <div class="kp-sales-note">
-          Profit cumulé sur la période : prix encaissé − frais de mise en vente − taxe de vente${
+          Chaque point est le bénéfice de la tranche : la courbe monte quand une heure rapporte et
+          redescend quand la suivante rapporte moins — ce n'est pas un cumul${
             model.stepHours > 1 ? ` · tranches de ${fmt(model.stepHours)} h` : ' · une tranche par heure'
-          }. Une mise en vente n'ajoute rien ; le point apparaît à la vente confirmée. Coût d'acquisition non fourni par le site : non déduit.
+          }. Profit = encaissé − frais de mise en vente − taxe. Une mise en vente sans achat n'ajoute rien.
+          Coût d'acquisition non fourni par le site : non déduit.
         </div>
       </section>`;
   }
@@ -11549,8 +11591,8 @@
     const position = ((vx - chart.pad.l) / chart.plotW) * Math.max(1, chart.points.length - 1);
     const index = Math.max(0, Math.min(chart.points.length - 1, Math.round(position)));
     const point = chart.points[index];
-    // Cumul exact de la tranche, jamais une interpolation au pixel.
-    const value = Math.round(Number(point.value) || 0);
+    // Gain exact de la tranche, jamais une interpolation au pixel.
+    const value = Math.round(Number(point.profit) || 0);
     const at = point.at;
     const snapX = chart.pad.l + (index / Math.max(1, chart.points.length - 1)) * chart.plotW;
     const cy = chart.H - chart.pad.b - (value / chart.yMax) * chart.plotH;
@@ -11575,8 +11617,9 @@
     const hh = `${String(date.getHours()).padStart(2, '0')} h`;
     const day = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}`;
     const when = chart.range === '1d' ? hh : `${day} ${hh}`;
-    // Date + cumul, puis chaque vente de la tranche (nom + profit généré).
-    const lines = [`Profit cumulé ◆ ${fmt(value)} · ${when}`];
+    // Date + gain de la tranche, puis chaque vente de la tranche (nom + profit).
+    const unit = Number(chart.stepHours) > 1 ? 'Gain de la tranche' : "Gain de l'heure";
+    const lines = [`${unit} ◆ ${fmt(value)} · ${when}`];
     const sales = Array.isArray(point.sales) ? point.sales : [];
     if (!sales.length) {
       lines.push('Aucune vente sur cette tranche');
