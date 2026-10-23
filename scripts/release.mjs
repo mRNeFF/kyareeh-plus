@@ -230,7 +230,7 @@ if (flags.has('--no-upload') || !apiKey || !apiSecret) {
 ! Envoi automatique non effectué${flags.has('--no-upload') ? ' (--no-upload)' : ' (clés API absentes)'}.
 
 Envoi manuel :
-  1. https://addons.mozilla.org/developers/addon/kyara-plus/versions
+  1. https://addons.mozilla.org/developers/addon/kyareeh/versions
   2. « Upload a New Version » → web-ext-artifacts/kyareeh-plus-${target}.zip
   3. Attends la validation (quelques heures à quelques jours).
 
@@ -267,6 +267,6 @@ console.log(`
 ✓ v${target} envoyée à AMO (canal listé).
 
 La version n'est servie aux utilisateurs qu'après validation par un relecteur.
-Suivi : https://addons.mozilla.org/developers/addon/kyara-plus/versions
+Suivi : https://addons.mozilla.org/developers/addon/kyareeh/versions
 Une fois publiée, Firefox met à jour tout le monde automatiquement (vérification ~24 h).
 `);
