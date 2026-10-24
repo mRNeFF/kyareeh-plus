@@ -1554,7 +1554,8 @@ async function visualPass() {
          let targetRow = collection.find((r) => String(r.characterId) === cardId) || null;
          if (!targetRow) return { ok: false, reason: 'carte absente du harness' };
          targetRow.qty = 4;
-         targetRow.listable = 4;
+         targetRow.locked = 2;
+         targetRow.listable = 2;
          pick.qty = qty;
          pick.createdAt = new Date(Date.now() - 3 * 3600000).toISOString();
          for (const l of market.listings) {

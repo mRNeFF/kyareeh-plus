@@ -4,7 +4,7 @@ Extension **Firefox et Chrome / Edge** pour [kyara.games](https://kyara.games) :
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v2.6.0)
+## Fonctionnalités (v2.6.1)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.

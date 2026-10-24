@@ -594,7 +594,12 @@
             const row = MARKET_STATE.collection.find(
               (item) => Number(item.characterId) === Number(listing.characterId)
             );
-            if (row) row.listable = Math.min(Number(row.qty ?? 1), Number(row.listable ?? 0) + 1);
+            if (row) {
+              const qty = Math.max(1, Number(listing.qty ?? 1) || 1);
+              // `locked` = exemplaires déjà en vente : le retrait les libère.
+              row.locked = Math.max(0, Number(row.locked ?? 0) - qty);
+              row.listable = Math.min(Number(row.qty ?? 1), Number(row.listable ?? 0) + qty);
+            }
             MARKET_STATE.listings.splice(index, 1);
           }
           return json({ ok: index >= 0 });
@@ -622,6 +627,8 @@
             return fail('not_listable', 'Cette carte n’est pas listable.');
           }
           row.listable = Math.max(0, Number(row.listable ?? Math.max(0, row.qty - 1)) - 1);
+          // Cette copie est désormais « en vente » (champ `locked` du site).
+          row.locked = Math.max(0, Number(row.locked ?? 0) + 1);
           const card = CHARACTERS.find((item) => Number(item.id) === characterId) || null;
           const listing = {
             id: 'auto-' + Date.now() + '-' + MARKET_STATE.listings.length,

@@ -1615,9 +1615,10 @@
   const RECYCLE_KEEP_COPIES = 1;
 
   /**
-   * Exemplaires qu'on ne peut pas recycler : les verrouillés (`locked`) et les
-   * exemplaires engagés (annonce, offre, échange) que `listable` exclut déjà.
-   * Aucune donnée inventée : sans `listable`, seuls les verrouillés sont retirés.
+   * Exemplaires qu'on ne peut pas recycler : ceux **déjà en vente** (champ
+   * `locked` du site, affiché « N en vente ») et les exemplaires engagés dans
+   * un échange que `listable` exclut déjà. Aucune donnée inventée : sans
+   * `listable`, seuls les exemplaires en vente sont retirés.
    */
   function recycleBlockedCopies(row) {
     const qty = Math.max(0, Number(row?.qty ?? row?.quantity) || 0);
@@ -1630,9 +1631,10 @@
   }
 
   /**
-   * Exemplaires recyclables d'une carte : tout sauf les exemplaires bloqués et
-   * l'exemplaire conservé. Une carte verrouillée (`pinned`) n'en a aucun : le
-   * site indique qu'elle « ne peut être ni vendue, ni échangée, ni recyclée ».
+   * Exemplaires recyclables d'une carte : tout sauf les exemplaires déjà en
+   * vente et l'exemplaire conservé. Une carte verrouillée (`pinned`, échelle
+   * carte) n'en a aucun : le site indique qu'elle « ne peut être ni vendue, ni
+   * échangée, ni recyclée ».
    */
   function recycleSpareOf(row) {
     if (!row || row.pinned) return 0;
@@ -1648,7 +1650,7 @@
     if (qty <= 1) return 'Seul exemplaire : conservé';
     if (recycleSpareOf(row) <= 0) {
       const locked = Math.max(0, Number(row.lockedQty ?? row.locked) || 0);
-      if (locked > 0) return `${locked} exemplaire(s) verrouillé(s)`;
+      if (locked > 0) return `${locked} exemplaire(s) déjà en vente`;
       return 'Tous les exemplaires sont engagés';
     }
     const rarity = String(row.rarity || 'C').toUpperCase();
@@ -5817,10 +5819,12 @@
           const at = Date.now();
           const listingQty = Math.max(1, Math.floor(Number(autoSellListingQty(fresh ?? item)) || 1));
 
-          // Le retrait vient de libérer les exemplaires de l'annonce : on
-          // l'inscrit dans l'instantané avant de décider du recyclage.
+          // Le retrait vient de libérer les exemplaires de l'annonce : ils ne
+          // sont plus « en vente » (`locked`) et redeviennent disponibles. Sans
+          // cette mise à jour, un ancien `locked` ferait refuser le recyclage.
           const live = collectionSnapshot ? collectionSnapshot.get(String(item.characterId)) : null;
           if (live) {
+            live.lockedQty = Math.max(0, live.lockedQty - listingQty);
             const free = live.listable == null ? live.qty : live.listable;
             live.listable = Math.min(live.qty, free + listingQty);
           }

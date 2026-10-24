@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.6.0** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.6.1** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `066a74e`
@@ -26,7 +26,7 @@ npm run verify:chrome       # 113 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 53 contrôles
 node test/verify-autosell.mjs    # 95 contrôles (sélection pure + stratégies + ordre + ventes actives + classement optimisé + remise en vente + tableau 2)
 node test/verify-autosell-expiry.mjs # 81 contrôles (délai configurable, retrait, carte conservée, vente protégée, retour en fin de file, anti-boucle)
-node test/verify-recycle.mjs     # 59 contrôles (exemplaires recyclables, verrou/engagés, plan, totaux, décision après expiration)
+node test/verify-recycle.mjs     # 62 contrôles (exemplaires recyclables, verrou/engagés, plan, totaux, décision après expiration)
 node test/verify-sales-chart.mjs # 74 contrôles (profit net, ventes confirmées, bénéfice par heure, cumul 1 j / 7 j / total, dédoublonnage)
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
@@ -147,7 +147,7 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
   Exemplaires totaux = `owned + doublesCount`.
 - `series[]` du profil est **tronqué à 8 entrées** → recalculer depuis le catalogue.
 - `/api/trades/owned/:id` et `/api/fair-play/prices` renvoient **401 sans session**.
-- **Recyclage** : `POST /api/me/collection/:id/recycle` `{ qty }` ne prend **qu'une carte à la fois** (pas de lot par ids). Le site **conserve 1 exemplaire** de chaque carte et bloque le recyclage d'une carte `pinned` (verrouillée). Les exemplaires verrouillés / engagés (`locked`, `listable`) ne sont pas recyclables → plafond retenu : `qty − max(locked, qty − listable) − 1`.
+- **Recyclage** : `POST /api/me/collection/:id/recycle` `{ qty }` ne prend **qu'une carte à la fois** (pas de lot par ids). Le site **conserve 1 exemplaire** de chaque carte et bloque le recyclage d'une carte `pinned` (verrou de carte). Attention : **`locked` n'est pas un verrou utilisateur**, c'est le nombre d'exemplaires **déjà en vente** (« N en vente » sur le site) ; il diminue quand une annonce est retirée. Décider d'un recyclage sur un `locked` lu avant le retrait fait refuser à tort : il faut le décrémenter de la quantité retirée (corrigé en 2.6.1). Plafond retenu : `qty − max(locked, qty − listable) − 1`.
 
 ## 7. État des onglets
 

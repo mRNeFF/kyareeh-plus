@@ -66,7 +66,7 @@ check('quantité négative : zéro', api.recycleSpareOf(row({ qty: -3 })) === 0)
 check('carte unique expliquée', /Seul exemplaire/.test(api.recycleBlockOf(row({ qty: 1 })) || ''));
 check('carte verrouillée expliquée', /Verrouillée/.test(api.recycleBlockOf(row({ pinned: true })) || ''));
 check('exemplaires engagés expliqués', /engagés/.test(api.recycleBlockOf(row({ qty: 3, listable: 0 })) || ''));
-check('verrou expliqué', /verrouillé/.test(api.recycleBlockOf(row({ qty: 4, listable: 4, lockedQty: 3 })) || ''));
+check('exemplaires en vente expliqués', /en vente/.test(api.recycleBlockOf(row({ qty: 4, listable: 4, lockedQty: 3 })) || ''));
 check('mythique exclue par défaut', /Mythique exclue/.test(api.recycleBlockOf(row({ rarity: 'M', qty: 3 })) || ''));
 check('légendaire exclue par défaut', /Légendaire exclue/.test(api.recycleBlockOf(row({ rarity: 'L', qty: 3 })) || ''));
 check(
@@ -149,6 +149,13 @@ check('expiration : carte verrouillée → repli', decide(row({ qty: 4, listable
 check('expiration : carte unique → repli', decide(row({ qty: 1, listable: 1 })).recycle === false);
 check('expiration : exemplaires engagés → repli', decide(row({ qty: 3, listable: 0 })).recycle === false);
 check('expiration : exemplaires verrouillés → repli', decide(row({ qty: 4, listable: 4, lockedQty: 3 })).recycle === false);
+check(
+  'expiration : après retrait, l’exemplaire libéré redevient recyclable',
+  decide(row({ qty: 3, listable: 2, lockedQty: 1 }), { listingQty: 1 }).recycle === true
+);
+const stillListed = decide(row({ qty: 3, listable: 1, lockedQty: 2 }), { listingQty: 1 });
+check('expiration : deux exemplaires encore en vente → repli', stillListed.recycle === false);
+check('expiration : motif « déjà en vente »', /2 exemplaire\(s\) déjà en vente/.test(stillListed.reason), stillListed.reason);
 
 const twoOfFour = decide(row({ qty: 4, listable: 4, rarity: 'R' }), { listingQty: 2 });
 check('expiration : quantité exacte de l’annonce', twoOfFour.recycle === true && twoOfFour.qty === 2, String(twoOfFour.qty));
