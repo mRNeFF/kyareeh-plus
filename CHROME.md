@@ -162,5 +162,10 @@ Le même zip est accepté tel quel sur <https://partner.microsoft.com/dashboard/
   options. Un relecteur Chrome peut demander des explications ; les décrire dans les notes.
 - L'extension dépend d'une **API interne non documentée** de kyara.games : une casse côté
   site cassera une vue sans prévenir (même comportement que sur Firefox).
+- **Duel en ligne** : les salons passent par un relais WebSocket (`relay/`) que l'extension
+  n'héberge pas. Aucune adresse n'est fournie par défaut : sans relais déployé, le salon
+  affiche « Aucun serveur de jeu configuré » et seuls l'entraînement contre l'IA et les règles
+  restent utilisables. Déployer le relais (voir `relay/README.md`), puis renseigner son adresse
+  dans le salon ou dans la constante `DEFAULT_RELAY` de `duel/duel-app.js` avant de reconstruire.
 - `content/ui.js` est un monolithe rendu par `innerHTML` échappé (`esc()`). Les
   avertissements de linter Firefox sont attendus ; Chrome n'a pas d'équivalent.

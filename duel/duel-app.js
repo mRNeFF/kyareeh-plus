@@ -36,6 +36,21 @@
   const LOG_MAX = 300;
   const SESSION_MAX_AGE = 6 * 3600 * 1000;
 
+  /*
+   * Adresse par défaut du relais de jeu (serveur autoritatif des salons en ligne,
+   * dossier `relay/`). Vide : aucun relais public n'est déployé, donc le salon
+   * demande l'adresse au joueur. Dès qu'un relais est en ligne — par exemple
+   * `wss://<service>.up.railway.app` — mettre son adresse ici : le champ du salon
+   * est prérempli et le duel en ligne fonctionne sans configuration côté joueur.
+   */
+  const DEFAULT_RELAY = '';
+
+  /** Le champ du salon est-il une adresse de relais exploitable ? */
+  function relayConfigured(value = app.relay) {
+    return /^wss?:\/\/\S+$/i.test(String(value || '').trim());
+  }
+
+
   // Couleurs des types (§1.6) si le moteur ne fournit pas encore E.TYPES.
   const FALLBACK_TYPES = {
     Duelliste: { color: '#ff5a4e', label: 'Duelliste' },
@@ -398,6 +413,7 @@
     screen: 'collection',
     deck: [],
     relay: '',
+    relayError: '',
     code: '',
     query: '',
     series: 'all',
@@ -427,8 +443,9 @@
 
   async function loadPrefs() {
     const saved = await store.get(PREFS_KEY);
+    app.relay = DEFAULT_RELAY;
     if (saved && typeof saved === 'object') {
-      if (typeof saved.relay === 'string') app.relay = saved.relay;
+      if (typeof saved.relay === 'string' && saved.relay.trim()) app.relay = saved.relay.trim();
       if (Array.isArray(saved.deck)) {
         app.deck = [...new Set(saved.deck.map(String))].filter((id) => isMythic(id)).slice(0, DECK_SIZE);
       }
@@ -822,10 +839,12 @@
     }
     const relay = String(app.relay || '').trim();
     persistPrefs();
-    if (!/^wss?:\/\/\S+$/i.test(relay)) {
-      notify('Adresse du relais invalide : elle doit commencer par wss:// (ou ws:// en local).');
+    if (!relayConfigured(relay)) {
+      app.relayError = 'Aucun serveur de jeu configuré : saisis l’adresse wss:// du relais avant de créer ou de rejoindre un salon.';
+      render();
       return;
     }
+    app.relayError = '';
     if (intent.type === 'join' && !/^[A-Z]{5}$/.test(intent.code)) {
       notify('Le code du salon fait 5 lettres.');
       return;
@@ -1653,6 +1672,12 @@
             <label class="kd-lbl">Adresse du relais
               <input data-role="relay" placeholder="wss://…" value="${esc(app.relay)}" spellcheck="false" autocomplete="off">
             </label>
+            ${
+              relayConfigured()
+                ? ''
+                : '<p class="kd-note is-warn">Aucun serveur de jeu configuré : le duel en ligne a besoin de l’adresse d’un relais <b>wss://…</b> (serveur du dépôt, dossier <code>relay/</code>). L’entraînement contre l’IA reste disponible.</p>'
+            }
+            ${app.relayError ? `<p class="kd-note is-bad">${esc(app.relayError)}</p>` : ''}
             <div class="kd-row">
               <button class="kd-btn is-primary" type="button" data-act="create" ${N && !live ? '' : 'disabled'}>Créer un salon</button>
               <input class="kd-codein" data-role="code" placeholder="CODE" maxlength="5" value="${esc(app.code)}" spellcheck="false" autocomplete="off" aria-label="Code du salon">
@@ -2332,6 +2357,7 @@
       }
     } else if (role === 'relay') {
       app.relay = String(t.value || '').trim();
+      if (relayConfigured()) app.relayError = '';
       persistPrefs();
     } else if (role === 'code') {
       const clean = String(t.value || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);

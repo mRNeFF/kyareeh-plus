@@ -4,7 +4,7 @@ Extension **Firefox et Chrome / Edge** pour [kyara.games](https://kyara.games) :
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v2.6.1)
+## Fonctionnalités (v2.6.2)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -36,7 +36,7 @@ Extension **Firefox et Chrome / Edge** pour [kyara.games](https://kyara.games) :
 - **Mise à jour** : plus de boutons de mise à jour dans les Réglages. La **version du code** et la **version chargée par Firefox** sont dans **Debug**, avec le bouton **Recharger l'extension** (confirmation en deux clics). La popup garde son bouton de rechargement.
 - **Anti-AFK** : quand le site affiche sa boîte **« Tu es toujours là ? »**, l'extension clique sur **« Je suis là »** toute seule après un délai tiré au hasard entre **2 s et 1 min** (désactivable dans les Réglages). La détection se fait par le texte de la boîte (pas par des classes CSS), accepte les variantes `Oui` / `Je suis là` / `Présent`, ignore les autres dialogues (une confirmation « Supprimer ? Oui » n'est jamais cliquée) et, si la boîte reste affichée, refait une tentative en évènements souris. Les Réglages affichent le nombre de réponses et l'heure du dernier clic, et chaque évènement est tracé dans le journal de l'Auto-Open.
 - **Debug** : version du code, version chargée par Firefox, rechargement de l'extension, journal des requêtes, clés renvoyées par l'API, diagnostic copiable.
-- **+Duel (Kyara Duel, Mythiques)** : duel 1 contre 1 à la Pokémon avec les 203 Mythiques — équipe de 5, un champion actif et un banc de 4, changements, choix simultanés et secrets, chakra pour les soutiens et ultimes, types (rôles) avec table d'efficacité. Application dans sa propre page (`duel/duel.html`), affichée dans le panneau (et dans la fenêtre Global quand le panneau est détaché). Effets sonores synthétisés, particules aux couleurs du type, carte clignotante à chaque ultime. **Entraînement contre l'IA** hors ligne, **salons en ligne** à code de 5 lettres via le relais (`relay/`, serveur autoritatif). Onglet **Règles** (aussi dans `docs/REGLES-DUEL.md`).
+- **+Duel (Kyara Duel, Mythiques)** : duel 1 contre 1 à la Pokémon avec les 203 Mythiques — équipe de 5, un champion actif et un banc de 4, changements, choix simultanés et secrets, chakra pour les soutiens et ultimes, types (rôles) avec table d'efficacité. Application dans sa propre page (`duel/duel.html`), affichée dans le panneau (et dans la fenêtre Global quand le panneau est détaché). Effets sonores synthétisés, particules aux couleurs du type, carte clignotante à chaque ultime. **Entraînement contre l'IA** hors ligne, **salons en ligne** à code de 5 lettres via le relais (`relay/`, serveur autoritatif). Onglet **Règles** (aussi dans `docs/REGLES-DUEL.md`). Le duel en ligne exige l'adresse d'un relais `wss://…` : aucun serveur n'est fourni par défaut, le champ **Adresse du relais** du salon sert à saisir celle d'un relais déployé (l'écran l'indique quand elle manque) ; l'entraînement reste entièrement local.
 - **DA unifiée** : l'onglet **Tools+** reprend la direction artistique de **+Duel** — typographie display en capitales, onglets et sous-onglets en dégradé rouge/or, panneaux et cartes en dégradé, focus orange, boutons primaires dorés.
 
 ## Installer (utilisateur normal — recommandé)
