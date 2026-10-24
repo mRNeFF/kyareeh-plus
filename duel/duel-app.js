@@ -38,12 +38,12 @@
 
   /*
    * Adresse par défaut du relais de jeu (serveur autoritatif des salons en ligne,
-   * dossier `relay/`). Vide : aucun relais public n'est déployé, donc le salon
-   * demande l'adresse au joueur. Dès qu'un relais est en ligne — par exemple
-   * `wss://<service>.up.railway.app` — mettre son adresse ici : le champ du salon
-   * est prérempli et le duel en ligne fonctionne sans configuration côté joueur.
+   * dossier `relay/`). Le relais public est déployé sur kyareeh.duckdns.org
+   * (Caddy en TLS devant `relay/server.mjs`) : le champ du salon est prérempli et
+   * un joueur peut créer ou rejoindre une partie sans configuration. Laisser vide
+   * pour revenir à une saisie manuelle.
    */
-  const DEFAULT_RELAY = '';
+  const DEFAULT_RELAY = 'wss://kyareeh.duckdns.org';
 
   /** Le champ du salon est-il une adresse de relais exploitable ? */
   function relayConfigured(value = app.relay) {

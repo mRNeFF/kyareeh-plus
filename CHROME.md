@@ -163,9 +163,12 @@ Le même zip est accepté tel quel sur <https://partner.microsoft.com/dashboard/
 - L'extension dépend d'une **API interne non documentée** de kyara.games : une casse côté
   site cassera une vue sans prévenir (même comportement que sur Firefox).
 - **Duel en ligne** : les salons passent par un relais WebSocket (`relay/`) que l'extension
-  n'héberge pas. Aucune adresse n'est fournie par défaut : sans relais déployé, le salon
-  affiche « Aucun serveur de jeu configuré » et seuls l'entraînement contre l'IA et les règles
-  restent utilisables. Déployer le relais (voir `relay/README.md`), puis renseigner son adresse
-  dans le salon ou dans la constante `DEFAULT_RELAY` de `duel/duel-app.js` avant de reconstruire.
+  n'héberge pas. L'adresse publique **`wss://kyareeh.duckdns.org`** est préremplie dans le champ
+  du salon (constante `DEFAULT_RELAY` de `duel/duel-app.js`) ; si ce relais tombe, le duel en
+  ligne devient indisponible (message explicite) alors que l'entraînement et les règles restent
+  utilisables. Hébergement et redéploiement : `relay/README.md`.
+- **Paquet** : `duel/` doit être dans le zip (page de l'application, absente du manifeste).
+  `scripts/build-chrome.mjs` échoue si `duel/duel.html` manque — c'est justement son absence du
+  paquet 2.3.2 qui a cassé le duel sur la fiche publiée.
 - `content/ui.js` est un monolithe rendu par `innerHTML` échappé (`esc()`). Les
   avertissements de linter Firefox sont attendus ; Chrome n'a pas d'équivalent.

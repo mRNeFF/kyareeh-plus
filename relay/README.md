@@ -14,12 +14,11 @@ client v1 reçoit l'erreur `version` à son `hello`.
 
 Une seule dépendance : [`ws`](https://github.com/websockets/ws). Node 20 ou plus récent.
 
-> **Adresse côté extension.** Le paquet ne contient **aucune adresse de relais par défaut** :
-> le joueur la saisit dans l'écran **Salon** (champ « Adresse du relais »), et elle est
-> conservée dans ses préférences. Pour figer une adresse publique, renseigner la constante
-> `DEFAULT_RELAY` en tête de `duel/duel-app.js` (par exemple `wss://<service>.up.railway.app`)
-> puis reconstruire : le champ est alors prérempli. Tant qu'aucun relais n'est déployé, le
-> salon affiche « Aucun serveur de jeu configuré » ; l'entraînement contre l'IA reste local.
+> **Adresse côté extension.** Le relais public est **`wss://kyareeh.duckdns.org`** (TLS terminé par
+> Caddy devant `server.mjs`) ; c'est la constante `DEFAULT_RELAY` en tête de `duel/duel-app.js`,
+> donc le champ « Adresse du relais » du salon est prérempli. Un joueur peut la remplacer par une
+> autre adresse, conservée dans ses préférences. Si le relais est arrêté, le salon affiche un
+> message explicite et l'entraînement contre l'IA reste disponible (il est local).
 
 ## Lancer en local
 
