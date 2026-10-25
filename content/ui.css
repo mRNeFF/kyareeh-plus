@@ -210,6 +210,21 @@ a:focus-visible,
   cursor: default;
 }
 
+/* Debug : ouvre la vue diagnostic depuis l'en-tête (plus d'onglet dédié). */
+.kp-icon-btn[data-act='debug-open'] {
+  width: auto;
+  padding: 0 8px;
+  color: #9fd2c4;
+  font: 700 9px/1 var(--kp-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.kp-icon-btn[data-act='debug-open']:hover {
+  background: rgba(63, 214, 138, 0.1);
+  color: #c8f5e6;
+}
+
 .kp-banner {
   display: flex;
   align-items: center;
@@ -1245,6 +1260,140 @@ img.kp-avatar {
   gap: 10px;
 }
 
+/* Réglages : sommaire fixe + catégories, sur le modèle de l'onglet Règles du duel. */
+.kp-settings-layout {
+  display: grid;
+  gap: 12px;
+}
+
+.kp-settings-nav {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  overflow-x: auto;
+  padding: 7px 2px 8px;
+  background: linear-gradient(180deg, var(--kp-bg) 72%, rgba(18, 19, 24, 0));
+  scrollbar-width: none;
+}
+
+.kp-settings-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.kp-settings-nav b {
+  flex: 0 0 auto;
+  margin-right: 4px;
+  color: var(--kp-muted);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.kp-settings-nav-btn {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1px solid var(--kp-line);
+  border-radius: 999px;
+  background: var(--kp-bg-2);
+  color: var(--kp-muted);
+  font: 600 10.5px/1 "Zen Kaku Gothic New", system-ui, sans-serif;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.kp-settings-nav-btn:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--kp-text);
+}
+
+.kp-settings-nav-btn.is-active {
+  border-color: rgba(255, 138, 109, 0.45);
+  background: rgba(255, 138, 109, 0.13);
+  color: #ffd7cd;
+}
+
+.kp-settings-body {
+  display: grid;
+  gap: 20px;
+}
+
+.kp-settings-section {
+  display: grid;
+  gap: 9px;
+  scroll-margin-top: 48px;
+}
+
+.kp-settings-head h3 {
+  margin: 0;
+  color: var(--kp-text);
+  font: 700 14px/1.2 "Unbounded", "Zen Kaku Gothic New", system-ui, sans-serif;
+  letter-spacing: 0.01em;
+}
+
+.kp-settings-head p {
+  margin: 4px 0 0;
+  color: var(--kp-muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.kp-settings-grid {
+  display: grid;
+  gap: 7px;
+}
+
+.kp-settings-note {
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--kp-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.kp-settings-note b {
+  color: var(--kp-text);
+}
+
+.kp-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--kp-accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.kp-link:hover {
+  color: #ffd0c6;
+}
+
+.kp-debug-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0 4px;
+}
+
+.kp-debug-head b {
+  display: block;
+  font: 700 14px/1.2 "Unbounded", "Zen Kaku Gothic New", system-ui, sans-serif;
+}
+
+.kp-debug-head small {
+  display: block;
+  margin-top: 3px;
+  color: var(--kp-muted);
+  font-size: 9.5px;
+}
+
 .kp-field {
   display: grid;
   grid-template-columns: 1fr 98px;
@@ -1289,6 +1438,19 @@ img.kp-avatar {
   width: 15px;
   height: 15px;
   accent-color: var(--kp-accent);
+  flex: none;
+}
+
+.kp-toggle > span {
+  min-width: 0;
+}
+
+.kp-toggle small {
+  display: block;
+  margin-top: 2px;
+  color: var(--kp-muted);
+  font-size: 9.5px;
+  line-height: 1.35;
 }
 
 .kp-debug {
@@ -1622,6 +1784,65 @@ img.kp-avatar {
   font-size: 10.5px;
 }
 
+/* Limite d'annonces simultanées : un seul réglage, lisible, avec l'occupation réelle. */
+.kp-autosell-limit {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  align-items: center;
+  margin-top: 8px;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.kp-autosell-limit-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--kp-muted);
+}
+
+.kp-autosell-limit-field .kp-select {
+  width: 58px;
+  padding: 3px 5px;
+  font-size: 11px;
+}
+
+.kp-autosell-limit-state {
+  justify-self: end;
+  color: var(--kp-muted);
+  font-size: 9.5px;
+}
+
+.kp-autosell-limit-state b {
+  color: var(--kp-text);
+  font-size: 11px;
+}
+
+.kp-autosell-limit-state.is-full {
+  color: var(--kp-warn);
+}
+
+.kp-autosell-limit small {
+  grid-column: 1 / -1;
+  color: var(--kp-muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.kp-autosell-summary {
+  margin-top: 7px;
+  color: var(--kp-muted);
+  font-size: 9.5px;
+}
+
+.kp-autosell-summary b {
+  color: var(--kp-text);
+}
+
 .kp-autosell-status {
   margin-top: 6px;
   padding: 5px 7px;
@@ -1677,15 +1898,57 @@ img.kp-avatar {
 
 /* Réglage « Retirer les annonces après » dans la configuration de la vente auto. */
 .kp-autosell-expire {
+  margin-top: 7px;
+  border: 1px solid var(--kp-line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.kp-autosell-expire > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  color: var(--kp-muted);
+  font-size: 9.5px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.kp-autosell-expire > summary::-webkit-details-marker {
+  display: none;
+}
+
+.kp-autosell-expire > summary::before {
+  content: '▸';
+  color: var(--kp-muted);
+  font-size: 9px;
+  transition: transform 0.12s ease;
+}
+
+.kp-autosell-expire[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.kp-autosell-expire > summary span {
+  flex: 1;
+  color: var(--kp-text);
+  font-weight: 600;
+}
+
+.kp-autosell-expire > summary em {
+  color: var(--kp-muted);
+  font-style: normal;
+  font-size: 9px;
+}
+
+.kp-autosell-expire-body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 5px 6px;
-  margin-top: 7px;
-  padding: 6px 7px;
-  border: 1px solid var(--kp-line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
+  padding: 0 7px 7px;
 }
 
 .kp-autosell-expire .kp-check {
@@ -2421,6 +2684,24 @@ img.kp-avatar {
   margin-top: 4px;
   color: var(--kp-muted);
   font-size: 8px;
+}
+
+.kp-sales-excluded {
+  color: #fbbf24;
+}
+
+.kp-sales-empty {
+  display: grid;
+  place-items: center;
+  min-height: 96px;
+  margin: 12px 0;
+  padding: 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: var(--kp-muted);
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
 }
 
 /* Liste de l'onglet Vente */

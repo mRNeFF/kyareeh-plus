@@ -57,7 +57,7 @@
     var pingTimer = null;
     var lastSeen = 0;
     var closedByUser = false;
-    var profile = { name: opts.name, deck: opts.deck };
+    var profile = { name: opts.name, userId: opts.userId, deck: opts.deck };
 
     var net = {
       url: url,
@@ -91,6 +91,14 @@
       rematch: function () {
         send({ t: 'rematch' });
       },
+      /** Se déclarer prêt / pas prêt (synchronisé par le relais). */
+      ready: function (value) {
+        send({ t: 'ready', ready: Boolean(value) });
+      },
+      /** Accepter les conditions de la mise proposée par le créateur. */
+      betAccept: function (stake) {
+        send(stake ? { t: 'bet-accept', stake } : { t: 'bet-accept' });
+      },
       leave: function () {
         send({ t: 'leave' });
         resetRoom();
@@ -98,6 +106,7 @@
       /** Met à jour pseudo et/ou deck (renvoie un hello au serveur). */
       setProfile: function (p) {
         if (p && p.name !== undefined) profile.name = p.name;
+        if (p && p.userId !== undefined) profile.userId = p.userId;
         if (p && p.deck !== undefined) profile.deck = p.deck;
         send(hello());
       },
@@ -141,7 +150,7 @@
     }
 
     function hello() {
-      return { t: 'hello', v: PROTOCOL, name: profile.name, deck: profile.deck };
+      return { t: 'hello', v: PROTOCOL, name: profile.name, userId: profile.userId, deck: profile.deck };
     }
 
     function resetRoom() {

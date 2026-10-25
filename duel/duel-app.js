@@ -75,6 +75,20 @@
     forfeit: 'abandon',
     timeout: 'délai dépassé ou déconnexion prolongée'
   };
+  const RARITY_NAMES = {
+    C: 'Commune',
+    U: 'Peu commune',
+    R: 'Rare',
+    E: 'Épique',
+    L: 'Légendaire',
+    M: 'Mythique',
+    H: 'Héritage'
+  };
+
+  function rarityLabel(value) {
+    const key = String(value || '').toUpperCase();
+    return RARITY_NAMES[key] || key || '—';
+  }
   const NET_STATUS = {
     connecting: 'connexion…',
     open: 'connecté',
@@ -419,7 +433,18 @@
     series: 'all',
     type: 'all',
     ownedOnly: false,
-    profile: null, // { name, owned: Set, at, test }
+    profile: null, // { name, owned: Set, betCard, betEligible, at, test }
+    // Mise du salon : proposition du créateur, en mode test (aucun transfert).
+    betEnabled: false,
+    betReal: false,
+    betAmount: '',
+    betCard: null,
+    betEligible: 0,
+    betAccepted: false,
+    readyPending: null,
+    betAcceptPending: false,
+    betSettleSent: false,
+    betSettle: null, // { state:'pending'|'done'|'error', role, message }
     muted: false,
     volume: 0.7,
     match: null,
@@ -485,12 +510,19 @@
 
   function applyProfile(raw) {
     if (raw && typeof raw === 'object' && Array.isArray(raw.owned)) {
+      const card = raw.betCard && typeof raw.betCard === 'object' ? raw.betCard : null;
       app.profile = {
         name: String(raw.name || '').trim() || 'Joueur',
+        id: raw.id == null ? null : String(raw.id),
+        chakra: Number.isFinite(Number(raw.chakra)) ? Number(raw.chakra) : null,
         owned: new Set(raw.owned.map(String)),
+        betCard: card && card.id != null ? card : null,
+        betEligible: Math.max(0, Number(raw.betEligible) || 0),
         at: Number(raw.at) || null,
         test: false
       };
+      app.betCard = app.profile.betCard;
+      app.betEligible = app.profile.betEligible;
       return;
     }
     if (!HAS_EXT_STORAGE) {
@@ -498,13 +530,21 @@
       // Mythiques (comme le harness ?duel=1) pour pouvoir essayer le duel en ligne.
       app.profile = {
         name: 'Harness',
+        id: 'harness',
+        chakra: null,
         owned: new Set(cards().slice(0, 8).map((c) => String(c.id))),
+        betCard: null,
+        betEligible: 0,
         at: null,
         test: true
       };
+      app.betCard = null;
+      app.betEligible = 0;
       return;
     }
     app.profile = null;
+    app.betCard = null;
+    app.betEligible = 0;
   }
 
   async function loadProfile() {
@@ -831,6 +871,70 @@
     }
   }
 
+  /* --- Mise du salon : proposition, acceptation, états (aucun transfert) --- */
+
+  function roomBet(net = app.net) {
+    const bet = net && net.room && net.room.bet;
+    return bet && typeof bet === 'object' && bet.enabled ? bet : null;
+  }
+
+  function mySeat(net = app.net) {
+    const value = Number(net && (net.room?.you ?? net.you));
+    return value === 1 ? 1 : 0;
+  }
+
+  function myRoomPlayer(net = app.net) {
+    const list = Array.isArray(net && net.room && net.room.players) ? net.room.players : [];
+    const seat = mySeat(net);
+    return list.find((p) => p && Number(p.seat) === seat) || null;
+  }
+
+  function betAckOf(net = app.net, seat = mySeat(net)) {
+    const ack = net && net.room && Array.isArray(net.room.betAck) ? net.room.betAck : [];
+    return Boolean(ack[seat]);
+  }
+
+  function betDraftAmount() {
+    const value = Number(app.betAmount);
+    return Number.isFinite(value) && value >= 1 && Number.isInteger(value) ? value : null;
+  }
+
+  /** Pourquoi la mise ne peut pas être activée ? '' si tout est valide. */
+  function betDraftIssue() {
+    if (!app.betEnabled) return '';
+    if (!app.profile) return 'Collection indisponible : ouvre kyara.games avec Kyareeh+ pour choisir une contrepartie.';
+    if (!app.betCard) {
+      return app.betEligible > 0
+        ? 'Aucun doublon éligible : la carte proposée est verrouillée ou déjà en vente.'
+        : 'Aucun doublon éligible : il faut au moins deux exemplaires d’une carte non verrouillée.';
+    }
+    if (betDraftAmount() == null) return 'Saisis un montant de mise entier, supérieur ou égal à 1 ◆.';
+    return '';
+  }
+
+  function betConditionsText(bet) {
+    if (!bet) return '';
+    const card = bet.cardName || (app.betCard && app.betCard.name) || 'doublon';
+    return `◆ ${fmt(bet.amount)} + 1 personnage chacun (${card} côté créateur)`;
+  }
+
+  /** État lisible de la mise, dérivé uniquement de l'état du salon. */
+  function roomBetState(net = app.net) {
+    const bet = roomBet(net);
+    if (!bet) return null;
+    if (!net || !net.room) return 'en attente de confirmation';
+    if (net.room.status === 'playing') return 'duel en cours';
+    if (net.room.status === 'ended') return 'terminé';
+    if (net.peer === 'left') return 'annulé (adversaire parti)';
+    if (net.error) return 'échec / litige';
+    const ack = Array.isArray(net.room.betAck) ? net.room.betAck : [];
+    if (!ack[0] || !ack[1]) return 'en attente de confirmation';
+    const players = Array.isArray(net.room.players) ? net.room.players : [];
+    const ready = players.length >= 2 && players.every((p) => p && p.ready);
+    if (!ready) return 'en attente de l’échange';
+    return 'prêt';
+  }
+
   function connect(intent) {
     const N = netApi();
     if (!N) {
@@ -854,15 +958,46 @@
       notify(issue);
       return;
     }
+    if (intent.type === 'create' && app.betEnabled) {
+      const betIssue = betDraftIssue();
+      if (betIssue) {
+        app.relayError = betIssue;
+        render();
+        return;
+      }
+      intent.bet = {
+        enabled: true,
+        mode: app.betReal ? 'real' : 'test',
+        amount: betDraftAmount(),
+        cardId: String(app.betCard.id),
+        cardName: String(app.betCard.name || ''),
+        cardRarity: String(app.betCard.rarity || ''),
+        creator: {
+          amount: betDraftAmount(),
+          cardId: String(app.betCard.id),
+          cardName: String(app.betCard.name || ''),
+          cardRarity: String(app.betCard.rarity || '')
+        }
+      };
+    } else {
+      intent.bet = null;
+    }
     if (app.match && !isOver(app.match)) {
       notify('Un duel est en cours : termine-le ou abandonne-le d’abord.');
       return;
     }
     closeNet();
+    app.betSettleSent = false;
+    app.betSettle = null;
     const net = { client: null, status: 'connecting', relay, room: null, error: '', peer: '', intent, intentSent: false };
     app.net = net;
     try {
-      net.client = N.connect(relay, { name: playerName(), deck: deckIds(app.deck), onEvent: (msg) => onNet(net, msg) });
+      net.client = N.connect(relay, {
+        name: playerName(),
+        userId: app.profile?.id ?? null,
+        deck: deckIds(app.deck),
+        onEvent: (msg) => onNet(net, msg)
+      });
     } catch (err) {
       net.status = 'closed';
       net.error = `Connexion impossible : ${errText(err)}`;
@@ -876,7 +1011,7 @@
     net.intentSent = true;
     try {
       if (net.intent.type === 'join') net.client.join(net.intent.code);
-      else net.client.create();
+      else net.client.create(net.intent.bet ? { bet: net.intent.bet } : undefined);
     } catch (err) {
       net.error = `Envoi impossible : ${errText(err)}`;
     }
@@ -902,8 +1037,14 @@
         net.room = {
           code: String(msg.code || ''),
           players: Array.isArray(msg.players) ? msg.players : [],
-          status: String(msg.status || 'waiting')
+          status: String(msg.status || 'waiting'),
+          bet: msg.bet && typeof msg.bet === 'object' && msg.bet.enabled ? msg.bet : null,
+          betAck: Array.isArray(msg.betAck) ? msg.betAck : [false, false],
+          you: typeof msg.you === 'number' ? msg.you : net.you
         };
+        net.you = net.room.you;
+        app.readyPending = null;
+        app.betAcceptPending = false;
         if (net.room.status !== 'ended') net.rematchAsked = false;
         break;
       case 'state':
@@ -929,7 +1070,11 @@
               m.ended = { winner: msg.winner ?? null, reason: String(msg.reason || '') };
               m.deadlineAt = null;
               m.submitted = false;
-              if (!wasOver) endSound(m);
+              if (!wasOver) {
+                endSound(m);
+                const winner = msg.winner === 0 || msg.winner === 1 ? msg.winner : null;
+                setTimeout(() => settleBetAfterEnd(winner), 700);
+              }
             }
             if (net.room) net.room.status = 'ended';
             render();
@@ -938,6 +1083,8 @@
         return;
       case 'error':
         net.error = String(msg.message || msg.code || 'Erreur du relais.');
+        app.readyPending = null;
+        app.betAcceptPending = false;
         if (match) {
           match.submitted = false;
           match.error = net.error;
@@ -959,6 +1106,8 @@
     if (!match || match.kind !== 'online' || match.net !== net || (fresh && isOver(match))) {
       match = newMatch('online', msg.state, { net });
       app.match = match;
+      app.betSettleSent = false;
+      app.betSettle = null;
       app.screen = 'combat';
       match.you = msg.you === 1 ? 1 : 0;
       if (!Array.isArray(msg.events) || !msg.events.length) seedLog(match);
@@ -988,8 +1137,64 @@
     }
   }
 
-  function rematch() {
+  /**
+   * Fin de duel : si une mise réelle a été acceptée, prévient le panneau pour
+   * qu'il exécute le règlement (le perdant crée le don, le gagnant l'accepte).
+   * Aucun appel réseau n'est fait ici : la session Kyara est dans le panneau.
+   */
+  function settleBetAfterEnd(winner) {
     const net = app.net;
+    const room = net && net.room;
+    const bet = roomBet(net);
+    if (!bet || bet.mode !== 'real' || app.betSettleSent) return;
+    if (winner !== 0 && winner !== 1) {
+      app.betSettle = { state: 'test', message: 'Match nul : aucune mise transférée.' };
+      render();
+      return;
+    }
+    if (!bet.stakes?.creator || !bet.stakes?.joiner) {
+      app.betSettle = { state: 'error', message: 'Mise incomplète : les deux contreparties ne sont pas enregistrées.' };
+      render();
+      return;
+    }
+    const you = Number(net.you);
+    if (you !== 0 && you !== 1) return;
+    const loser = 1 - winner;
+    const role = you === loser ? 'pay' : 'receive';
+    const opponent = (room.players || []).find((p) => p && Number(p.seat) === 1 - you);
+    const myStake = bet.stakes[you === 0 ? 'creator' : 'joiner'];
+    const opponentStake = bet.stakes[you === 0 ? 'joiner' : 'creator'];
+    if (!opponent?.userId) {
+      app.betSettle = { state: 'error', message: 'Identifiant Kyara de l’adversaire indisponible : mise non réglée.' };
+      render();
+      return;
+    }
+    app.betSettleSent = true;
+    app.betSettle = { state: 'pending', role, message: role === 'pay' ? 'Envoi de la mise…' : 'Attente de la mise…' };
+    render();
+    try {
+      window.parent.postMessage(
+        {
+          type: 'kp-duel-bet-settle',
+          role,
+          mode: 'real',
+          bet,
+          myStake,
+          opponentStake,
+          opponentUserId: opponent.userId,
+          myUserId: app.profile?.id ?? null,
+          roomCode: room.code,
+          settleId: `${room.code}:${room.seq}:${winner}`
+        },
+        '*'
+      );
+    } catch {
+      app.betSettle = { state: 'error', message: 'Impossible de contacter le panneau pour la mise.' };
+      render();
+    }
+  }
+
+  function rematch() {    const net = app.net;
     const client = net && net.client;
     if (
       client &&
@@ -1612,6 +1817,13 @@
     const live = app.match && !isOver(app.match);
     const issue = onlineDeckIssue();
     const net = app.net;
+    const betIssue = betDraftIssue();
+    const bet = roomBet(net);
+    const betState = roomBetState(net);
+    const seat = mySeat(net);
+    const me = myRoomPlayer(net);
+    const iAmReady = app.readyPending != null ? Boolean(app.readyPending) : Boolean(me && me.ready);
+    const betNeedsAck = Boolean(bet && !betAckOf(net, seat));
     const resume = live
       ? `<div class="kd-resume"><span>Un duel ${app.match.kind === 'practice' ? 'd’entraînement' : 'en ligne'} est en cours.</span><button class="kd-btn is-primary" type="button" data-act="screen" data-screen="combat">Reprendre le combat</button></div>`
       : '';
@@ -1621,13 +1833,76 @@
         ? `<p class="kd-note">Ton équipe compte ${fmt(app.deck.length)}/${DECK_SIZE} Mythiques : elle sera complétée au hasard pour cette partie.</p>`
         : '<p class="kd-note">Toutes les Mythiques sont permises, possédées ou non. La partie se joue dans ton navigateur, sans relais.</p>';
 
+    const betCard = app.betCard;
+    const betCardHtml = betCard
+      ? `<div class="kd-bet-card">
+          ${
+            /^https?:\/\//i.test(String(betCard.image || ''))
+              ? `<img src="${esc(betCard.image)}" alt="">`
+              : '<span class="kd-bet-card-ph" aria-hidden="true">◆</span>'
+          }
+          <div>
+            <b>${esc(betCard.name)}</b>
+            <small>${esc(betCard.rarity ? rarityLabel(betCard.rarity) : 'Doublon')} · ${fmt(betCard.copies)} exemplaire(s)${
+              betCard.score != null ? ` · score ${fmt(betCard.score)}/100` : ''
+            }</small>
+            <small>Dernier doublon du classement de la vente auto — la carte la moins prioritaire.</small>
+            ${
+              app.profile && app.profile.at
+                ? `<small>Vérifié à ${new Date(app.profile.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.</small>`
+                : ''
+            }
+          </div>
+        </div>`
+      : `<div class="kd-bet-empty">Aucun doublon éligible : la mise ne peut pas être activée. Il faut au moins deux exemplaires d’une carte non verrouillée, non déjà en vente et non bloquée à l’échange.</div>`;
+
+    const betCreate = `<div class="kd-bet-create ${app.betEnabled ? 'is-on' : ''}">
+        <label class="kd-check"><input type="checkbox" data-role="bet-enabled" ${app.betEnabled ? 'checked' : ''}> Activer la mise <span class="kd-bet-test">${app.betReal ? 'réel' : 'test'}</span></label>
+        ${
+          app.betEnabled
+            ? `<div class="kd-bet-fields">
+                 <label class="kd-check kd-bet-real"><input type="checkbox" data-role="bet-real" ${app.betReal ? 'checked' : ''}> <span>Régler réellement à la fin <small>le perdant envoie son montant + sa carte au gagnant via l’échange du site</small></span></label>
+                 <label class="kd-lbl">Montant de la mise (◆)
+                   <input type="number" min="1" step="1" inputmode="numeric" data-role="bet-amount" value="${esc(app.betAmount)}" placeholder="ex. 500">
+                 </label>
+                 ${betCardHtml}
+                 <p class="kd-note ${betIssue ? 'is-bad' : ''}">${
+                   betIssue ||
+                   `Conditions proposées : <b>◆ ${fmt(betDraftAmount())}</b> + <b>${esc(
+                     betCard ? betCard.name : 'un doublon'
+                   )}</b>. L’adversaire devra accepter ces conditions avant de pouvoir se déclarer prêt.`
+                 }</p>
+                 ${
+                   app.betReal
+                     ? `<p class="kd-note is-warn">Règlement réel : à la fin du duel, le perdant envoie <b>◆ ${fmt(
+                         betDraftAmount()
+                       )} + ${esc(betCard ? betCard.name : 'sa carte')}</b> au gagnant via une proposition d’échange. Le site vérifie son plafond de dons ; aucun transfert n’est forcé si le plafond est atteint.</p>`
+                     : `<p class="kd-note is-warn">Aucun transfert : mode test. La mise est un engagement affiché et horodaté.</p>`
+                 }
+                 <p class="kd-note">Chaque joueur fournit sa propre contrepartie (dernier doublon de son classement). Le site compte la valeur de la carte dans le don.</p>
+               </div>`
+            : ''
+        }
+      </div>`;
+
     let room = '';
     if (net) {
       const status = netStatus(net);
       const players = ((net.room && net.room.players) || [])
-        .map((p) => `<li><b>${esc((p && p.name) || '—')}</b><span class="${p && p.ready ? 'is-ok' : ''}">${p && p.ready ? 'prêt' : 'en attente'}</span></li>`)
+        .map((p) => {
+          const ready = app.readyPending != null && mySeat(net) === p.seat ? app.readyPending : p && p.ready;
+          return `<li data-seat="${fmt(p && p.seat)}"><b>${esc((p && p.name) || '—')}</b><span class="${
+            ready ? 'is-ok' : 'is-bad'
+          }">${ready ? 'Prêt' : 'Pas prêt'}</span></li>`;
+        })
         .join('');
-      const roomStatus = { waiting: 'en attente d’un adversaire', playing: 'duel en cours', ended: 'terminé' }[net.room && net.room.status] || '';
+      const bothSeats = ((net.room && net.room.players) || []).length >= 2;
+      const roomStatus =
+        net.room && net.room.status === 'waiting'
+          ? bothSeats
+            ? 'en attente des deux états prêts'
+            : 'en attente d’un adversaire'
+          : { playing: 'duel en cours', ended: 'terminé' }[net.room && net.room.status] || '';
       room = `<div class="kd-room">
           <div class="kd-room-line">
             <span>Relais : <b class="kd-netstatus" data-role="net-status" data-status="${esc(status)}">${esc(NET_STATUS[status])}</b></span>
@@ -1637,7 +1912,75 @@
             net.room && net.room.code
               ? `<div class="kd-code"><span>Code du salon</span><b>${esc(net.room.code)}</b><button class="kd-btn is-small" type="button" data-act="copy-code">Copier</button></div>
                  <p class="kd-note">Salon ${esc(roomStatus)}.</p>
-                 <ul class="kd-players">${players}</ul>`
+                 <ul class="kd-players">${players}</ul>
+                 ${
+                   net.room.status === 'waiting'
+                     ? `<div class="kd-ready-row">
+                          <button class="kd-readyswitch ${iAmReady ? 'is-ready' : 'is-not-ready'}" type="button" data-act="toggle-ready" aria-pressed="${iAmReady}" ${
+                            betNeedsAck ? 'disabled' : ''
+                          }>
+                            <span class="kd-ready-dot" aria-hidden="true"></span>
+                            <b>${iAmReady ? 'Prêt' : 'Pas prêt'}</b>
+                          </button>
+                          <small>${
+                            betNeedsAck
+                              ? 'Accepte d’abord les conditions de la mise.'
+                              : bothSeats
+                                ? 'L’état est synchronisé : le duel démarre quand les deux joueurs sont prêts.'
+                                : 'En attente d’un adversaire. Ton état sera synchronisé avec lui.'
+                          }</small>
+                        </div>`
+                     : ''
+                 }
+                 ${
+                   bet
+                     ? `<div class="kd-bet">
+                          <div class="kd-bet-head"><b>Mise · ${bet.mode === 'real' ? 'règlement réel' : 'mode test'}</b><span class="kd-bet-state is-${esc(
+                            String(betState || '').replace(/[^a-z]/g, '-')
+                          )}">${esc(betState)}</span></div>
+                          <p class="kd-bet-terms">${esc(betConditionsText(bet))}</p>
+                          <p class="kd-note">${
+                            bet.mode === 'real'
+                              ? 'À la fin, le perdant envoie son montant + sa carte au gagnant via une proposition d’échange. Le site vérifie son plafond de dons ; tout refus laisse la mise non réglée.'
+                              : 'Aucun transfert : mode test. La mise est un engagement affiché, horodaté et non payé.'
+                          }</p>
+                          ${
+                            bet.stakes?.joiner
+                              ? `<p class="kd-bet-stakes">Créateur : ◆ ${fmt(bet.stakes.creator?.amount)} + ${esc(
+                                  bet.stakes.creator?.cardName ?? '—'
+                                )}<br>Adversaire : ◆ ${fmt(bet.stakes.joiner?.amount)} + ${esc(
+                                  bet.stakes.joiner?.cardName ?? '—'
+                                )}</p>`
+                              : ''
+                          }
+                          ${
+                            app.betSettle
+                              ? `<p class="kd-note ${app.betSettle.state === 'error' ? 'is-bad' : app.betSettle.state === 'done' ? 'is-ok' : 'is-warn'}">${esc(
+                                  app.betSettle.message || ''
+                                )}</p>`
+                              : ''
+                          }
+                          ${
+                            betNeedsAck
+                              ? `<div class="kd-bet-mine">
+                                   <b>Ta contrepartie</b>
+                                   <span>${esc(app.betCard?.name ?? 'Aucun doublon éligible')}</span>
+                                   <small>Dernier doublon de ton classement vente auto. Si tu perds, tu envoies ◆ ${fmt(
+                                     bet.amount
+                                   )} + cette carte au gagnant${bet.mode === 'real' ? '' : ' (mode test : aucun envoi)'}.</small>
+                                 </div>`
+                              : ''
+                          }
+                          ${
+                            betNeedsAck
+                              ? `<button class="kd-btn is-primary" type="button" data-act="bet-accept" ${
+                                  app.betAcceptPending || !app.betCard ? 'disabled' : ''
+                                }>${app.betAcceptPending ? 'Envoi…' : 'J’accepte les conditions'}</button>`
+                              : `<span class="kd-bet-ok">Conditions acceptées${seat === 0 ? ' · tu es le créateur' : ''}</span>`
+                          }
+                        </div>`
+                     : ''
+                 }`
               : net.error
                 ? ''
                 : `<p class="kd-note">${net.intent && net.intent.type === 'join' ? `Connexion au salon ${esc(net.intent.code)}…` : 'Création du salon…'}</p>`
@@ -1669,20 +2012,29 @@
             <h2>En ligne</h2>
             <p class="kd-lede">Crée un salon et partage son code de 5 lettres, ou rejoins celui d’un ami.</p>
             ${room}
-            <label class="kd-lbl">Adresse du relais
-              <input data-role="relay" placeholder="wss://…" value="${esc(app.relay)}" spellcheck="false" autocomplete="off">
-            </label>
             ${
-              relayConfigured()
+              net
                 ? ''
-                : '<p class="kd-note is-warn">Aucun serveur de jeu configuré : le duel en ligne a besoin de l’adresse d’un relais <b>wss://…</b> (serveur du dépôt, dossier <code>relay/</code>). L’entraînement contre l’IA reste disponible.</p>'
+                : `<label class="kd-lbl">Adresse du relais
+                     <input data-role="relay" placeholder="wss://…" value="${esc(app.relay)}" spellcheck="false" autocomplete="off">
+                   </label>
+                   ${
+                     relayConfigured()
+                       ? ''
+                       : '<p class="kd-note is-warn">Aucun serveur de jeu configuré : le duel en ligne a besoin de l’adresse d’un relais <b>wss://…</b> (serveur du dépôt, dossier <code>relay/</code>). L’entraînement contre l’IA reste disponible.</p>'
+                   }`
             }
+            ${net ? '' : betCreate}
             ${app.relayError ? `<p class="kd-note is-bad">${esc(app.relayError)}</p>` : ''}
-            <div class="kd-row">
-              <button class="kd-btn is-primary" type="button" data-act="create" ${N && !live ? '' : 'disabled'}>Créer un salon</button>
-              <input class="kd-codein" data-role="code" placeholder="CODE" maxlength="5" value="${esc(app.code)}" spellcheck="false" autocomplete="off" aria-label="Code du salon">
-              <button class="kd-btn" type="button" data-act="join" ${N && !live ? '' : 'disabled'}>Rejoindre</button>
-            </div>
+            ${
+              net
+                ? ''
+                : `<div class="kd-row">
+                     <button class="kd-btn is-primary" type="button" data-act="create" ${N && !live ? '' : 'disabled'}>Créer un salon</button>
+                     <input class="kd-codein" data-role="code" placeholder="CODE" maxlength="5" value="${esc(app.code)}" spellcheck="false" autocomplete="off" aria-label="Code du salon">
+                     <button class="kd-btn" type="button" data-act="join" ${N && !live ? '' : 'disabled'}>Rejoindre</button>
+                   </div>`
+            }
             ${N ? '' : '<p class="kd-note is-bad">Client réseau non chargé (content/duel-net.js) : duel en ligne indisponible.</p>'}
           </article>
         </div>
@@ -1903,6 +2255,13 @@
     if (over) {
       const waiting = match.kind === 'online' && app.net && app.net.rematchAsked;
       return `<div class="kd-say"><p id="kd-say-text">${esc((match.log[match.log.length - 1] || {}).text || 'Duel terminé.')}</p></div>
+        ${
+          app.betSettle
+            ? `<p class="kd-note ${app.betSettle.state === 'error' ? 'is-bad' : app.betSettle.state === 'done' ? 'is-ok' : 'is-warn'}">${esc(
+                app.betSettle.message || ''
+              )}</p>`
+            : ''
+        }
         <div class="kd-menu is-end">
           <button class="kd-btn is-primary is-big" type="button" data-act="replay" ${waiting ? 'disabled' : ''}>${match.kind === 'online' ? (waiting ? 'Revanche demandée…' : 'Revanche') : 'Rejouer'}</button>
           <button class="kd-btn" type="button" data-act="lobby">Retour au salon</button>
@@ -2230,6 +2589,49 @@
       case 'create':
         connect({ type: 'create' });
         break;
+      case 'toggle-ready': {
+        const net = app.net;
+        if (!net || !net.client || !net.room || net.room.status !== 'waiting') break;
+        if (roomBet(net) && !betAckOf(net)) {
+          notify('Accepte d’abord les conditions de la mise.');
+          break;
+        }
+        const me = myRoomPlayer(net);
+        const next = !(app.readyPending != null ? app.readyPending : Boolean(me && me.ready));
+        app.readyPending = next;
+        render();
+        try {
+          net.client.ready(next);
+        } catch {
+          app.readyPending = null;
+          render();
+        }
+        break;
+      }
+      case 'bet-accept': {
+        const net = app.net;
+        const bet = roomBet(net);
+        if (!net || !net.client || !bet || betAckOf(net)) break;
+        if (!app.betCard) {
+          notify('Aucun doublon éligible pour ta contrepartie : la mise ne peut pas être acceptée.');
+          break;
+        }
+        const stake = {
+          amount: Math.max(1, Math.round(Number(bet.amount) || 0)),
+          cardId: String(app.betCard.id),
+          cardName: String(app.betCard.name || ''),
+          cardRarity: String(app.betCard.rarity || '')
+        };
+        app.betAcceptPending = true;
+        render();
+        try {
+          net.client.betAccept(stake);
+        } catch {
+          app.betAcceptPending = false;
+          render();
+        }
+        break;
+      }
       case 'join': {
         const input = $('[data-role="code"]');
         if (input) app.code = String(input.value || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
@@ -2363,6 +2765,9 @@
       const clean = String(t.value || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
       if (clean !== t.value) t.value = clean;
       app.code = clean;
+    } else if (role === 'bet-amount') {
+      app.betAmount = String(t.value || '').replace(/[^0-9]/g, '').slice(0, 9);
+      if (app.betAmount !== t.value) t.value = app.betAmount;
     }
   }
 
@@ -2372,7 +2777,15 @@
     if (role === 'series') app.series = t.value;
     else if (role === 'type') app.type = t.value;
     else if (role === 'owned') app.ownedOnly = Boolean(t.checked);
-    else return;
+    else if (role === 'bet-enabled') {
+      app.betEnabled = Boolean(t.checked);
+      app.relayError = '';
+    } else if (role === 'bet-real') {
+      app.betReal = Boolean(t.checked);
+      app.relayError = '';
+    } else if (role === 'bet-amount') {
+      app.betAmount = String(t.value || '').replace(/[^0-9]/g, '').slice(0, 9);
+    } else return;
     render();
   }
 
@@ -2446,6 +2859,19 @@
     root.addEventListener('input', onInput);
     root.addEventListener('change', onChange);
     document.addEventListener('keydown', onKey);
+    window.addEventListener('message', (event) => {
+      if (event.source !== window.parent) return;
+      const data = event.data;
+      if (!data || data.type !== 'kp-duel-bet-settled') return;
+      app.betSettle = {
+        state: data.ok ? 'done' : data.skipped ? 'test' : 'error',
+        role: data.role || app.betSettle?.role || null,
+        tradeId: data.tradeId || null,
+        message: String(data.message || data.error || '')
+      };
+      if (app.betSettle.message) notify(app.betSettle.message);
+      render();
+    });
     setInterval(tick, 1000);
     // Sauvegarde de l'entraînement en cours (Détacher / Rattacher du panneau, rechargement).
     window.addEventListener('pagehide', () => savePractice(app.match));

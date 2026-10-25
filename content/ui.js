@@ -101,6 +101,9 @@
     autoSellRefreshMaxMin: 10,
     autoSellIncludeM: false,
     autoSellDryRun: false,
+    // Nombre maximum d'annonces actives de la vente auto (1 à 10, places déjà
+    // occupées comprises). À 9, un emplacement reste toujours libre.
+    autoSellMaxActive: 10,
     // Retrait des annonces de la vente auto restées en ligne au-delà de X.
     // Désactivé par défaut : rien ne change tant que l'option n'est pas cochée.
     autoSellExpireEnabled: false,
@@ -299,6 +302,8 @@
     priceRun: { running: false, done: 0, total: 0, startedAt: 0 },
     lastSync: 0,
     tab: 'account',
+    // Onglet de retour après Debug (ouvert depuis l'en-tête, sans onglet dédié).
+    debugReturnTab: 'account',
     query: '',
     selected: new Set(),
     sell: null,
@@ -498,13 +503,14 @@
           <nav class="kp-modes" id="kp-modes"></nav>
           <div class="kp-brand">
             <span class="kp-logo"><img src="${esc(LOGO_URL)}" alt=""></span>
-            <div><b>Kyareeh+</b><small>chakra &amp; doublons</small></div>
+            <div><b>Kyareeh+</b></div>
           </div>
           <div class="kp-head-actions">
             <span class="kp-sound">
               <button class="kp-icon-btn" id="kp-sound-btn" type="button" data-act="sound-mute" aria-pressed="false" title="Couper le son">🔊</button>
               <input class="kp-volume" id="kp-sound-range" type="range" min="0" max="100" step="5" value="70" data-role="sound-volume" aria-label="Volume global">
             </span>
+            <button class="kp-icon-btn kp-debug-btn" type="button" data-act="debug-open" title="Debug — diagnostic, versions et requêtes" aria-label="Ouvrir Debug">Debug</button>
             <button class="kp-icon-btn" type="button" data-act="refresh" title="Rafraîchir les données">⟳</button>
             <button class="kp-icon-btn" type="button" data-act="close" title="${IS_PANEL ? 'Rattacher (fermer cette fenêtre)' : 'Fermer'}">✕</button>
           </div>
@@ -1022,6 +1028,11 @@
     state.settings.autoSellIncludeM = Boolean(state.settings.autoSellIncludeM);
     delete state.settings.autoSellIncludeML;
     state.settings.autoSellDryRun = Boolean(state.settings.autoSellDryRun);
+    // Limite d'annonces simultanées de la vente auto : persistée, bornée 1–10.
+    state.settings.autoSellMaxActive = autoSellMaxActive(
+      state.settings.autoSellMaxActive,
+      DEFAULT_SETTINGS.autoSellMaxActive
+    );
     // Retrait des annonces trop anciennes : valeur validée et bornée, conservée
     // telle quelle entre les sessions (clé `kyaraplus.settings.v2`).
     const expireSettings = autoSellExpireSettings({
@@ -1221,6 +1232,9 @@
       } else if (Array.isArray(chars?.items)) {
         state.characters = new Map(chars.items.map((c) => [String(c.id), c]));
       }
+      // Les noms/raretés sont maintenant connus : la contrepartie de mise peut
+      // être classée avec le même barème que la vente auto.
+      publishDuelProfile();
 
       state.config = config;
       state.access = access;
@@ -1457,6 +1471,7 @@
 
     state.priceRun.running = false;
     persistPricesSoon();
+    publishDuelProfile();
     render();
   }
 
@@ -2065,6 +2080,147 @@
     return Number.isFinite(price) && price > 0 ? Math.max(1, Math.round(price)) : null;
   }
 
+  /* --- Limite d'annonces simultanées de la vente auto -------------------- */
+
+  const AUTOSELL_MAX_ACTIVE_MIN = 1;
+  const AUTOSELL_MAX_ACTIVE_MAX = 10;
+  const AUTOSELL_MAX_ACTIVE_DEFAULT = 10;
+
+  /**
+   * Limite choisie par l'utilisateur (1 à 10). Elle plafonne les annonces
+   * actives de la vente auto, **places déjà occupées comprises** : à 9, la
+   * boucle s'arrête à 9 annonces et laisse toujours un emplacement libre.
+   */
+  function autoSellMaxActive(raw, fallback = AUTOSELL_MAX_ACTIVE_DEFAULT) {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(AUTOSELL_MAX_ACTIVE_MAX, Math.max(AUTOSELL_MAX_ACTIVE_MIN, Math.floor(value)));
+  }
+
+  /**
+   * Places de la vente auto : le minimum entre la limite choisie et la limite
+   * réelle du site. `active` compte toutes les annonces actives (manuelles
+   * comprises), car elles occupent les mêmes emplacements.
+   */
+  function autoSellSlotsOf(active, limit, siteMax = AUTOSELL_MAX_ACTIVE_DEFAULT) {
+    const site = Number.isFinite(Number(siteMax)) && Number(siteMax) > 0
+      ? Math.floor(Number(siteMax))
+      : AUTOSELL_MAX_ACTIVE_DEFAULT;
+    const max = Math.min(site, autoSellMaxActive(limit));
+    const used = Math.max(0, Math.floor(Number(active) || 0));
+    return { max, active: used, remaining: Math.max(0, max - used), siteMax: site };
+  }
+
+  /* --- Mise du duel : contrepartie (doublon éligible) ------------------- */
+
+  /**
+   * Un doublon peut-il servir de contrepartie ? Ni carte verrouillée, ni
+   * dernière copie, ni exemplaire déjà en vente / engagé dans un échange, ni
+   * carte bloquée pour revente récente (48 h).
+   */
+  function duelBetEligible(row) {
+    if (!row) return false;
+    const qty = Math.max(0, Number(row.qty) || 0);
+    if (qty < 2) return false;
+    if (row.pinned) return false;
+    if (row.sellBlock) return false;
+    return autoSellSpare(row, row.activeQty) > 0;
+  }
+
+  /**
+   * Contrepartie proposée : le **dernier** doublon du classement de la vente
+   * auto (score le plus faible), pour minimiser la perte. Aucune donnée
+   * inventée : sans doublon éligible, renvoie null.
+   */
+  function duelBetPick(rows) {
+    const list = (Array.isArray(rows) ? rows : [])
+      .map((row) => ({ ...row, activeQty: Math.max(0, Number(row?.activeQty) || 0) }))
+      .filter((row) => duelBetEligible(row));
+    if (!list.length) return null;
+    const ranked = autoSellRank(list, { now: Date.now() });
+    return ranked.length ? ranked[ranked.length - 1] : null;
+  }
+
+  /** Montant de mise valide : entier strictement positif, sans plafond inventé. */
+  function duelBetAmount(raw) {
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 1 && Number.isInteger(value) ? value : null;
+  }
+
+  /**
+   * Corps exact de `POST /api/trades` pour régler une mise : le perdant donne
+   * son chakra + son personnage, sans rien demander en retour. Le serveur du
+   * site applique lui-même le plafond de dons ; on ne code aucune limite en dur.
+   */
+  function duelBetTradePayload({ toUserId, amount, cardId, message } = {}) {
+    const chakra = Math.max(0, Math.round(Number(amount) || 0));
+    const cards = cardId == null || cardId === ''
+      ? []
+      : [{ characterId: cardId, qty: 1 }];
+    return {
+      toUserId,
+      give: { cards, chakra },
+      want: { cards: [], chakra: 0 },
+      ...(message ? { message: String(message).slice(0, 240) } : {})
+    };
+  }
+
+  /**
+   * Retrouve une proposition correspondant exactement à la mise, dans
+   * `incoming` ou `outgoing` de `/api/me/trades`. Aucune correspondance
+   * approximative : un mauvais trade ne doit jamais être accepté.
+   *
+   * Le camp qui reçoit ne doit rien donner en retour (`give` vide pour un
+   * sortant, `want` vide pour un entrant, car l'API normalise selon le lecteur),
+   * et la carte donnée doit être exactement celle de la mise, en un seul
+   * exemplaire : sinon un adversaire pourrait glisser une autre carte.
+   */
+  function duelBetTradeMatch(trades, { userId, amount, cardId, direction = 'incoming', tag = '' } = {}) {
+    const list = Array.isArray(trades)
+      ? trades
+      : Array.isArray(trades?.[direction])
+        ? trades[direction]
+        : [];
+    const wantedAmount = Math.round(Number(amount) || 0);
+    const wantedCard = cardId == null ? '' : String(cardId);
+    const wantedTag = String(tag || '');
+    const incoming = direction === 'incoming';
+    return (
+      list.find((trade) => {
+        if (!trade || trade.status !== 'pending') return false;
+        if (wantedTag && !String(trade.message || '').includes(wantedTag)) return false;
+        const other = incoming ? trade.from : trade.to;
+        const otherId = other?.id ?? trade.fromUserId ?? trade.toUserId;
+        if (userId != null && String(otherId) !== String(userId)) return false;
+        // `/api/me/trades` est stocké du point de vue de l'**envoyeur** :
+        // `give` = ce que le perdant donne, `want` = ce qu'il demande en retour.
+        // On refuse tout retour, et on exige exactement la carte de la mise.
+        const wantCards = Array.isArray(trade.want?.cards) ? trade.want.cards : [];
+        if (Math.round(Number(trade.want?.chakra) || 0) !== 0 || wantCards.length) return false;
+        if (Math.round(Number(trade.give?.chakra) || 0) !== wantedAmount) return false;
+        const cards = Array.isArray(trade.give?.cards) ? trade.give.cards : [];
+        return (
+          cards.length === 1 &&
+          String(cards[0]?.characterId) === wantedCard &&
+          Math.max(0, Math.floor(Number(cards[0]?.qty) || 0)) === 1
+        );
+      }) ?? null
+    );
+  }
+
+  /**
+   * Contrôle local du plafond de dons renvoyé par `GET /api/fair-play/with/:id`.
+   * Le serveur reste l'autorité : ce contrôle évite seulement un appel inutile.
+   */
+  function duelBetFairCheck(fair, amount) {
+    if (!fair || typeof fair !== 'object') return 'unknown';
+    if (fair.enabled === false) return 'disabled';
+    const left = Number(fair.giveLeft);
+    const wanted = Math.max(0, Math.round(Number(amount) || 0));
+    if (Number.isFinite(left) && wanted > left) return 'over';
+    return '';
+  }
+
   /* --- Remise en vente automatique d'une annonce revenue sans acheteur ------ */
 
   /** Délai minimal entre deux remises en vente automatiques d'une même carte. */
@@ -2540,24 +2696,53 @@
     return { gross: value, fees, tax, net: Math.max(0, value - fees - tax) };
   }
 
+  /**
+   * Origine d'une vente. Le champ `source` est enregistré dès qu'une annonce est
+   * suivie (`auto` pour la vente automatique, `manual` pour une mise en vente
+   * faite à la main). Les toutes premières entrées n'avaient pas ce champ : on
+   * ne les classe **jamais** d'office en manuel — elles restent `unknown` et
+   * sont exclues du graphique de la vente auto (aucune donnée inventée).
+   */
+  function salesSourceOf(entry) {
+    const raw = String(entry?.source ?? '').trim().toLowerCase();
+    return raw === 'auto' || raw === 'manual' ? raw : 'unknown';
+  }
+
   function salesLedgerTotals(log) {
-    const totals = { gross: 0, fees: 0, tax: 0, net: 0, count: 0, matched: 0, auto: 0, manual: 0, autoNet: 0, manualNet: 0 };
+    const totals = {
+      gross: 0,
+      fees: 0,
+      tax: 0,
+      net: 0,
+      count: 0,
+      matched: 0,
+      auto: 0,
+      manual: 0,
+      unknown: 0,
+      autoNet: 0,
+      manualNet: 0,
+      unknownNet: 0
+    };
     for (const entry of Array.isArray(log) ? log : []) {
       const gross = Math.max(0, Number(entry?.gross) || 0);
       const fees = Math.max(0, Number(entry?.fees) || 0);
       const tax = Math.max(0, Number(entry?.tax) || 0);
       const net = Math.max(0, Number(entry?.net) || 0);
+      const source = salesSourceOf(entry);
       totals.gross += gross;
       totals.fees += fees;
       totals.tax += tax;
       totals.net += net;
       totals.count += 1;
-      if (entry?.source === 'auto') {
+      if (source === 'auto') {
         totals.auto += 1;
         totals.autoNet += net;
-      } else {
+      } else if (source === 'manual') {
         totals.manual += 1;
         totals.manualNet += net;
+      } else {
+        totals.unknown += 1;
+        totals.unknownNet += net;
       }
       if (entry?.matched) totals.matched += 1;
     }
@@ -2609,7 +2794,7 @@
       rarity: String(track.rarity ?? ''),
       characterId: track.characterId ?? null,
       accountId: track.accountId ?? null,
-      source: track.source === 'auto' ? 'auto' : 'manual',
+      source: salesSourceOf(track),
       matched: false,
       ...profit
     };
@@ -2776,19 +2961,26 @@
    * Profit réalisé **cumulé** par tranche horaire sur la fenêtre demandée
    * (`1d`, `7d`, `total`). Chaque point porte le cumul et les ventes de la
    * tranche (nom, heure, profit) pour l'infobulle.
+   *
+   * Par défaut, seules les ventes **automatiques** sont prises en compte :
+   * le graphique de la vente auto ne doit jamais être faussé par une vente
+   * faite à la main. `options.source = 'all'` n'est utilisé que par les tests.
    */
   function salesChartSeries(log, now = Date.now(), range = '7d', options = {}) {
     const normalized = ['1d', '7d', 'total'].includes(range) ? range : '7d';
     const accountId = options.accountId == null ? null : String(options.accountId);
+    const wantedSource = options.source === 'all' ? 'all' : 'auto';
     const hour = 3600000;
     const current = new Date(Number(now) || Date.now());
     current.setMinutes(0, 0, 0);
     const lastAt = current.getTime();
-    const entries = (Array.isArray(log) ? log : [])
-      .map((entry) => ({ ...entry, at: Number(entry?.at) }))
+    const allEntries = (Array.isArray(log) ? log : [])
+      .map((entry) => ({ ...entry, at: Number(entry?.at), source: salesSourceOf(entry) }))
       .filter((entry) => Number.isFinite(entry.at) && entry.at <= now)
       // Les ventes d'un autre compte ne polluent pas la courbe du compte courant.
       .filter((entry) => !accountId || entry.accountId == null || String(entry.accountId) === accountId);
+    const entries =
+      wantedSource === 'all' ? allEntries : allEntries.filter((entry) => entry.source === wantedSource);
 
     let startAt;
     let stepHours = 1;
@@ -2805,6 +2997,18 @@
       // « Total » peut couvrir des mois : on garde au plus ~720 points,
       // toujours par pas d'heures entières.
       stepHours = Math.max(1, Math.ceil(spanHours / 720));
+    }
+
+    // Ce qui a été volontairement écarté de la courbe, pour l'expliquer sans
+    // jamais le faire disparaître silencieusement.
+    let excludedManual = 0;
+    let excludedUnknown = 0;
+    if (wantedSource !== 'all') {
+      for (const entry of allEntries) {
+        if (entry.at < startAt) continue;
+        if (entry.source === 'manual') excludedManual += 1;
+        else if (entry.source === 'unknown') excludedUnknown += 1;
+      }
     }
 
     const count = Math.max(1, Math.floor((lastAt - startAt) / (hour * stepHours)) + 1);
@@ -2861,6 +3065,9 @@
       tax,
       count: included,
       matched,
+      source: wantedSource,
+      excludedManual,
+      excludedUnknown,
       stepHours,
       startAt,
       lastAt
@@ -3183,7 +3390,7 @@
     // La fenêtre détachée est toujours ouverte : fermer le panneau de la page ne doit jamais
     // la vider (c'était la panne « Détacher ne marche plus »).
     if (!IS_PANEL && typeof raw.open === 'boolean') state.open = raw.open;
-    if (typeof raw.tab === 'string' && raw.tab) state.tab = raw.tab;
+    if (typeof raw.tab === 'string' && raw.tab && raw.tab !== 'debug') state.tab = raw.tab;
     render();
   }
 
@@ -3207,7 +3414,7 @@
     if (uiSaveTimer) clearTimeout(uiSaveTimer);
     uiSaveTimer = setTimeout(() => {
       uiSaveTimer = null;
-      storageSet(UI_KEY, { open: state.open, tab: state.tab, at: Date.now() });
+      storageSet(UI_KEY, { open: state.open, tab: state.tab === 'debug' ? state.debugReturnTab : state.tab, at: Date.now() });
     }, 250);
   }
 
@@ -3295,7 +3502,9 @@
       id: String(entry.id ?? `sale:${entry.at}:${entry.name ?? ''}`),
       listingId: entry.listingId == null ? null : String(entry.listingId),
       at: Number(entry.at),
-      source: entry.source === 'auto' ? 'auto' : 'manual',
+      // Une source absente reste `unknown` : le graphique de la vente auto
+      // l'ignore au lieu de la compter comme une vente manuelle.
+      source: salesSourceOf(entry),
       name: String(entry.name ?? ''),
       rarity: String(entry.rarity ?? ''),
       characterId: entry.characterId ?? null,
@@ -3321,7 +3530,7 @@
       bid: Number.isFinite(Number(entry.bid)) && Number(entry.bid) > 0 ? Number(entry.bid) : null,
       bids: Number.isFinite(Number(entry.bids)) && Number(entry.bids) > 0 ? Number(entry.bids) : null,
       accountId: entry.accountId ?? null,
-      source: entry.source === 'auto' ? 'auto' : 'manual',
+      source: salesSourceOf(entry),
       createdAt: Number(entry.createdAt) || 0,
       endsAt: Number(entry.endsAt) || 0,
       lastSeenAt: Number(entry.lastSeenAt) || 0
@@ -3369,11 +3578,51 @@
         .map(salesSanitizeTrack)
         .filter(Boolean)
         .slice(-SALES_TRACK_MAX);
+      // Dernière tentative de reconstruction : les annonces encore suivies ou
+      // actives disent si elles viennent de la vente auto. Une entrée qui reste
+      // `unknown` est exclue du graphique et signalée, jamais classée d'office.
+      salesReconstructSources();
     } catch {
       /* pas de journal : le graphique reste vide */
     } finally {
       state.salesLogLoaded = true;
     }
+  }
+
+  /**
+   * Reconstruit l'origine des ventes anciennes à partir des traces encore
+   * disponibles (annonces suivies, annonces créées par la vente auto).
+   * Ne devine jamais : sans correspondance, la source reste `unknown`.
+   */
+  function salesReconstructSources() {
+    const hints = new Map();
+    const add = (id, source) => {
+      const key = id == null ? '' : String(id);
+      if (key && (source === 'auto' || source === 'manual')) hints.set(key, source);
+    };
+    for (const track of state.salesTrack) {
+      add(track.id, track.source);
+      add(track.listingId, track.source);
+    }
+    for (const listing of state.autoSell.pendingListings) {
+      add(listing.id, 'auto');
+    }
+    for (const listing of autoSellActiveEntries()) {
+      add(listing.id, 'auto');
+      for (const id of autoSellListingIds(listing)) add(id, 'auto');
+    }
+    let fixed = 0;
+    for (const entry of state.salesLog) {
+      if (entry.source !== 'unknown') continue;
+      const candidates = [entry.listingId, String(entry.id ?? '').replace(/^sale:/, '')];
+      const source = candidates.map((id) => hints.get(String(id ?? ''))).find(Boolean);
+      if (source) {
+        entry.source = source;
+        fixed += 1;
+      }
+    }
+    if (fixed) saveSalesSoon();
+    return fixed;
   }
 
   function saveSalesSoon() {
@@ -3414,7 +3663,7 @@
       bid: null,
       bids: null,
       accountId: state.user?.id ?? null,
-      source: source === 'auto' ? 'auto' : 'manual',
+      source: source === 'auto' ? 'auto' : source === 'manual' ? 'manual' : 'unknown',
       createdAt: now,
       endsAt: now + Math.max(1, Number(duration) || 12) * 3600000,
       lastSeenAt: 0
@@ -4416,6 +4665,15 @@
     return { max, active, remaining: Math.max(0, max - active) };
   }
 
+  /**
+   * Emplacements de la **vente auto** : limite choisie (1–10), plafonnée par
+   * celle du site, et toutes les annonces actives déjà comptées.
+   */
+  function autoSellSlots() {
+    const site = listingSlots();
+    return autoSellSlotsOf(site.active, state.settings.autoSellMaxActive, site.max);
+  }
+
   /** Nombre d'annonces prévues par la sélection : une par carte cochée. */
   function selectedCopies() {
     let copies = 0;
@@ -4939,7 +5197,7 @@
    */
   function autoSellGapMs() {
     const base = autoSellRandomDelayMs();
-    if (listingSlots().remaining > 0) return Math.min(base, 8000);
+    if (autoSellSlots().remaining > 0) return Math.min(base, 8000);
     return base;
   }
 
@@ -4996,7 +5254,7 @@
       await autoSellRefresh();
     }
 
-    const slots = listingSlots();
+    const slots = autoSellSlots();
     const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
     const all = sellRows().map((row) => ({
       ...row,
@@ -5174,7 +5432,7 @@
         dropped: item,
         row,
         spare: row ? autoSellSpare(row, activeQty) : 0,
-        slots: listingSlots().remaining,
+        slots: autoSellSlots().remaining,
         includeM: Boolean(s.autoSellIncludeM),
         lastAt: Number(a.relist.locks[item.characterId] || 0)
       });
@@ -6136,7 +6394,7 @@
       a.listingsError = null;
       reconcilePendingSales();
       render();
-      return listingSlots().remaining > 0;
+      return autoSellSlots().remaining > 0;
     } catch {
       return false;
     }
@@ -6186,7 +6444,7 @@
         break;
       }
 
-      const full = listingSlots().remaining <= 0;
+      const full = autoSellSlots().remaining <= 0;
       const baseWait = autoSellRefreshDelayMs();
       // Tant qu'il reste des places et qu'on vient de vendre, on retente plus
       // vite pour remplir les 10. Une fois plein, on garde le refresh long mais
@@ -6202,7 +6460,7 @@
             ? 250
             : 2000;
       a.nextAt = Date.now() + pause;
-      const slotState = listingSlots();
+      const slotState = autoSellSlots();
       a.status = result.error
         ? result.error
         : full
@@ -6368,7 +6626,7 @@
               : 'Ouvre <code>chrome://extensions</code>, clique sur « Actualiser » pour Kyareeh+, puis recharge la page.'
           }
         </span>
-        <button class="kp-btn is-primary" type="button" data-act="tab" data-tab="debug">Voir Debug</button>
+        <button class="kp-btn is-primary" type="button" data-act="debug-open">Voir Debug</button>
       `;
       return;
     }
@@ -6394,8 +6652,17 @@
 
     if (!state.user) {
       ui.stats.innerHTML = '';
+      ui.stats.hidden = true;
       return;
     }
+    // Sur Compte, le hero et les cartes du dessous portent déjà ces chiffres ;
+    // sur Réglages et Debug, la bande n'apporte aucune décision.
+    if (['account', 'settings', 'debug'].includes(state.tab)) {
+      ui.stats.innerHTML = '';
+      ui.stats.hidden = true;
+      return;
+    }
+    ui.stats.hidden = false;
     const stats = computeStats(ownedRows());
     const chakra = toNum(state.user.chakra);
     ui.stats.innerHTML = `
@@ -6462,19 +6729,63 @@
   }
 
   /**
-   * Publie { name, owned, at } pour la page du duel. Appelé à chaque chargement de la
-   * collection ; on n'écrit que si le contenu a changé (ou toutes les 5 minutes).
+   * Contrepartie proposée pour une mise de duel : le **dernier** doublon du
+   * classement de la vente auto, jamais une carte unique, verrouillée, déjà en
+   * vente ou bloquée à l'échange. La page du duel ne connaît pas la collection :
+   * le panneau lui transmet cette fiche déjà calculée.
+   */
+  function duelBetCardPayload() {
+    try {
+      if (!Array.isArray(state.collection) || !state.collection.length) return { card: null, eligible: 0 };
+      const activeQtyByKey = autoSellActiveQtyByKey(autoSellActiveEntries());
+      const rows = sellRows().map((row) => ({
+        ...row,
+        activeQty: autoSellActiveQtyFor(row, activeQtyByKey)
+      }));
+      const eligible = rows.filter((row) => duelBetEligible(row));
+      const pick = duelBetPick(rows);
+      if (!pick) return { card: null, eligible: 0 };
+      return {
+        eligible: eligible.length,
+        card: {
+          id: String(pick.id),
+          name: String(pick.name ?? `Carte #${pick.id}`),
+          rarity: String(pick.rarity ?? ''),
+          price: Number(pick.price) > 0 ? Number(pick.price) : null,
+          score: Number(pick.rank?.score) || 0,
+          position: Number(pick.rank?.position) || null,
+          copies: Number(pick.qty) || 0,
+          image: pick.image ? String(pick.image) : ''
+        }
+      };
+    } catch {
+      return { card: null, eligible: 0 };
+    }
+  }
+
+  /**
+   * Publie { name, owned, at, betCard, betEligible } pour la page du duel. Appelé à chaque
+   * chargement de la collection ; on n'écrit que si le contenu a changé (ou toutes les 5 minutes).
    */
   function publishDuelProfile() {
     if (!state.user || !Array.isArray(state.collection)) return;
     const name = duelPlayerName();
     const owned = [...duelOwnedIds()].sort();
-    const sig = `${name}|${owned.join(',')}`;
+    const bet = duelBetCardPayload();
+    const sig = `${name}|${owned.join(',')}|${bet.card?.id ?? ''}|${bet.card?.score ?? 0}|${bet.eligible}`;
     const now = Date.now();
     if (sig === duelProfileSig && now - duelProfileAt < DUEL_PROFILE_REFRESH_MS) return;
     duelProfileSig = sig;
     duelProfileAt = now;
-    storageSet(DUEL_PROFILE_KEY, { name, owned, at: now });
+    storageSet(DUEL_PROFILE_KEY, {
+      name,
+      id: state.user?.id ?? null,
+      chakra: toNum(state.user?.chakra) ?? null,
+      owned,
+      betCard: bet.card,
+      betEligible: bet.eligible,
+      at: now
+    });
   }
 
   /* ------------------------------------------------------------------ */
@@ -6660,6 +6971,203 @@
       duel.frameReady = true;
       duel.frameFailed = false;
       duelHostEl?.querySelector('.kp-duel-failed')?.remove();
+      return;
+    }
+    if (event.data && event.data.type === 'kp-duel-bet-settle') {
+      settleDuelBet(event.data);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Duel : règlement réel de la mise (API du site)                      */
+  /* ------------------------------------------------------------------ */
+
+  let duelSettleBusy = false;
+  const duelSettleDone = new Set();
+
+  function postDuelSettle(payload) {
+    try {
+      duelFrameEl?.contentWindow?.postMessage(
+        { type: 'kp-duel-bet-settled', ...payload },
+        duelFrameOrigin()
+      );
+    } catch {
+      /* iframe fermée */
+    }
+  }
+
+  /**
+   * Exécute le règlement d'une mise réelle à la fin du duel :
+   *  - le **perdant** crée une proposition d'échange (chakra + personnage) vers
+   *    le gagnant, sans rien demander en retour ;
+   *  - le **gagnant** attend cette proposition puis l'accepte.
+   *
+   * Le site reste l'autorité : le plafond de dons est lu par
+   * `/api/fair-play/with/:id`, la carte est revérifiée dans la collection
+   * fraîche, et toute erreur annule le règlement sans envoyer de trade.
+   */
+  async function settleDuelBet(data) {
+    const key = String(data?.settleId ?? '');
+    if (key && duelSettleDone.has(key)) return;
+    if (!data || data.mode !== 'real' || !data.bet || data.bet.mode !== 'real') {
+      postDuelSettle({ ok: false, skipped: true, message: 'Mise de test : aucun transfert.' });
+      return;
+    }
+    if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') {
+      postDuelSettle({ ok: false, skipped: true, message: 'Mode test local : aucun transfert.' });
+      return;
+    }
+    if (duelSettleBusy) {
+      postDuelSettle({ ok: false, error: 'Un règlement est déjà en cours.' });
+      return;
+    }
+    const me = state.user;
+    if (!me?.id) {
+      postDuelSettle({ ok: false, error: 'Compte non connecté : mise non réglée.' });
+      return;
+    }
+    const opponentId = data.opponentUserId;
+    const role = data.role === 'pay' ? 'pay' : 'receive';
+    const stake = role === 'pay' ? data.myStake : data.opponentStake;
+    const amount = Math.max(0, Math.round(Number(stake?.amount) || 0));
+    const cardId = stake?.cardId;
+    if (!opponentId || !amount || cardId == null || cardId === '') {
+      postDuelSettle({ ok: false, error: 'Mise incomplète : aucun transfert.' });
+      return;
+    }
+    duelSettleBusy = true;
+    const settleTag = data.settleId ? `[kp:${data.settleId}]` : '';
+    try {
+      if (role === 'pay') {
+        // Relit la collection et le chakra au dernier moment : la carte a pu
+        // être vendue, verrouillée ou engagée depuis le début du duel.
+        const coll = await api('/api/me/collection?lean=1', { timeout: 25000 }).catch(() => null);
+        if (Array.isArray(coll)) state.collection = coll;
+        else if (Array.isArray(coll?.items)) state.collection = coll.items;
+        else {
+          throw new Error('Collection illisible : la carte de la mise ne peut pas être vérifiée, aucun transfert envoyé.');
+        }
+        const self = await api('/api/me', { timeout: 20000 }).catch(() => null);
+        if (!self || typeof self !== 'object') {
+          throw new Error('Compte illisible : le chakra de la mise ne peut pas être vérifié, aucun transfert envoyé.');
+        }
+        mergeUser(self);
+        const row = sellRowOf(cardId);
+        if (!row || !duelBetEligible(row)) {
+          throw new Error(
+            'La carte de la mise n’est plus éligible (vendue, verrouillée ou déjà en vente) : aucun transfert envoyé.'
+          );
+        }
+        const chakra = toNum(state.user?.chakra) ?? 0;
+        if (chakra < amount) {
+          throw new Error(`Chakra insuffisant pour la mise : ${fmt(chakra)} ◆ disponibles, ${fmt(amount)} ◆ requis.`);
+        }
+        const fair = await api(`/api/fair-play/with/${encodeURIComponent(opponentId)}`, {
+          timeout: 20000
+        }).catch(() => null);
+        const fairIssue = duelBetFairCheck(fair, amount);
+        if (fairIssue === 'disabled') {
+          throw new Error('Les dons ne sont pas autorisés entre ces deux comptes : aucun transfert.');
+        }
+        if (fairIssue === 'over') {
+          const left = toNum(fair?.giveLeft);
+          throw new Error(
+            `Plafond de dons atteint : encore ${left == null ? '—' : fmt(left)} ◆ possibles entre vous sur ${
+              toNum(fair?.pairDays) ?? 2
+            } jours. La valeur de la carte compte aussi.`
+          );
+        }
+        const payload = duelBetTradePayload({
+          toUserId: opponentId,
+          amount,
+          cardId: apiId(cardId),
+          message: `Mise Kyareeh+ ${settleTag}${data.roomCode ? ` · salon ${data.roomCode}` : ''} · ${
+            stake.cardName ?? 'contrepartie'
+          }`
+        });
+        // Une proposition identique déjà en attente (double fin de duel, retry)
+        // ne doit jamais être recréée.
+        const before = await api('/api/me/trades', { timeout: 20000 }).catch(() => null);
+        const existing = duelBetTradeMatch(before, {
+          userId: opponentId,
+          amount,
+          cardId,
+          direction: 'outgoing',
+          tag: settleTag
+        });
+        let tradeId = existing?.id ?? null;
+        if (!tradeId) {
+          const res = await api('/api/trades', { method: 'POST', body: payload, timeout: 30000 });
+          tradeId = res?.trade?.id ?? res?.tradeId ?? res?.id ?? null;
+          for (let attempt = 0; !tradeId && attempt < 6; attempt += 1) {
+            await sleep(600);
+            const list = await api('/api/me/trades', { timeout: 20000 }).catch(() => null);
+            const match = duelBetTradeMatch(list, {
+              userId: opponentId,
+              amount,
+              cardId,
+              direction: 'outgoing',
+              tag: settleTag
+            });
+            tradeId = match?.id ?? null;
+          }
+        }
+        if (key) duelSettleDone.add(key);
+        postDuelSettle({
+          ok: true,
+          role,
+          tradeId: tradeId == null ? null : String(tradeId),
+          amount,
+          cardName: stake.cardName ?? null,
+          message: `Mise envoyée à l’adversaire : ${fmt(amount)} ◆ + ${stake.cardName ?? 'un personnage'}.`
+        });
+        notify(`Mise envoyée · ${fmt(amount)} ◆ + ${stake.cardName ?? 'un personnage'}`);
+        pushDebug({ method: 'POST', path: '/api/trades (mise)', status: 200, ms: 0, ok: true });
+        render();
+        return;
+      }
+
+      // Gagnant : attend la proposition exacte du perdant, puis l'accepte.
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        const list = await api('/api/me/trades', { timeout: 20000 }).catch(() => null);
+        const match = duelBetTradeMatch(list, {
+          userId: opponentId,
+          amount,
+          cardId,
+          direction: 'incoming',
+          tag: settleTag
+        });
+        if (match) {
+          await api(`/api/trades/${encodeURIComponent(match.id)}/accept`, {
+            method: 'POST',
+            body: {},
+            timeout: 30000
+          });
+          if (key) duelSettleDone.add(key);
+          postDuelSettle({
+            ok: true,
+            role,
+            tradeId: String(match.id),
+            amount,
+            cardName: stake.cardName ?? null,
+            message: `Mise reçue : ${fmt(amount)} ◆ + ${stake.cardName ?? 'un personnage'}.`
+          });
+          notify(`Mise reçue · ${fmt(amount)} ◆ + ${stake.cardName ?? 'un personnage'}`);
+          render();
+          return;
+        }
+        await sleep(4000);
+      }
+      throw new Error('Aucune proposition de mise reçue dans les 2 minutes. Vérifie tes échanges sur le site.');
+    } catch (err) {
+      const message = err instanceof ApiError ? friendlyError(err) : String(err?.message || err);
+      postDuelSettle({ ok: false, error: message });
+      notify(`Mise non réglée · ${message}`);
+      pushDebug({ method: 'POST', path: '/api/trades (mise)', status: 0, ms: 0, ok: false, error: message });
+      render();
+    } finally {
+      duelSettleBusy = false;
     }
   }
 
@@ -6716,8 +7224,7 @@
       ['cards', '%Drop'],
       ['auto', 'Auto-Open'],
       ['stat', 'Stat'],
-      ['settings', 'Réglages'],
-      ['debug', 'Debug']
+      ['settings', 'Réglages']
     ];
     ui.tabs.innerHTML = tabs
       .map(
@@ -6942,7 +7449,6 @@
           ${pity != null ? `<span class="kp-chip"><em>Pity</em> ${pity}${pityMax ? ` / ${pityMax}` : ''}</span>` : ''}
           <span class="kp-chip"><em>Marché</em> ${accessOk ? 'débloqué' : 'verrouillé'}</span>
           <span class="kp-chip"><em>Recyclage doublons</em> ◆ ${fmt(stats.dupRecycle)}</span>
-          <span class="kp-chip"><em>Pseudo</em> ${esc(state.user.pseudo ?? '—')}</span>
         </div>
       </div>
 
@@ -8176,7 +8682,6 @@
       <div class="kp-stat-head">
         <div>
           <b>Classement</b>
-          <small>${fmt(Object.keys(data.accounts ?? {}).length)} compte(s) suivi(s)</small>
         </div>
         <div class="kp-stat-head-actions">
           <button class="kp-btn" type="button" data-act="stat-friends" ${
@@ -8871,10 +9376,7 @@
         </label>
       </div>
       <div class="kp-sell-toggles">
-        <label class="kp-check">
-          <input type="checkbox" data-recycle-only-dupes ${view.onlyDupes ? 'checked' : ''}>
-          <span>Doublons <small>plus d'un exemplaire</small></span>
-        </label>
+        <span class="kp-chip"><em>Doublons</em> plus d'un exemplaire</span>
         <label class="kp-check">
           <input type="checkbox" data-recycle-include-ml ${view.includeML ? 'checked' : ''}>
           <span>Inclure L et M <small>exclues par défaut</small></span>
@@ -8983,8 +9485,6 @@
     };
     const strategyLabel =
       { quick: 'Vente rapide', balanced: 'Équilibrée', max: 'Prix maximal' }[s.autoSellStrategy] ?? 'Équilibrée';
-    const dupes = rows.filter((row) => row.qty > 1).length;
-    const spare = rows.reduce((sum, row) => sum + autoSellSpare(row, row.activeQty), 0);
     const eligibleSpare = rows.reduce(
       (sum, row) =>
         sum + (autoSellEligible(row, { ...options, requirePrice: false }) ? autoSellSpare(row, row.activeQty) : 0),
@@ -8995,9 +9495,6 @@
         autoSellEligible(row, { ...options, requirePrice: false }) &&
         autoSellPrice(row, s.autoSellStrategy) == null
     ).length;
-    const mSpare = rows
-      .filter((row) => String(row.rarity || '').toUpperCase() === 'M')
-      .reduce((sum, row) => sum + autoSellSpare(row, row.activeQty), 0);
     const stateLabel = a.starting
       ? 'vérification'
       : a.running
@@ -9027,9 +9524,6 @@
       const liquid = share >= 0.999 ? 'le plus liquide de la sélection' : `liquidité ${Math.round(share * 100)} % du meilleur`;
       return `Volume 7 j : ${fmt(row.volume7)} (${liquid}) · prix ◆ ${fmt(row.price)} · score ${row.rank?.score ?? 0}/100.`;
     };
-    const scoreHint = scoreMode
-      ? '<div class="kp-autosell-hint">Score 0–100 : 70 % ventes sur 7 j + 30 % prix, recalculé avant chaque vente · volume relu au plus toutes les 5 min.</div>'
-      : '';
     return `
       <section class="kp-autosell ${a.running ? 'is-running' : ''} ${a.armed ? 'is-armed' : ''} ${
         a.starting ? 'is-starting' : ''
@@ -9038,16 +9532,28 @@
           <div class="kp-autosell-title">
             <span class="kp-autosell-dot"></span>
             <b>Vente auto</b>
-            <small>doublons uniquement · dernière copie conservée</small>
+            <small>${esc(strategyLabel)} · ${s.autoSellType === 'auction' ? 'enchère' : 'prix fixe'} · doublons uniquement</small>
           </div>
           <span class="kp-autosell-state">${stateLabel}</span>
         </div>
-        <div class="kp-autosell-stats">
-          <span><b>${fmt(dupes)}</b> carte(s) en double</span>
-          <span><b>${fmt(spare)}</b> exemplaire(s) en trop</span>
-          <span><b>${fmt(eligibleSpare)}</b> éligible(s)</span>
-          <span><b>${fmt(slots.active)}</b> vente(s) active(s)</span>
-          <span><b>${fmt(slots.remaining)}</b> place(s) libre(s)</span>
+        <div class="kp-autosell-limit">
+          <label class="kp-autosell-limit-field">
+            <span>Annonces simultanées</span>
+            <select class="kp-select" data-autosell-max-active ${locked ? 'disabled' : ''}>
+              ${Array.from({ length: AUTOSELL_MAX_ACTIVE_MAX }, (_, index) => index + 1)
+                .map(
+                  (value) =>
+                    `<option value="${value}" ${Number(s.autoSellMaxActive) === value ? 'selected' : ''}>${value}</option>`
+                )
+                .join('')}
+            </select>
+          </label>
+          <span class="kp-autosell-limit-state ${slots.remaining ? '' : 'is-full'}">
+            <b>${fmt(slots.active)}</b> / ${fmt(slots.max)} occupée(s)${
+              slots.remaining ? ` · ${fmt(slots.remaining)} libre(s)` : ' · complet'
+            }
+          </span>
+          <small>Places déjà occupées comprises. À 9, la vente auto s'arrête à 9 annonces et laisse un emplacement libre.</small>
         </div>
         ${
           a.relist.last
@@ -9113,7 +9619,12 @@
             </select>
           </label>
         </div>
-        <div class="kp-autosell-expire">
+        <details class="kp-autosell-expire" ${expire.enabled ? 'open' : ''}>
+          <summary>
+            <span>Retrait automatique après expiration</span>
+            <em>${expire.enabled ? autoSellExpireLabel(expire.maxAgeMs) : 'désactivé'}</em>
+          </summary>
+          <div class="kp-autosell-expire-body">
           <label class="kp-check">
             <input type="checkbox" data-autosell-expire ${s.autoSellExpireEnabled ? 'checked' : ''} ${locked ? 'disabled' : ''}>
             Retirer les annonces après
@@ -9151,8 +9662,8 @@
                 }`
               : 'désactivé · aucune annonce n’est retirée pour ancienneté'
           }</small>
-        </div>
-        ${scoreHint}
+          </div>
+        </details>
         ${
           pick
             ? `<div class="kp-autosell-pick">
@@ -9179,11 +9690,13 @@
                </div>`
             : ''
         }
-        <div class="kp-autosell-estimate">
-          <span>Gain estimé · ${strategyLabel}</span>
-          <b>◆ ${fmt(estimate.total)}</b>
-          <small>${fmt(estimate.copies)} doublon(s) disponible(s) · ${fmt(estimate.cards)} carte(s)</small>
-        </div>
+        ${
+          estimate.copies
+            ? `<div class="kp-autosell-summary">Prochain lot · ${fmt(estimate.copies)} doublon(s) · ◆ ${fmt(
+                estimate.total
+              )} estimés${withoutPrice ? ` · ${fmt(withoutPrice)} sans prix ignoré(s)` : ''}</div>`
+            : ''
+        }
         <div class="kp-autosell-opts">
           <label class="kp-check">
             <input type="checkbox" data-autosell-include-m ${s.autoSellIncludeM ? 'checked' : ''} ${locked ? 'disabled' : ''}>
@@ -9193,7 +9706,6 @@
             <input type="checkbox" data-autosell-dryrun ${s.autoSellDryRun ? 'checked' : ''} ${locked ? 'disabled' : ''}>
             Simulation
           </label>
-          <span class="kp-autosell-note">${fmt(withoutPrice)} sans prix · ${fmt(mSpare)} mythique(s)</span>
         </div>
         <div class="kp-autosell-actions">
           <button class="kp-btn" type="button" data-act="autosell-preview" ${locked ? 'disabled' : ''}>Aperçu</button>
@@ -9266,15 +9778,14 @@
    * Ventes actives : nom, quantité, prix unitaire et total, état. La liste est
    * relue au démarrage de l'auto-vente, après chaque vente et via Actualiser.
    */
-  function listedCardsBlock() {
+  function listedCardsBlock(slots = autoSellSlots()) {
     const a = state.autoSell;
-    const slots = listingSlots();
     const active = autoSellActiveEntries();
     if (!active.length) {
       return `<section class="kp-listed">
         <div class="kp-listed-head">
           <b>Ventes actives</b>
-          <span>0 annonce · ${fmt(slots.active)}/${fmt(slots.max)} place(s) occupée(s)
+          <span>${fmt(slots.active)} / ${fmt(slots.max)} annonces
             <button class="kp-listed-refresh" type="button" data-act="autosell-refresh-listings" ${
               a.refreshing || a.running || a.starting ? 'disabled' : ''
             }>${a.refreshing ? '…' : 'Actualiser'}</button>
@@ -9290,7 +9801,7 @@
     return `<section class="kp-listed">
       <div class="kp-listed-head">
         <b>Ventes actives</b>
-        <span>${fmt(active.length)} annonce(s) · ${fmt(slots.active)}/${fmt(slots.max)} place(s) occupée(s)
+        <span>${fmt(slots.active)} / ${fmt(slots.max)} annonces
           <button class="kp-listed-refresh" type="button" data-act="autosell-refresh-listings" ${
             a.refreshing || a.running || a.starting ? 'disabled' : ''
           }>${a.refreshing ? '…' : 'Actualiser'}</button>
@@ -9424,9 +9935,10 @@
       ? state.settings.salesRange
       : '7d';
     const model = salesChartSeries(state.salesLog, Date.now(), range, {
-      accountId: state.user?.id ?? null
+      accountId: state.user?.id ?? null,
+      source: 'auto'
     });
-    const { points, net, count, matched, fees, tax, maxProfit } = model;
+    const { points, net, count, fees, tax, maxProfit, excludedManual, excludedUnknown } = model;
     const W = 720;
     const H = 230;
     const pad = { l: 70, r: 16, t: 18, b: 36 };
@@ -9549,10 +10061,10 @@
     return `
       <section class="kp-sales">
         <div class="kp-sales-head">
-          <b>Bénéfice par heure (chakra)</b>
+          <b>Profit des ventes automatiques</b>
           <div class="kp-sales-head-right">
-            <span>gain de chaque heure sur ${esc(rangeLabel)} · ventes confirmées via Kyareeh+</span>
-            <select class="kp-select kp-sales-range" data-sales-range aria-label="Période du bénéfice par heure">
+            <span>gain de chaque heure · ${esc(rangeLabel)} · vente auto uniquement</span>
+            <select class="kp-select kp-sales-range" data-sales-range aria-label="Période du profit des ventes automatiques">
               <option value="1d" ${range === '1d' ? 'selected' : ''}>1 jour</option>
               <option value="7d" ${range === '7d' ? 'selected' : ''}>7 jours</option>
               <option value="total" ${range === 'total' ? 'selected' : ''}>Total</option>
@@ -9560,12 +10072,16 @@
           </div>
         </div>
         <div class="kp-sales-kpis">
-          <span><b>◆ ${fmt(net)}</b><small>profit réalisé</small></span>
-          <span><b>${fmt(count)}</b><small>ventes confirmées</small></span>
-          <span><b>${fmt(matched)}</b><small>dont immédiates</small></span>
-          <span><b>◆ ${fmt(fees + tax)}</b><small>frais + taxe déduits</small></span>
+          <span><b>◆ ${fmt(net)}</b><small>profit net des ventes auto</small></span>
+          <span><b>${fmt(count)}</b><small>vente(s) automatique(s)</small></span>
+          <span><b>◆ ${fmt(maxProfit)}</b><small>meilleure heure</small></span>
         </div>
-        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Bénéfice généré par heure en chakra">
+        ${
+          count
+            ? ''
+            : '<div class="kp-sales-empty">Aucune vente automatique confirmée sur cette période. Les ventes faites à la main ne sont pas comptées ici.</div>'
+        }
+        <svg class="kp-sales-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Profit généré par heure par les ventes automatiques">
           ${yGrid}
           ${xGrid}
           ${yText}
@@ -9582,14 +10098,20 @@
         </svg>
         <div class="kp-sales-legend">
           <span><i class="is-sales"></i>Gain de l'heure</span>
-          <span>meilleure heure <b>◆ ${fmt(maxProfit)}</b></span>
+          ${count ? `<span>meilleure heure <b>◆ ${fmt(maxProfit)}</b></span>` : ''}
         </div>
         <div class="kp-sales-note">
           Chaque point est le bénéfice de la tranche : la courbe monte quand une heure rapporte et
           redescend quand la suivante rapporte moins — ce n'est pas un cumul${
             model.stepHours > 1 ? ` · tranches de ${fmt(model.stepHours)} h` : ' · une tranche par heure'
-          }. Profit = encaissé − frais de mise en vente − taxe. Une mise en vente sans achat n'ajoute rien.
-          Coût d'acquisition non fourni par le site : non déduit.
+          }. Profit = encaissé − frais de mise en vente − taxe (◆ ${fmt(fees + tax)} déduits). Coût d'acquisition non fourni par le site : non déduit.
+          ${
+            excludedManual || excludedUnknown
+              ? `<br><span class="kp-sales-excluded">${fmt(excludedManual)} vente(s) manuelle(s)${
+                  excludedUnknown ? ` et ${fmt(excludedUnknown)} sans origine enregistrée` : ''
+                } exclue(s) de ce graphique.</span>`
+              : ''
+          }
         </div>
       </section>`;
   }
@@ -9597,27 +10119,25 @@
   function viewSell() {
     if (!state.user) return loginHTML();
     const view = state.sellView;
-    const slots = listingSlots();
     const all = sellRows();
 
     if (view.mode === 'auto') {
+      const slots = autoSellSlots();
       return `
         ${sellModeSwitch()}
-        ${listedCardsBlock()}
+        ${listedCardsBlock(slots)}
         ${autoSellExpiryBlock()}
-        <div class="kp-hint">Doublons uniquement · une copie conservée.</div>
         ${autoSellPanel(all, slots)}
         ${salesChart()}`;
     }
 
     const rows = filteredSellRows(all);
     const sellableCopies = all.reduce((sum, row) => sum + row.sellable, 0);
-    const priced = rows.filter((row) => row.price != null);
     const counts = { all: all.length };
     for (const row of all) counts[row.rarity] = (counts[row.rarity] ?? 0) + 1;
 
     if (!all.length) {
-      return `${sellModeSwitch()}${salesChart()}<div class="kp-empty"><b>Collection vide</b>Le site n'a renvoyé aucune carte pour ce compte.</div>`;
+      return `${sellModeSwitch()}<div class="kp-empty"><b>Collection vide</b>Le site n'a renvoyé aucune carte pour ce compte.</div>`;
     }
 
     // Prix marché des lignes affichées uniquement, par petits lots.
@@ -9640,10 +10160,8 @@
             : `${fmt(rows.length)} / ${fmt(all.length)} carte(s) affichée(s)`
         }
         · ${fmt(all.filter((row) => row.qty > 1).length)} doublon(s)
-        · ${fmt(sellableCopies)} exemplaire(s) vendable(s) · ${fmt(priced.length)} valorisée(s)
-        · ${slots.remaining} place(s) d'annonce libre(s)
+        · ${fmt(sellableCopies)} exemplaire(s) vendable(s)
         ${state.marketLoading ? ' <span class="kp-spinner"></span>' : ''}
-        ${view.lastRefresh ? ` · actualisé ${nowTime(view.lastRefresh)}` : ''}
       </div>
       <div class="kp-sell-list">${visible.map(sellOwnedRow).join('')}</div>
       ${
@@ -9651,7 +10169,6 @@
           ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="sell-more-rows">Afficher plus (${fmt(rows.length - visible.length)})</button></div>`
           : ''
       }
-      ${salesChart()}
       ${sellSelectionBar(rows)}`;
   }
 
@@ -9677,8 +10194,7 @@
         <button class="kp-btn ${view.loading ? '' : 'is-primary'}" type="button" data-act="market-refresh" ${view.loading ? 'disabled' : ''}>
           ${view.loading ? '<span class="kp-spinner"></span> Recherche…' : 'Actualiser le marché'}
         </button>
-      </div>
-      <div class="kp-hint">Recherche serveur · pagination réelle.</div>`;
+      </div>`;
   }
 
   function marketGlobalFilters() {
@@ -11585,16 +12101,12 @@
 
         <div class="kp-explain">
           <p>
-            L'extension ouvre les boosters à ta place, <b>un par un</b>, en tirant au hasard parmi ceux que tu coches.
-            Elle consomme d'abord les <b>boosters offerts</b>, puis — si tu l'autorises — ton <b>chakra</b>.
-          </p>
-          <p>
-            La boucle <b>ne s'arrête jamais toute seule</b> : sans booster ouvrable elle reste en attente et
-            reprend dès qu'un booster apparaît. Seul le bouton <b>Arrêter</b> la coupe.
+            Ouvre <b>un booster à la fois</b>, d'abord les <b>offerts</b>, puis ton <b>chakra</b> si tu l'autorises.
+            La boucle attend un booster et reprend toute seule : seul <b>Arrêter</b> la coupe.
           </p>
         </div>
 
-        <div class="kp-explain-sub">Boosters à ouvrir <span class="kp-explain-count">${selected.length} sélectionné(s)</span></div>
+        <div class="kp-explain-sub">Boosters à ouvrir <span class="kp-explain-count">${selected.length} coché(s)</span></div>
         ${
           packs.length
             ? `<div class="kp-auto-packs">${packs.map(packButton).join('')}</div>`
@@ -11618,12 +12130,8 @@
           </label>
         </div>
         <div class="kp-hint">
-          Formule : <b>T_max = (9 − B) × ${perBoosterMin} + R</b>, où
-          <b>B</b> = boosters dans la jauge (${delayRange.boosters}/${delayRange.maxBoosters}) et
-          <b>R</b> = temps réel avant le prochain gain (${Math.round(delayRange.remainingMin)} min, ${delayRange.source}).
-          Il ouvre dans <b>${maxLabel}</b> au plus tard, avec un délai entier tiré au hasard entre 1 min et T_max.
-          Jauge pleine (${delayRange.maxBoosters}/${delayRange.maxBoosters}) → ouverture immédiate.
-          Jusqu'à ce que tu cliques sur <b>Arrêter</b>. Compte rafraîchi toutes les ${refreshMin} min.
+          Prochaine ouverture entre 1 min et <b>${maxLabel}</b>, tirée au hasard. Jauge pleine
+          (${delayRange.boosters}/${delayRange.maxBoosters}) → immédiat. Seul <b>Arrêter</b> coupe la boucle.
         </div>
 
         <div class="kp-auto-checks">
@@ -11794,114 +12302,166 @@
 
   function viewSettings() {
     const cfg = getCfg();
+    const sections = [
+      ['vente', 'Vente'],
+      ['prix', 'Prix & cache'],
+      ['presence', 'Présence'],
+      ['outils', 'Données & outils']
+    ];
+    const nav = sections
+      .map(
+        ([id, label], index) =>
+          `<button class="kp-settings-nav-btn ${index === 0 ? 'is-active' : ''}" type="button" data-act="settings-goto" data-section="${id}">${label}</button>`
+      )
+      .join('');
     return `
-      <div class="kp-settings">
-        <label class="kp-field">
-          <span>Cache des prix<small>Durée avant de redemander les médianes</small></span>
-          <select class="kp-select" data-setting="ttlH">
-            ${[1, 6, 12, 24, 72].map((h) => `<option value="${h}" ${state.settings.ttlH === h ? 'selected' : ''}>${h} h</option>`).join('')}
-          </select>
-        </label>
-        <label class="kp-field">
-          <span>Délai entre ventes<small>Plus haut = plus sûr vis-à-vis de l’anti-cheat</small></span>
-          <input class="kp-input" type="number" min="400" step="100" data-setting="gapMs" value="${state.settings.gapMs}">
-        </label>
-        <label class="kp-field">
-          <span>Vente auto — délai min<small>Anti-flag : 5 s minimum</small></span>
-          <input class="kp-input" type="number" min="5" max="300" step="1" data-setting="autoSellDelayMinSec" value="${state.settings.autoSellDelayMinSec}">
-        </label>
-        <label class="kp-field">
-          <span>Vente auto — délai max<small>Plage aléatoire entre chaque vente</small></span>
-          <input class="kp-input" type="number" min="5" max="300" step="1" data-setting="autoSellDelayMaxSec" value="${state.settings.autoSellDelayMaxSec}">
-        </label>
-        <label class="kp-field">
-          <span>Vente auto — refresh min<small>Minutes entre deux relectures (auto-open en parallèle)</small></span>
-          <input class="kp-input" type="number" min="1" max="60" step="1" data-setting="autoSellRefreshMinMin" value="${state.settings.autoSellRefreshMinMin}">
-        </label>
-        <label class="kp-field">
-          <span>Vente auto — refresh max<small>Plage aléatoire de relecture</small></span>
-          <input class="kp-input" type="number" min="1" max="60" step="1" data-setting="autoSellRefreshMaxMin" value="${state.settings.autoSellRefreshMaxMin}">
-        </label>
-        <label class="kp-field">
-          <span>Annonces max / lot<small>Garde-fou sur la vente en masse</small></span>
-          <input class="kp-input" type="number" min="1" max="60" data-setting="maxBatch" value="${state.settings.maxBatch}">
-        </label>
-        <label class="kp-field">
-          <span>Décote appliquée<small>Prix proposé = médiane − X %</small></span>
-          <input class="kp-input" type="number" min="0" max="30" step="1" data-setting="discountPct" value="${state.settings.discountPct}">
-        </label>
-        <label class="kp-field">
-          <span>Type de vente<small>Appliqué par défaut au prochain lot</small></span>
-          <select class="kp-select" data-setting="saleType">
-            <option value="fixed" ${state.settings.saleType === 'fixed' ? 'selected' : ''}>Prix fixe</option>
-            <option value="auction" ${state.settings.saleType === 'auction' ? 'selected' : ''}>Enchère</option>
-          </select>
-        </label>
-        <label class="kp-field">
-          <span>Mise à prix<small>Enchère : médiane − X %</small></span>
-          <input class="kp-input" type="number" min="0" max="80" step="1" data-setting="auctionPct" value="${state.settings.auctionPct}">
-        </label>
-        <label class="kp-field">
-          <span>Achat immédiat<small>Enchère : + X % · 0 = désactivé</small></span>
-          <input class="kp-input" type="number" min="0" max="300" step="5" data-setting="buyoutPct" value="${state.settings.buyoutPct}">
-        </label>
-        <label class="kp-field">
-          <span>Durée par défaut<small>Prix fixe et enchère</small></span>
-          <select class="kp-select" data-setting="durationHours">
-            ${cfg.durations
-              .map((h) => `<option value="${h}" ${Number(state.settings.durationHours) === Number(h) ? 'selected' : ''}>${h} h</option>`)
-              .join('')}
-          </select>
-        </label>
-        <label class="kp-toggle">
-          <span>Mode simulation<small>Affiche le plan sans créer d’annonce</small></span>
-          <input type="checkbox" data-setting="dryRun" ${state.settings.dryRun ? 'checked' : ''}>
-        </label>
-        <label class="kp-toggle">
-          <span>Valorisation automatique<small>Calcule les prix manquants à l’ouverture</small></span>
-          <input type="checkbox" data-setting="autoPrices" ${state.settings.autoPrices ? 'checked' : ''}>
-        </label>
+      <div class="kp-settings-layout">
+        <nav class="kp-settings-nav" aria-label="Sommaire des réglages">
+          <b>Réglages</b>
+          ${nav}
+        </nav>
+        <div class="kp-settings-body">
 
-        <div class="kp-section-title" style="margin-top:14px">Présence</div>
-        <label class="kp-field">
-          <span>Répondre à l'anti-AFK<small>Clique « Je suis là » tout seul, délai aléatoire de 2 s à 1 min</small></span>
-          <input type="checkbox" data-setting="antiAfk" ${state.settings.antiAfk !== false ? 'checked' : ''}>
-        </label>
-        <div class="kp-hint">
-          Surveille l'apparition de la boîte « Tu es toujours là ? » sur le site et clique sur
-          <b>Je suis là</b> après un délai tiré au hasard entre <b>2 s</b> et <b>1 min</b>, pour ne pas
-          répondre instantanément comme un robot. Si la boîte reste affichée, une seconde tentative est
-          faite en évènements souris.
-        </div>
-        <div class="kp-chips" style="margin:6px 0">
-          <span class="kp-chip"><em>État</em> ${state.settings.antiAfk !== false ? 'actif' : 'désactivé'}</span>
-          <span class="kp-chip"><em>Réponses</em> ${fmt(state.antiAfk?.clicks ?? 0)}</span>
-          ${
-            state.antiAfk?.lastAt
-              ? `<span class="kp-chip"><em>Dernier clic</em> ${nowTime(state.antiAfk.lastAt)} · délai ${Math.round(
-                  (state.antiAfk.lastDelay ?? 0) / 1000
-                )} s</span>`
-              : ''
-          }
-          ${
-            state.antiAfk?.pendingAt
-              ? `<span class="kp-chip"><em>En attente</em> ${Math.max(
-                  0,
-                  Math.round((state.antiAfk.pendingDelay - (Date.now() - state.antiAfk.pendingAt)) / 1000)
-                )} s</span>`
-              : ''
-          }
-        </div>
-        <div class="kp-alert">
-          Frais actuels : dépôt ${cfg.feePct} % (min ${cfg.feeMin} ◆) · taxe de vente ${cfg.taxPct} %.
-          Limite : ${listingSlots().max} annonces actives (${listingSlots().active} en ligne, ${listingSlots().remaining} libre(s)).
-          Les frais de dépôt ne sont pas remboursés si la carte ne se vend pas.
-        </div>
+          <section class="kp-settings-section" id="kp-set-vente">
+            <div class="kp-settings-head">
+              <h3>Vente</h3>
+              <p>Prix, durée et rythme des annonces. Les délais de la vente auto sont ici, avec les autres réglages de vente.</p>
+            </div>
+            <div class="kp-settings-grid">
+              <label class="kp-field">
+                <span>Type de vente<small>Appliqué par défaut au prochain lot manuel</small></span>
+                <select class="kp-select" data-setting="saleType">
+                  <option value="fixed" ${state.settings.saleType === 'fixed' ? 'selected' : ''}>Prix fixe</option>
+                  <option value="auction" ${state.settings.saleType === 'auction' ? 'selected' : ''}>Enchère</option>
+                </select>
+              </label>
+              <label class="kp-field">
+                <span>Décote appliquée<small>Prix proposé = médiane − X %</small></span>
+                <input class="kp-input" type="number" min="0" max="30" step="1" data-setting="discountPct" value="${state.settings.discountPct}">
+              </label>
+              <label class="kp-field">
+                <span>Mise à prix<small>Enchère : médiane − X %</small></span>
+                <input class="kp-input" type="number" min="0" max="80" step="1" data-setting="auctionPct" value="${state.settings.auctionPct}">
+              </label>
+              <label class="kp-field">
+                <span>Achat immédiat<small>Enchère : + X % · 0 = désactivé</small></span>
+                <input class="kp-input" type="number" min="0" max="300" step="5" data-setting="buyoutPct" value="${state.settings.buyoutPct}">
+              </label>
+              <label class="kp-field">
+                <span>Durée par défaut<small>Prix fixe et enchère</small></span>
+                <select class="kp-select" data-setting="durationHours">
+                  ${cfg.durations
+                    .map((h) => `<option value="${h}" ${Number(state.settings.durationHours) === Number(h) ? 'selected' : ''}>${h} h</option>`)
+                    .join('')}
+                </select>
+              </label>
+              <label class="kp-field">
+                <span>Annonces max / lot<small>Garde-fou de la vente manuelle</small></span>
+                <input class="kp-input" type="number" min="1" max="60" data-setting="maxBatch" value="${state.settings.maxBatch}">
+              </label>
+              <label class="kp-field">
+                <span>Délai entre ventes<small>Plus haut = plus sûr vis-à-vis de l’anti-cheat</small></span>
+                <input class="kp-input" type="number" min="400" step="100" data-setting="gapMs" value="${state.settings.gapMs}">
+              </label>
+              <label class="kp-toggle">
+                <span>Mode simulation<small>Affiche le plan sans créer d’annonce</small></span>
+                <input type="checkbox" data-setting="dryRun" ${state.settings.dryRun ? 'checked' : ''}>
+              </label>
+              <label class="kp-field">
+                <span>Vente auto — délai min<small>Anti-flag : 5 s minimum</small></span>
+                <input class="kp-input" type="number" min="5" max="300" step="1" data-setting="autoSellDelayMinSec" value="${state.settings.autoSellDelayMinSec}">
+              </label>
+              <label class="kp-field">
+                <span>Vente auto — délai max<small>Plage aléatoire entre deux ventes</small></span>
+                <input class="kp-input" type="number" min="5" max="300" step="1" data-setting="autoSellDelayMaxSec" value="${state.settings.autoSellDelayMaxSec}">
+              </label>
+              <label class="kp-field">
+                <span>Vente auto — refresh min<small>Minutes entre deux relectures</small></span>
+                <input class="kp-input" type="number" min="1" max="60" step="1" data-setting="autoSellRefreshMinMin" value="${state.settings.autoSellRefreshMinMin}">
+              </label>
+              <label class="kp-field">
+                <span>Vente auto — refresh max<small>Plage aléatoire de relecture</small></span>
+                <input class="kp-input" type="number" min="1" max="60" step="1" data-setting="autoSellRefreshMaxMin" value="${state.settings.autoSellRefreshMaxMin}">
+              </label>
+            </div>
+            <div class="kp-settings-note">
+              Annonces simultanées de la vente auto : <b>${fmt(state.settings.autoSellMaxActive)}</b> sur ${fmt(autoSellSlots().siteMax)}.
+              Ce réglage se règle dans <button class="kp-link" type="button" data-act="settings-open-autosell">Vente auto</button>.
+            </div>
+          </section>
 
-        <div class="kp-toolbar">
-          <button class="kp-btn" type="button" data-act="clear-cache">Vider le cache</button>
-          <button class="kp-btn" type="button" data-act="calc-prices">Tout recalculer</button>
-          <button class="kp-btn" type="button" data-act="export-json">Export JSON</button>
+          <section class="kp-settings-section" id="kp-set-prix">
+            <div class="kp-settings-head">
+              <h3>Prix & cache</h3>
+              <p>Fraîcheur des médianes et valorisation automatique du compte.</p>
+            </div>
+            <div class="kp-settings-grid">
+              <label class="kp-field">
+                <span>Cache des prix<small>Durée avant de redemander les médianes</small></span>
+                <select class="kp-select" data-setting="ttlH">
+                  ${[1, 6, 12, 24, 72].map((h) => `<option value="${h}" ${state.settings.ttlH === h ? 'selected' : ''}>${h} h</option>`).join('')}
+                </select>
+              </label>
+              <label class="kp-toggle">
+                <span>Valorisation automatique<small>Calcule les prix manquants à l’ouverture</small></span>
+                <input type="checkbox" data-setting="autoPrices" ${state.settings.autoPrices ? 'checked' : ''}>
+              </label>
+            </div>
+            <div class="kp-settings-note">
+              Frais de mise en vente : ${cfg.feePct} % (min ${cfg.feeMin} ◆) · taxe : ${cfg.taxPct} %.
+              Les frais de dépôt ne sont pas remboursés si la carte ne se vend pas.
+            </div>
+          </section>
+
+          <section class="kp-settings-section" id="kp-set-presence">
+            <div class="kp-settings-head">
+              <h3>Présence</h3>
+              <p>Réponse à la boîte « Tu es toujours là ? » du site, sans clic instantané.</p>
+            </div>
+            <label class="kp-toggle">
+              <span>Répondre à l'anti-AFK<small>Délai aléatoire de 2 s à 1 min</small></span>
+              <input type="checkbox" data-setting="antiAfk" ${state.settings.antiAfk !== false ? 'checked' : ''}>
+            </label>
+            <div class="kp-settings-note">
+              Surveille l'apparition de la boîte sur le site et clique sur <b>Je suis là</b> après un délai tiré au hasard.
+              Si elle reste affichée, une seconde tentative est faite en événements souris.
+            </div>
+            <div class="kp-chips">
+              <span class="kp-chip"><em>État</em> ${state.settings.antiAfk !== false ? 'actif' : 'désactivé'}</span>
+              <span class="kp-chip"><em>Réponses</em> ${fmt(state.antiAfk?.clicks ?? 0)}</span>
+              ${
+                state.antiAfk?.lastAt
+                  ? `<span class="kp-chip"><em>Dernier clic</em> ${nowTime(state.antiAfk.lastAt)} · délai ${Math.round(
+                      (state.antiAfk.lastDelay ?? 0) / 1000
+                    )} s</span>`
+                  : ''
+              }
+              ${
+                state.antiAfk?.pendingAt
+                  ? `<span class="kp-chip"><em>En attente</em> ${Math.max(
+                      0,
+                      Math.round((state.antiAfk.pendingDelay - (Date.now() - state.antiAfk.pendingAt)) / 1000)
+                    )} s</span>`
+                  : ''
+              }
+            </div>
+          </section>
+
+          <section class="kp-settings-section" id="kp-set-outils">
+            <div class="kp-settings-head">
+              <h3>Données & outils</h3>
+              <p>Actions ponctuelles sur le cache et les données locales.</p>
+            </div>
+            <div class="kp-settings-note">
+              Le cache ne contient que les prix lus sur le site. Aucune donnée de compte n'est envoyée à un serveur Kyareeh+.
+            </div>
+            <div class="kp-toolbar">
+              <button class="kp-btn" type="button" data-act="clear-cache">Vider le cache</button>
+              <button class="kp-btn" type="button" data-act="calc-prices">Tout recalculer</button>
+              <button class="kp-btn" type="button" data-act="export-json">Export JSON</button>
+            </div>
+          </section>
+
         </div>
       </div>
     `;
@@ -11912,6 +12472,10 @@
     const pricedIds = Object.keys(state.prices).filter((id) => priceOf(id) != null).length;
     return `
       <div class="kp-settings">
+        <div class="kp-debug-head">
+          <div><b>Debug</b><small>Ouvert depuis l’en-tête · diagnostic et requêtes récentes</small></div>
+          <button class="kp-btn is-ghost" type="button" data-act="debug-back">Retour</button>
+        </div>
         <div class="kp-card-stat"><span>Session</span><b>${esc(state.user?.pseudo ?? 'invité')}</b><small>id ${esc(state.user?.id ?? '—')} · ${counts} entrées collection</small></div>
         <div class="kp-card-stat"><span>Prix en cache</span><b>${pricedIds}</b><small>${Object.keys(state.prices).length} entrées · TTL ${state.settings.ttlH} h</small></div>
         <div class="kp-card-stat"><span>Bootstrap</span><b>${esc(state.bootKeys.join(', ') || '—')}</b><small>clés renvoyées par /api/me/bootstrap</small></div>
@@ -13335,6 +13899,18 @@
         syncSoundControls();
         render();
         break;
+      case 'debug-open':
+        // Debug n'a plus d'onglet : il s'ouvre depuis l'en-tête, entre Refresh et le son.
+        if (state.tab !== 'debug') state.debugReturnTab = state.tab;
+        state.tab = 'debug';
+        if (ui?.view) ui.view.scrollTop = 0;
+        render();
+        break;
+      case 'debug-back':
+        state.tab = state.debugReturnTab && state.debugReturnTab !== 'debug' ? state.debugReturnTab : 'account';
+        if (ui?.view) ui.view.scrollTop = 0;
+        render();
+        break;
       case 'reload-ext': {
         if (!state.reloadArmed) {
           state.reloadArmed = true;
@@ -13359,9 +13935,29 @@
         state.reloadArmed = false;
         render();
         break;
+      case 'settings-goto': {
+        const section = el.getAttribute('data-section');
+        const target = qs(`#kp-set-${section}`);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const nav = el.closest('.kp-settings-nav');
+        if (nav) {
+          nav.querySelectorAll('[data-act="settings-goto"]').forEach((btn) => {
+            btn.classList.toggle('is-active', btn === el);
+          });
+        }
+        break;
+      }
+      case 'settings-open-autosell':
+        state.tab = 'sell';
+        state.sellView.mode = 'auto';
+        state.sellView.query = '';
+        if (ui?.view) ui.view.scrollTop = 0;
+        persistUiSoon();
+        render();
+        break;
       case 'tab':
         state.tab = el.getAttribute('data-tab') || 'account';
-        // Quitter l'onglet ferme l'aperçu de recyclage, sauf pendant l'action.
+        if (state.tab !== 'debug') state.debugReturnTab = state.tab;        // Quitter l'onglet ferme l'aperçu de recyclage, sauf pendant l'action.
         if (state.tab !== 'recycle' && state.recycle.open && !state.recycle.running) {
           state.recycle.open = false;
           state.recycle.plan = [];
@@ -13382,6 +13978,9 @@
         ) {
           loadSellMarket(false);
         }
+        // Un changement d'onglet repart du haut : sinon Réglages ou Debug
+        // s'ouvrent au milieu de la page précédente.
+        if (ui?.view) ui.view.scrollTop = 0;
         persistUiSoon();
         render();
         break;
@@ -13963,14 +14562,6 @@
       return;
     }
 
-    const recycleOnlyDupes = target.closest('[data-recycle-only-dupes]');
-    if (recycleOnlyDupes) {
-      state.recycleView.onlyDupes = Boolean(recycleOnlyDupes.checked);
-      state.recycleView.limit = 40;
-      render();
-      return;
-    }
-
     const recycleIncludeML = target.closest('[data-recycle-include-ml]');
     if (recycleIncludeML) {
       state.recycleView.includeML = Boolean(recycleIncludeML.checked);
@@ -14090,6 +14681,7 @@
     const autoStrategy = target.closest('[data-autosell-strategy]');
     const autoOrder = target.closest('[data-autosell-order]');
     const autoDuration = target.closest('[data-autosell-duration]');
+    const autoMaxActive = target.closest('[data-autosell-max-active]');
     const autoIncludeM = target.closest('[data-autosell-include-m]');
     const autoDryRun = target.closest('[data-autosell-dryrun]');
     const autoExpire = target.closest('[data-autosell-expire]');
@@ -14101,6 +14693,7 @@
       autoStrategy ||
       autoOrder ||
       autoDuration ||
+      autoMaxActive ||
       autoIncludeM ||
       autoDryRun ||
       autoExpire ||
@@ -14124,6 +14717,9 @@
       if (autoDuration) {
         const hours = Number(autoDuration.value);
         if ([12, 24, 48].includes(hours)) state.settings.durationHours = hours;
+      }
+      if (autoMaxActive) {
+        state.settings.autoSellMaxActive = autoSellMaxActive(autoMaxActive.value);
       }
       if (autoIncludeM) state.settings.autoSellIncludeM = Boolean(autoIncludeM.checked);
       if (autoDryRun) state.settings.autoSellDryRun = Boolean(autoDryRun.checked);
@@ -14513,6 +15109,9 @@
       autoSellSelect,
       autoSellRank,
       autoSellVolumeInfo,
+      autoSellMaxActive,
+      autoSellSlots,
+      duelBetCardPayload,
       autoSellRankedCandidates,
       startAutoSell,
       stopAutoSell,

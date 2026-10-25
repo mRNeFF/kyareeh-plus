@@ -153,6 +153,63 @@ function cleanDeck(deck) {
   return deck.slice(0, 10).map((id) => (typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : id));
 }
 
+/** Identifiant Kyara du joueur (le relais ne connaît pas sa session). */
+function cleanUserId(value) {
+  if (value == null) return null;
+  const s = String(value).trim().slice(0, 64);
+  return s || null;
+}
+
+/** Contrepartie d'un joueur : montant + carte. Aucun transfert ici. */
+function cleanStake(raw, expectedAmount = null) {
+  if (!raw || typeof raw !== 'object') return null;
+  const amount = Number(raw.amount ?? expectedAmount);
+  if (!Number.isInteger(amount) || amount < 1 || amount > 1e9) return null;
+  if (expectedAmount != null && amount !== Number(expectedAmount)) return null;
+  const cardId = typeof raw.cardId === 'string' || Number.isFinite(Number(raw.cardId))
+    ? String(raw.cardId).trim().slice(0, 64)
+    : '';
+  if (!cardId) return null;
+  const cardName = typeof raw.cardName === 'string'
+    ? raw.cardName.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80)
+    : '';
+  const cardRarity = typeof raw.cardRarity === 'string' ? raw.cardRarity.trim().slice(0, 4) : '';
+  return { amount, cardId, cardName, cardRarity };
+}
+
+/**
+ * Mise d'un salon : une **déclaration** du créateur, jamais un transfert.
+ * Le relais ne manipule ni chakra ni carte : il relaie des conditions que
+ * l'adversaire doit accepter. Aucun appel au site n'est fait ici, et aucune
+ * règle de don n'est codée en dur (le plafond ci-dessous est une simple garde
+ * de protocole contre les valeurs absurdes).
+ */
+function cleanBet(raw) {
+  if (!raw || typeof raw !== 'object' || !raw.enabled) return null;
+  const amount = Number(raw.amount);
+  if (!Number.isInteger(amount) || amount < 1 || amount > 1e9) return null;
+  const cardId = typeof raw.cardId === 'string' || Number.isFinite(Number(raw.cardId))
+    ? String(raw.cardId).trim().slice(0, 64)
+    : '';
+  if (!cardId) return null;
+  const cardName = typeof raw.cardName === 'string'
+    ? raw.cardName.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80)
+    : '';
+  const cardRarity = typeof raw.cardRarity === 'string' ? raw.cardRarity.trim().slice(0, 4) : '';
+  const creator = cleanStake(raw.creator ?? { amount, cardId, cardName, cardRarity }, amount);
+  if (!creator) return null;
+  return {
+    enabled: true,
+    mode: raw.mode === 'real' ? 'real' : 'test',
+    amount,
+    cardId,
+    cardName,
+    cardRarity,
+    stakes: { creator, joiner: null },
+    createdAt: Date.now()
+  };
+}
+
 /** Forme canonique d'une action : seuls les champs du protocole comptent. */
 function canonical(a) {
   if (!a || typeof a !== 'object' || typeof a.type !== 'string') return '';
@@ -198,9 +255,13 @@ export function createRelay(options = {}) {
       players: room.seats.map((p, seat) => (p ? {
         seat,
         name: p.name,
+        userId: p.userId ?? null,
         online: Boolean(p.ws),
-        ready: Boolean(p.ws) && (room.status !== 'ended' || room.rematch[seat])
-      } : null)).filter(Boolean)
+        ready: Boolean(room.ready && room.ready[seat]) || (room.status === 'ended' && Boolean(room.rematch[seat]))
+      } : null)).filter(Boolean),
+      // Mise déclarative (mode test) et acceptations : le relais ne transfère rien.
+      bet: room.bet || null,
+      betAck: Array.isArray(room.betAck) ? room.betAck.slice() : [false, false]
     });
   }
   function broadcastRoom(room) {
@@ -321,6 +382,7 @@ export function createRelay(options = {}) {
     room.match = match;
     room.seq = 1;
     room.status = 'playing';
+    room.ready = [false, false];
     room.result = null;
     room.timeouts = [0, 0];
     room.rematch = [false, false];
@@ -328,6 +390,21 @@ export function createRelay(options = {}) {
     broadcastRoom(room);
     startPhase(room);
     broadcastState(room, [], null);
+  }
+
+  /**
+   * Démarre le duel uniquement quand les deux sièges sont prêts et, si une mise
+   * est proposée, quand les deux l'ont acceptée. Sinon, diffuse simplement le
+   * salon pour synchroniser les états.
+   */
+  function tryStart(room) {
+    if (room.status !== 'waiting' || !room.seats.every(Boolean)) return false;
+    if (!room.ready[0] || !room.ready[1]) return false;
+    if (room.bet && !(room.betAck[0] && room.betAck[1])) return false;
+    // Une mise réelle exige les deux contreparties (montant + personnage).
+    if (room.bet && room.bet.mode === 'real' && (!room.bet.stakes?.creator || !room.bet.stakes?.joiner)) return false;
+    startMatch(room);
+    return true;
   }
 
   function isOver(state) {
@@ -490,6 +567,10 @@ export function createRelay(options = {}) {
     room.seats = [rest, null];
     rest.seat = 0;
     room.status = 'waiting';
+    // Le joueur restant repart de zéro : pas prêt, et aucune mise héritée du créateur parti.
+    room.ready = [false, false];
+    room.bet = null;
+    room.betAck = [false, false];
     room.match = null;
     room.result = null;
     room.seq = 0;
@@ -533,6 +614,7 @@ export function createRelay(options = {}) {
 
   function applyProfile(s, msg) {
     if (msg.name !== undefined) s.name = cleanName(msg.name);
+    if (msg.userId !== undefined) s.userId = cleanUserId(msg.userId);
     if (msg.deck !== undefined) s.deck = cleanDeck(msg.deck);
   }
 
@@ -546,7 +628,7 @@ export function createRelay(options = {}) {
       }
       let s = ws.session;
       if (!s) {
-        s = { id: `c_${crypto.randomBytes(6).toString('hex')}`, token: crypto.randomBytes(24).toString('hex'), name: 'Joueur', deck: null, ws, room: null, seat: null, graceTimer: null };
+        s = { id: `c_${crypto.randomBytes(6).toString('hex')}`, token: crypto.randomBytes(24).toString('hex'), name: 'Joueur', userId: null, deck: null, ws, room: null, seat: null, graceTimer: null };
         sessions.set(s.token, s);
         ws.session = s;
       }
@@ -569,10 +651,23 @@ export function createRelay(options = {}) {
         fail(ws, 'server_full', 'Le relais est saturé : réessayez dans quelques minutes.');
         return;
       }
+      let bet = null;
+      if (msg.bet != null) {
+        bet = cleanBet(msg.bet);
+        if (!bet) {
+          fail(ws, 'bet_invalid', 'Mise invalide : montant entier ≥ 1 et contrepartie obligatoires.');
+          return;
+        }
+      }
       const room = {
         code: newCode((c) => rooms.has(c)),
         seats: [s, null],
         status: 'waiting',
+        // État prêt / pas prêt de chaque siège : le duel ne démarre que si les deux sont prêts.
+        ready: [false, false],
+        // Mise déclarative du créateur (aucun transfert) + acceptation par siège.
+        bet,
+        betAck: [Boolean(bet), false],
         match: null,
         seq: 0,
         result: null,
@@ -619,12 +714,67 @@ export function createRelay(options = {}) {
       if (!checkDeck(ws, s)) return;
       const seat = room.seats[0] ? 1 : 0;
       room.seats[seat] = s;
+      room.ready[seat] = false;
+      room.betAck[seat] = false;
       s.room = room;
       s.seat = seat;
       room.lastActivity = Date.now();
       log(`${s.name} rejoint ${room.code}`);
-      if (room.seats.every(Boolean)) startMatch(room);
-      else broadcastRoom(room);
+      // Le duel ne démarre plus à l'arrivée : chaque joueur doit se déclarer prêt.
+      if (!tryStart(room)) broadcastRoom(room);
+    },
+
+    ready(ws, msg, s) {
+      const room = s.room;
+      if (!room) {
+        fail(ws, 'not_in_room', 'Vous n’êtes dans aucun salon.');
+        return;
+      }
+      if (room.status !== 'waiting') {
+        fail(ws, 'not_waiting', 'Le salon n’est plus en attente : impossible de changer l’état prêt.');
+        return;
+      }
+      const ready = Boolean(msg.ready);
+      if (ready && room.bet && !room.betAck[s.seat]) {
+        fail(ws, 'bet_not_accepted', 'Acceptez d’abord les conditions de la mise.');
+        return;
+      }
+      room.ready[s.seat] = ready;
+      log(`${s.name} ${ready ? 'prêt' : 'pas prêt'} dans ${room.code}`);
+      if (!tryStart(room)) broadcastRoom(room);
+    },
+
+    'bet-accept'(ws, msg, s) {
+      const room = s.room;
+      if (!room) {
+        fail(ws, 'not_in_room', 'Vous n’êtes dans aucun salon.');
+        return;
+      }
+      if (room.status !== 'waiting') {
+        fail(ws, 'not_waiting', 'La mise ne peut plus être acceptée.');
+        return;
+      }
+      if (!room.bet) {
+        fail(ws, 'no_bet', 'Aucune mise n’est proposée dans ce salon.');
+        return;
+      }
+      const stake = cleanStake(msg.stake, room.bet.amount);
+      if (!stake) {
+        fail(
+          ws,
+          'bet_invalid_stake',
+          'Contrepartie invalide : chaque joueur doit fournir un montant identique et un personnage.'
+        );
+        return;
+      }
+      room.bet.stakes = {
+        ...(room.bet.stakes || {}),
+        creator: room.bet.stakes?.creator ?? null,
+        joiner: stake
+      };
+      room.betAck[s.seat] = true;
+      log(`${s.name} accepte la mise de ${room.code}`);
+      if (!tryStart(room)) broadcastRoom(room);
     },
 
     action(ws, msg, s) {
@@ -720,7 +870,7 @@ export function createRelay(options = {}) {
     }
   };
 
-  const NEEDS_SESSION = new Set(['create', 'join', 'action', 'rematch', 'leave']);
+  const NEEDS_SESSION = new Set(['create', 'join', 'ready', 'bet-accept', 'action', 'rematch', 'leave']);
 
   function onMessage(ws, raw, isBinary) {
     // Débit : seau à jetons par connexion.

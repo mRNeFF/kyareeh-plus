@@ -1009,6 +1009,260 @@ select:focus {
   font-size: 12px;
 }
 
+.kd-players .is-bad {
+  color: var(--bad);
+}
+
+/* État prêt / pas prêt : rouge par défaut, vert une fois prêt. */
+.kd-ready-row {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.kd-readyswitch {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid rgba(255, 77, 46, 0.55);
+  border-radius: 11px;
+  background: rgba(255, 77, 46, 0.12);
+  color: #ffb4a3;
+  font: 800 13px/1 var(--body);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.kd-readyswitch:hover:not([disabled]) {
+  border-color: rgba(255, 77, 46, 0.85);
+  background: rgba(255, 77, 46, 0.2);
+}
+
+.kd-readyswitch .kd-ready-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--bad);
+  box-shadow: 0 0 9px rgba(255, 77, 46, 0.7);
+}
+
+.kd-readyswitch.is-ready {
+  border-color: rgba(63, 214, 138, 0.55);
+  background: rgba(63, 214, 138, 0.12);
+  color: #bdf5dd;
+}
+
+.kd-readyswitch.is-ready .kd-ready-dot {
+  background: var(--good);
+  box-shadow: 0 0 9px rgba(63, 214, 138, 0.7);
+}
+
+.kd-readyswitch[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.kd-ready-row small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* Mise du salon (mode test) : conditions lisibles avant toute action. */
+.kd-bet-create,
+.kd-bet {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(255, 194, 74, 0.3);
+  border-radius: 11px;
+  background: rgba(255, 194, 74, 0.06);
+}
+
+.kd-bet-create.is-on {
+  border-color: rgba(255, 194, 74, 0.55);
+}
+
+.kd-bet-create .kd-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.kd-bet-test {
+  padding: 1px 6px;
+  border: 1px solid rgba(255, 194, 74, 0.45);
+  border-radius: 999px;
+  color: #ffd98a;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.kd-bet-fields {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.kd-bet-fields .kd-lbl {
+  margin-top: 0;
+}
+
+.kd-bet-real {
+  align-items: flex-start;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 77, 46, 0.28);
+  border-radius: 9px;
+  background: rgba(255, 77, 46, 0.06);
+}
+
+.kd-bet-real > span {
+  min-width: 0;
+  white-space: normal;
+}
+
+.kd-bet-real small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.kd-bet-stakes {
+  margin: 4px 0 8px;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.kd-bet-mine {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 8px;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.kd-bet-mine b {
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.kd-bet-mine span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.kd-bet-mine small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.kd-bet-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.kd-bet-card img {
+  width: 42px;
+  height: 56px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.kd-bet-card-ph {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 56px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--accent-2);
+  font-size: 20px;
+}
+
+.kd-bet-card b {
+  display: block;
+  font-size: 12px;
+}
+
+.kd-bet-card small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.kd-bet-empty {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px dashed rgba(255, 77, 46, 0.45);
+  border-radius: 8px;
+  color: #ffb4a3;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.kd-bet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kd-bet-head b {
+  font-size: 12px;
+}
+
+.kd-bet-state {
+  padding: 2px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.kd-bet-terms {
+  margin: 6px 0 4px;
+  color: var(--text);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.kd-bet .kd-note {
+  margin: 4px 0 8px;
+}
+
+.kd-bet-ok {
+  display: inline-block;
+  color: var(--good);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .kd-nobattle {
   display: flex;
   align-items: center;

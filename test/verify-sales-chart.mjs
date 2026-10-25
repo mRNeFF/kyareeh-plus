@@ -25,6 +25,7 @@ ${block('SALES')}
     salesTaxOf,
     salesProfitOf,
     salesLedgerTotals,
+    salesSourceOf,
     salesChartSeries,
     salesListingSnapshot,
     salesTrackReconcile,
@@ -69,39 +70,81 @@ check('profit total', totals.net === 1103, String(totals.net));
 check('nombre de ventes', totals.count === 4, String(totals.count));
 check('ventes immédiates', totals.matched === 1, String(totals.matched));
 check('totaux vides', JSON.stringify(api.salesLedgerTotals([]).net) === '0');
+check('totaux : ventes auto', totals.auto === 2 && totals.autoNet === 123, JSON.stringify([totals.auto, totals.autoNet]));
+check('totaux : ventes manuelles conservées', totals.manual === 2 && totals.manualNet === 980, JSON.stringify([totals.manual, totals.manualNet]));
+check('totaux : source absente comptée unknown', totals.unknown === 0 && api.salesSourceOf({}) === 'unknown');
 
-/* --- 3. courbe du profit cumulé ---------------------------------------- */
+/* --- 2 bis. source : jamais devinée ------------------------------- */
+check('source auto conservée', api.salesSourceOf({ source: 'auto' }) === 'auto');
+check('source manual conservée', api.salesSourceOf({ source: 'manual' }) === 'manual');
+check('source inconnue → unknown', api.salesSourceOf({}) === 'unknown' && api.salesSourceOf({ source: 'autre' }) === 'unknown');
+
+/* --- 3. courbe du profit cumulé (ventes automatiques seules) ----------- */
 
 const now = new Date(2026, 9, 20, 18, 30).getTime();
 const day = api.salesChartSeries(ledger, now, '1d');
 check('1 jour = 24 points horaires', day.points.length === 24, String(day.points.length));
-check('1 jour : profit de la fenêtre', day.net === 149, String(day.net));
-check('1 jour : deux ventes', day.count === 2, String(day.count));
-check('1 jour : une vente immédiate', day.matched === 1, String(day.matched));
-check('1 jour : cumul final', day.points[23].value === 149, String(day.points[23].value));
+check('1 jour : profit des seules ventes auto', day.net === 99, String(day.net));
+check('1 jour : une vente automatique', day.count === 1, String(day.count));
+check('1 jour : vente immédiate', day.matched === 1, String(day.matched));
+check('1 jour : une vente manuelle exclue', day.excludedManual === 1, String(day.excludedManual));
+check('1 jour : cumul final', day.points[23].value === 99, String(day.points[23].value));
 check('1 jour : le cumul ne redescend jamais', day.points.every((p, i) => !i || p.value >= day.points[i - 1].value));
 check('1 jour : tranche 10 h à 99', day.points[15].value === 99, String(day.points[15].value));
-check('1 jour : tranche 12 h cumulée à 149', day.points[17].value === 149, String(day.points[17].value));
-check('1 jour : tranche sans vente stable', day.points[18].value === 149 && day.points[18].profit === 0);
+check('1 jour : tranche sans vente stable', day.points[18].value === 99 && day.points[18].profit === 0);
 check('1 jour : ventes détaillées dans la tranche', day.points[15].sales[0]?.name === 'A');
 check('1 jour : profit détaillé par vente', day.points[15].sales[0]?.net === 99);
 check('1 jour : la veille est exclue', day.points.every((p) => p.sales.every((s) => s.name !== 'C')));
+check('1 jour : la manuelle B n’apparaît nulle part', day.points.every((p) => p.sales.every((s) => s.name !== 'B')));
 
 const week = api.salesChartSeries(ledger, now, '7d');
 check('7 jours = 168 points horaires', week.points.length === 168, String(week.points.length));
-check('7 jours : profit de la fenêtre', week.net === 173, String(week.net));
-check('7 jours : cumul final', week.points[167].value === 173, String(week.points[167].value));
-check('7 jours : trois ventes', week.count === 3, String(week.count));
+check('7 jours : profit des ventes auto', week.net === 123, String(week.net));
+check('7 jours : cumul final', week.points[167].value === 123, String(week.points[167].value));
+check('7 jours : deux ventes auto', week.count === 2, String(week.count));
+check('7 jours : ventes manuelles exclues', week.excludedManual === 1, String(week.excludedManual));
 check('7 jours : une mise en vente hors fenêtre ne compte pas', week.points.every((p) => p.sales.every((s) => s.name !== 'D')));
 check('courbe unique, plus de séries auto/manuel', week.points.every((p) => !('auto' in p) && !('manual' in p)));
-check('frais et taxe de la fenêtre', week.fees === 6 && week.tax === 11);
+check('frais et taxe des ventes auto', week.fees === 4 && week.tax === 8, JSON.stringify([week.fees, week.tax]));
 
 const all = api.salesChartSeries(ledger, now, 'total');
-check('total : départ à la première vente', all.points.length === 247, String(all.points.length));
-check('total : profit complet', all.net === 1103, String(all.net));
-check('total : cumul final', all.points[246].value === 1103, String(all.points[246].value));
-check('total : quatre ventes', all.count === 4, String(all.count));
+check('total : départ à la première vente auto', all.points.length === 31, String(all.points.length));
+check('total : profit auto complet', all.net === 123, String(all.net));
+check('total : cumul final', all.points[all.points.length - 1].value === 123, String(all.points[all.points.length - 1].value));
+check('total : deux ventes auto', all.count === 2, String(all.count));
+check('total : la manuelle de 930 n’est pas comptée', all.net !== 1103);
 check('total : pas de division en jours', all.stepHours === 1, String(all.stepHours));
+
+/* --- 3 ter. les deux ventes manuelles mythiques réelles ---------------- */
+// Roxy Migurdia (M) vendue à la main deux fois : 2 325 et 1 999 de profit net.
+const real = [
+  { id: 'auto-1', at: new Date(2026, 9, 23, 9, 0).getTime(), source: 'auto', name: 'Erika Chiba', net: 11, gross: 13, fees: 1, tax: 1 },
+  { id: 'manual-1', at: new Date(2026, 9, 23, 10, 45).getTime(), source: 'manual', rarity: 'M', name: 'Roxy Migurdia', net: 2325, gross: 2500, fees: 50, tax: 125 },
+  { id: 'manual-2', at: new Date(2026, 9, 23, 11, 46).getTime(), source: 'manual', rarity: 'M', name: 'Roxy Migurdia', net: 1999, gross: 2150, fees: 43, tax: 108 },
+  { id: 'auto-2', at: new Date(2026, 9, 23, 11, 46, 30).getTime(), source: 'auto', name: 'Subaru Hoshina', net: 11, gross: 13, fees: 1, tax: 1 }
+];
+const realNow = new Date(2026, 9, 23, 18, 0).getTime();
+const realChart = api.salesChartSeries(real, realNow, '1d');
+check('mythiques manuelles : exclues du graphique', realChart.count === 2, String(realChart.count));
+check('mythiques manuelles : profit auto seul', realChart.net === 22, String(realChart.net));
+check('mythiques manuelles : 2 exclues et signalées', realChart.excludedManual === 2, String(realChart.excludedManual));
+check('mythiques manuelles : toujours dans le journal', api.salesLedgerTotals(real).manual === 2);
+check('mythiques manuelles : total du journal intact', api.salesLedgerTotals(real).net === 4346, String(api.salesLedgerTotals(real).net));
+const allSources = api.salesChartSeries(real, realNow, '1d', { source: 'all' });
+check('source all : les manuelles restent disponibles pour les tests', allSources.net === 4346 && allSources.count === 4, String(allSources.net));
+
+/* --- 3 quater. source absente : exclue, jamais comptée en manuel ------- */
+const unknownChart = api.salesChartSeries(
+  [
+    { id: 'u1', at: new Date(2026, 9, 20, 10).getTime(), name: 'Origine inconnue', net: 500 },
+    { id: 'a1', at: new Date(2026, 9, 20, 11).getTime(), source: 'auto', name: 'Auto', net: 50 }
+  ],
+  now,
+  '1d'
+);
+check('source absente : exclue du graphique', unknownChart.net === 50 && unknownChart.count === 1);
+check('source absente : comptée comme unknown', unknownChart.excludedUnknown === 1, String(unknownChart.excludedUnknown));
+check('source absente : jamais reclassée en manuel', unknownChart.excludedManual === 0);
 
 const zero = api.salesChartSeries([], now, '7d');
 check('maximum minimal à 1', zero.max === 1);
@@ -113,9 +156,9 @@ check('fenêtre vide sans vente', zero.count === 0 && zero.net === 0);
 // 58 chakra à 9 h, 187 à 10 h, 29 à 11 h : la courbe doit monter à 10 h puis
 // redescendre à 11 h, alors que le cumul ne ferait que monter.
 const spikes = [
-  { id: 's1', at: new Date(2026, 9, 20, 9, 10).getTime(), net: 58, gross: 62, fees: 2, tax: 2 },
-  { id: 's2', at: new Date(2026, 9, 20, 10, 20).getTime(), net: 187, gross: 200, fees: 4, tax: 9 },
-  { id: 's3', at: new Date(2026, 9, 20, 11, 30).getTime(), net: 29, gross: 31, fees: 1, tax: 1 }
+  { id: 's1', at: new Date(2026, 9, 20, 9, 10).getTime(), source: 'auto', net: 58, gross: 62, fees: 2, tax: 2 },
+  { id: 's2', at: new Date(2026, 9, 20, 10, 20).getTime(), source: 'auto', net: 187, gross: 200, fees: 4, tax: 9 },
+  { id: 's3', at: new Date(2026, 9, 20, 11, 30).getTime(), source: 'auto', net: 29, gross: 31, fees: 1, tax: 1 }
 ];
 const perHour = api.salesChartSeries(spikes, now, '1d');
 check(
@@ -136,8 +179,8 @@ check('bénéfice par heure : cumul conservé pour le total', perHour.points[23]
 
 const otherAccount = api.salesChartSeries(
   [
-    { id: 'x', at: new Date(2026, 9, 20, 10).getTime(), accountId: 'moi', net: 10, gross: 11, fees: 1, tax: 0 },
-    { id: 'y', at: new Date(2026, 9, 20, 11).getTime(), accountId: 'autre', net: 500, gross: 520, fees: 4, tax: 16 }
+    { id: 'x', at: new Date(2026, 9, 20, 10).getTime(), source: 'auto', accountId: 'moi', net: 10, gross: 11, fees: 1, tax: 0 },
+    { id: 'y', at: new Date(2026, 9, 20, 11).getTime(), source: 'auto', accountId: 'autre', net: 500, gross: 520, fees: 4, tax: 16 }
   ],
   now,
   '7d',

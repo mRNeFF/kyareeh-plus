@@ -87,6 +87,29 @@ adverse), champ `pending` (qui doit choisir), `phase`. `action` = soumission du 
 dire quoi). Délai par phase (choix 45 s, remplacement 20 s, réglables) → `pass` / premier
 remplaçant vivant automatique. Version de protocole `v: 2`.
 
+### 2.1 État prêt et mise (ajout du 25/10/2026)
+
+Le relais ne démarre plus le duel à l'arrivée du deuxième joueur : chaque siège a un état
+`ready` (faux par défaut, diffusé dans `room.players[].ready`) et le départ exige
+**deux états prêts** et, si une mise existe, **deux acceptations**. Messages ajoutés :
+
+- `{ t: 'ready', ready: boolean }` → le serveur refuse si une mise n'est pas acceptée
+  (`bet_not_accepted`), sinon diffuse `room`.
+- `{ t: 'bet-accept' }` → accepte les conditions de la mise du créateur (`room.betAck[seat]`).
+
+`create` peut porter `bet: { enabled: true, mode: 'test'|'real', amount, cardId, cardName, cardRarity, creator }`.
+Le serveur le valide (`bet_invalid` si montant ou contrepartie absents), le conserve dans
+`room.bet` et ne **transfère jamais** de chakra ni de carte : c'est une déclaration, pas un
+paiement. `room` renvoie `bet` et `betAck`. La contrepartie est choisie côté panneau
+(dernier doublon du classement de la vente auto) et transmise dans le profil du duel :
+`kyareeh.duel.profile = { name, id, chakra, owned: [ids], betCard, betEligible, at }`.
+
+En mode `real`, `bet-accept` porte aussi `stake` (montant + carte du joueur qui accepte) ; le
+serveur vérifie que le montant est identique et conserve `bet.stakes = { creator, joiner }`. Le
+départ exige les deux contreparties. À la fin, le panneau exécute le règlement via
+`POST /api/trades` (le perdant donne, le gagnant accepte) ; le relais ne transporte que les
+conditions et identifiants, jamais de valeur.
+
 ## 3. Application duel détachable (chantier C)
 
 > **Mise à jour :** le détachement propre au duel a été retiré. Le bouton « Détacher » ouvre désormais
@@ -103,7 +126,7 @@ Le duel quitte `content/ui.js` et devient une **page d'extension autonome** :
   fenêtre (`windows.create`, type `popup`, ~1100×760). Dans la fenêtre : bouton « Rattacher »
   (ferme la fenêtre). Une seule instance à la fois.
 - **Profil** : la page n'a pas la session kyara.games. Le content script publie dans
-  `storage.local` (`kyareeh.duel.profile` = `{ name, owned: [ids], at }`) à chaque chargement
+  `storage.local` (`kyareeh.duel.profile` = `{ name, id, chakra, owned: [ids], betCard, betEligible, at }`) à chaque chargement
   de la collection ; la page lit cette clé (et écoute `storage.onChanged`). Deck et adresse du
   relais restent dans `kyareeh.duel.v1`.
 - **Écrans** : Collection/Deck, Salon (entraînement IA, en ligne), **Combat**, Règles.

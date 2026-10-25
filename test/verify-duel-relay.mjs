@@ -168,13 +168,17 @@ async function startRelay(over = {}) {
   return { relay, url: `ws://127.0.0.1:${port}` };
 }
 
-/** Crée un salon à deux ; renvoie [siège0, siège1] et le code. */
+/** Crée un salon à deux, puis les deux joueurs se déclarent prêts ; renvoie les sièges. */
 async function pair(url) {
   const a = await client(url, 'Alice', deckA);
   const b = await client(url, 'Bruno', deckB);
   a.send({ t: 'create' });
   const room = await a.wait((m) => m.t === 'room' && m.status === 'waiting');
   b.send({ t: 'join', code: room.code });
+  await a.wait((m) => m.t === 'room' && m.status === 'waiting' && m.players.length === 2);
+  await b.wait((m) => m.t === 'room' && m.status === 'waiting' && m.players.length === 2);
+  a.send({ t: 'ready', ready: true });
+  b.send({ t: 'ready', ready: true });
   await a.wait((m) => m.t === 'state' && m.seq === 1);
   await b.wait((m) => m.t === 'state' && m.seq === 1);
   return { seats: [a, b], code: room.code };
@@ -363,10 +367,18 @@ async function testRobustness() {
   a.send({ t: 'action', seq: 0, action: { type: 'pass' } });
   check('action dans un salon en attente → not_playing', await a.err('not_playing'));
   b.send({ t: 'join', code: room.code.toLowerCase() });
+  const wa = await a.wait((m) => m.t === 'room' && m.status === 'waiting' && m.players.length === 2);
+  const wb = await b.wait((m) => m.t === 'room' && m.status === 'waiting' && m.players.length === 2);
+  check('join (minuscules acceptées) → salon en attente, deux joueurs', wa && wb && wb.you === 1, JSON.stringify(wb));
+  check('room : noms des joueurs', wa && wa.players.map((p) => p.name).join(',') === 'Alice,Bruno');
+  check('room : les deux joueurs sont « pas prêt » par défaut', wa.players.every((p) => p.ready === false));
+  a.send({ t: 'ready', ready: true });
+  const half = await a.wait((m) => m.t === 'room' && m.players.some((p) => p.seat === 0 && p.ready));
+  check('un seul joueur prêt → le duel ne démarre pas', half && half.status === 'waiting');
+  b.send({ t: 'ready', ready: true });
   const ra = await a.wait((m) => m.t === 'room' && m.status === 'playing');
   const rb = await b.wait((m) => m.t === 'room' && m.status === 'playing');
-  check('join (minuscules acceptées) → room playing pour les deux', ra && rb && ra.players.length === 2 && rb.you === 1, JSON.stringify(rb));
-  check('room : noms des joueurs', ra && ra.players.map((p) => p.name).join(',') === 'Alice,Bruno');
+  check('les deux joueurs prêts → room playing pour les deux', ra && rb && ra.players.length === 2, JSON.stringify(rb));
   const sa = await a.wait('state');
   const sb = await b.wait('state');
   check('state initial seq 1 avec you 0/1', sa && sb && sa.seq === 1 && sb.seq === 1 && sa.you === 0 && sb.you === 1);
@@ -807,6 +819,9 @@ async function testNetClient() {
   check('net : statut open', A.net.status === 'open' && A.statuses.includes('open'));
   const B = makeNet('Ben', deckB, false);
   B.net.join(roomA.code);
+  await waitFor(() => B.net.status === 'open' && B.net.room && B.net.room.code === roomA.code);
+  A.net.ready(true);
+  B.net.ready(true);
   const first = await waitFor(() => A.first && B.first);
   check('net : état initial → phase choose, pending [0,1], canAct pour les deux', first && [A.first, B.first].every((f) => f.phase === 'choose' && f.pending === 2 && f.canAct && f.legal > 0), JSON.stringify([A.first, B.first]));
   check('net : timeLeft et phaseMs renseignés', first && A.first.left > 0 && A.first.phaseMs === 30_000, JSON.stringify(A.first));
@@ -839,6 +854,9 @@ async function testNetClient() {
     const rm = await waitFor(() => rec1.ev.find((m) => m.t === 'room'));
     check('net : keepalive (pong reçu)', await waitFor(() => rec1.ev.some((m) => m.t === 'pong'), 2000));
     n2.join(rm.code);
+    await waitFor(() => n2.room && n2.room.code === rm.code);
+    n1.ready(true);
+    n2.ready(true);
     await waitFor(() => n1.state && n2.state && n1.seq === 1 && n2.seq === 1);
     const act = n1.legal.find((a) => a.type === 'move') || n1.legal[0];
     n1.act(act);

@@ -33,6 +33,14 @@ const api = new Function(`${source.slice(begin, end)}
     autoSellRelistPrice,
     autoSellRelistCheck,
     autoSellRelistEnqueue,
+    autoSellMaxActive,
+    autoSellSlotsOf,
+    duelBetEligible,
+    duelBetPick,
+    duelBetAmount,
+    duelBetTradePayload,
+    duelBetTradeMatch,
+    duelBetFairCheck,
     AUTOSELL_RELIST_TABLE
   };
 `)();
@@ -448,6 +456,91 @@ check(
     .autoSellRelistEnqueue([{ characterId: '9', at: now - 7 * 3600000 }], { characterId: '8' }, { now })
     .every((entry) => entry.characterId !== '9')
 );
+
+/* --- Limite d'annonces simultanées (1 à 10) ---------------------------- */
+
+check('limite : 9 conservée', api.autoSellMaxActive(9) === 9);
+check('limite : 0 ramenée à 1', api.autoSellMaxActive(0) === 1);
+check('limite : 11 ramenée à 10', api.autoSellMaxActive(11) === 10);
+check('limite : valeur absente = 10', api.autoSellMaxActive(undefined) === 10);
+check('limite : valeur non numérique = 10', api.autoSellMaxActive('abc') === 10);
+check('limite : 9/10 laisse une place libre', JSON.stringify(api.autoSellSlotsOf(9, 9, 10)) === '{"max":9,"active":9,"remaining":0,"siteMax":10}');
+check('limite : 8/9 laisse une place', api.autoSellSlotsOf(8, 9, 10).remaining === 1);
+check('limite : 9 avec 8 actives → une place', api.autoSellSlotsOf(8, 9, 10).max === 9 && api.autoSellSlotsOf(8, 9, 10).remaining === 1);
+check('limite : plafonnée par le site', api.autoSellSlotsOf(0, 10, 7).max === 7);
+check('limite : les annonces déjà actives comptent', api.autoSellSlotsOf(9, 9, 10).remaining === 0);
+check('limite : jamais négative', api.autoSellSlotsOf(12, 9, 10).remaining === 0);
+
+/* --- Contrepartie de mise : dernier doublon du classement -------------- */
+
+const betRows = [
+  row({ id: 'a', name: 'A', price: 100, qty: 2, listable: 2 }),
+  row({ id: 'b', name: 'B', price: 50, qty: 2, listable: 2 }),
+  row({ id: 'c', name: 'C', price: 10, qty: 2, listable: 2 }),
+  row({ id: 'unique', name: 'Unique', price: 1, qty: 1, listable: 1 }),
+  row({ id: 'pinned', name: 'Verrouillée', price: 1, qty: 3, listable: 3, pinned: true }),
+  row({ id: 'listed', name: 'Déjà en vente', price: 1, qty: 2, listable: 0 }),
+  row({ id: 'blocked', name: 'Bloquée', price: 1, qty: 2, listable: 2, sellBlock: 'resale_lock' })
+];
+check('mise : doublon simple éligible', api.duelBetEligible(betRows[0]) === true);
+check('mise : carte unique exclue', api.duelBetEligible(betRows[3]) === false);
+check('mise : carte verrouillée exclue', api.duelBetEligible(betRows[4]) === false);
+check('mise : carte déjà en vente exclue', api.duelBetEligible(betRows[5]) === false);
+check('mise : carte bloquée 48 h exclue', api.duelBetEligible(betRows[6]) === false);
+const pick = api.duelBetPick(betRows);
+check('mise : le dernier doublon du classement est proposé', pick && pick.id === 'c', JSON.stringify(pick && { id: pick.id, score: pick.rank && pick.rank.score }));
+check('mise : aucun éligible → null', api.duelBetPick([betRows[3], betRows[4]]) === null);
+check('mise : montant entier positif accepté', api.duelBetAmount(500) === 500);
+check('mise : zéro refusé', api.duelBetAmount(0) === null);
+check('mise : décimal refusé', api.duelBetAmount(10.5) === null);
+check('mise : texte refusé', api.duelBetAmount('abc') === null);
+
+/* --- Règlement réel : payload / matching / plafond -------------------- */
+
+const payload = api.duelBetTradePayload({ toUserId: '42', amount: 300, cardId: 10668, message: 'Mise' });
+check('règlement : destinataire', payload.toUserId === '42');
+check('règlement : chakra donné', payload.give.chakra === 300);
+check('règlement : carte donnée', payload.give.cards[0].characterId === 10668 && payload.give.cards[0].qty === 1);
+check('règlement : rien demandé en retour', payload.want.chakra === 0 && payload.want.cards.length === 0);
+check('règlement : message conservé', payload.message === 'Mise');
+const incoming = {
+  incoming: [
+    { id: 't1', status: 'pending', from: { id: '42' }, give: { chakra: 300, cards: [{ characterId: 10668, qty: 1 }] }, want: { chakra: 0, cards: [] }, message: '[kp:ABCDE:3:0]' },
+    { id: 't2', status: 'pending', from: { id: '43' }, give: { chakra: 300, cards: [{ characterId: 10668, qty: 1 }] }, want: { chakra: 0, cards: [] }, message: '[kp:ABCDE:3:0]' }
+  ],
+  outgoing: []
+};
+check('règlement : retrouve la proposition exacte', api.duelBetTradeMatch(incoming, { userId: '42', amount: 300, cardId: 10668 })?.id === 't1');
+check('règlement : ignore un autre joueur', api.duelBetTradeMatch(incoming, { userId: '99', amount: 300, cardId: 10668 }) === null);
+check('règlement : ignore un autre montant', api.duelBetTradeMatch(incoming, { userId: '42', amount: 301, cardId: 10668 }) === null);
+check('règlement : ignore une autre carte', api.duelBetTradeMatch(incoming, { userId: '42', amount: 300, cardId: 1 }) === null);
+check(
+  'règlement : le tag de règlement évite une ancienne proposition',
+  api.duelBetTradeMatch(incoming, { userId: '42', amount: 300, cardId: 10668, tag: '[kp:AUTRE:9:0]' }) === null
+);
+check(
+  'règlement : le bon tag est reconnu',
+  api.duelBetTradeMatch(incoming, { userId: '42', amount: 300, cardId: 10668, tag: '[kp:ABCDE:3:0]' })?.id === 't1'
+);
+const outgoing = {
+  outgoing: [
+    { id: 'o1', status: 'pending', to: { id: '42' }, give: { chakra: 300, cards: [{ characterId: 10668, qty: 1 }] }, want: { chakra: 0, cards: [] }, message: '[kp:ABCDE:3:0]' }
+  ]
+};
+check(
+  'règlement : retrouve aussi une proposition sortante',
+  api.duelBetTradeMatch(outgoing, { userId: '42', amount: 300, cardId: 10668, direction: 'outgoing', tag: '[kp:ABCDE:3:0]' })?.id === 'o1'
+);
+check(
+  'règlement : refuse un trade qui demande quelque chose en retour',
+  api.duelBetTradeMatch(
+    { incoming: [{ id: 't3', status: 'pending', from: { id: '42' }, give: { chakra: 300, cards: [{ characterId: 10668, qty: 1 }] }, want: { chakra: 0, cards: [{ characterId: 9, qty: 1 }] } }] },
+    { userId: '42', amount: 300, cardId: 10668 }
+  ) === null
+);
+check('règlement : plafond OK', api.duelBetFairCheck({ enabled: true, giveLeft: 2706 }, 300) === '');
+check('règlement : plafond dépassé', api.duelBetFairCheck({ enabled: true, giveLeft: 200 }, 300) === 'over');
+check('règlement : dons désactivés', api.duelBetFairCheck({ enabled: false }, 300) === 'disabled');
 
 console.log(`${checks - failures}/${checks} contrôles OK`);
 process.exit(failures ? 1 : 0);

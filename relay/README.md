@@ -91,7 +91,9 @@ Client → serveur :
 | `t` | Contenu |
 |---|---|
 | `hello` | `v: 2, name, deck: [ids]` — toute autre version → erreur `version` |
-| `create` / `join` | — / `code` ; peuvent porter `name` / `deck` |
+| `create` / `join` | — / `code` ; peuvent porter `name` / `deck` ; `create` peut porter `bet` (déclaratif, mode test) |
+| `ready` | `ready: bool` — état prêt du siège ; refusé si la mise n'est pas acceptée |
+| `bet-accept` | `stake: { amount, cardId, cardName }` — accepte les conditions et fournit sa contrepartie (mode réel : montant identique obligatoire) ; aucun transfert |
 | `action` | `seq, action` — **un seul choix par phase**, parmi `state.legal` : `{type:'move', move, target?}`, `{type:'switch', to}`, `{type:'pass'}`. En phase `replace` : seulement `{type:'switch', to}`. |
 | `rematch` | revanche (les deux joueurs l'envoient) ; peut porter `name` / `deck` |
 | `rejoin` | `code, token` — reprise de place pendant le délai de grâce |
@@ -100,7 +102,11 @@ Client → serveur :
 Serveur → client :
 
 - `welcome { clientId, token, v, rejoined? }`
-- `room { code, status: 'waiting'|'playing'|'ended', you, players[{ seat, name, online, ready }] }`
+- `room { code, status: 'waiting'|'playing'|'ended', you, players[{ seat, name, userId, online, ready }], bet, betAck }`
+  - `userId` : identifiant Kyara publié par le panneau (jamais un secret) ; il sert au règlement.
+  - `ready` : état prêt par siège ; le duel ne démarre qu'avec **deux** `ready` (et deux `betAck` si `bet`).
+  - `bet` : conditions déclaratives `{ enabled, mode: 'test'|'real', amount, cardId, cardName, cardRarity, stakes: { creator, joiner } }` ou `null` ;
+    `betAck` : acceptation par siège. **Le relais ne transfère ni chakra ni carte.**
 - `state { seq, you, phase, pending, chosen, choice, state, events, deadline, timer, legal, last }`
   - `phase` : `'choose'` (les deux choisissent), `'replace'` (remplacement après K.O.), `'ended'` ;
   - `pending` : joueurs (`0|1`) qui doivent encore choisir ; `chosen` : joueurs attendus qui ont déjà verrouillé ;
@@ -124,7 +130,7 @@ Serveur → client :
   `room_full`, `already_in_room`, `not_in_room`, `not_playing`, `not_your_turn` (rien à choisir pour
   vous dans cette phase), `already_chosen` (choix déjà verrouillé : il ne se change pas), `stale_seq`
   (+ `seq` courant, suivi d'un `state` à jour), `illegal_action`, `rejoin_failed`, `room_expired`,
-  `server_full`, `engine_error`, `server_error`.
+  `bet_invalid`, `bet_invalid_stake`, `bet_not_accepted`, `not_waiting`, `no_bet`, `server_full`, `engine_error`, `server_error`.
 - `peer { status: 'left' | 'back' }`, `pong`.
 
 Déroulé d'un tour : `state` (phase `choose`, `pending: [0,1]`) → chacun envoie `action` → le premier
@@ -143,7 +149,7 @@ attente sous le même code** : un nouvel adversaire peut le rejoindre.
 
 Script classique (pas de module), utilisable dans une page d'extension (`duel/duel.html`), un content
 script ou Node (`require`). `KYARA_DUEL_NET.connect(url, { name, deck, onEvent })` renvoie `net` :
-`create()`, `join(code)`, `act(action)`, `rematch()`, `leave()`, `setProfile({ name, deck })`, `close()`,
+`create()`, `join(code)`, `ready(bool)`, `betAccept()`, `act(action)`, `rematch()`, `leave()`, `setProfile({ name, deck })`, `close()`,
 `canAct()`, `opponentChosen()`, `timeLeft()` et l'état suivi : `status`, `code`, `room`, `you`, `seq`,
 `state`, `phase`, `pending`, `chosen`, `choice`, `legal`, `deadlineAt`, `phaseMs`, `last`, `ended`.
 Reconnexion automatique (jeton en mémoire) avec file d'envoi pendant la coupure.

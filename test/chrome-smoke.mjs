@@ -544,7 +544,7 @@ async function visualPass() {
            min: Boolean(root.querySelector('[data-autosell-min-price]')),
            interval: Boolean(root.querySelector('[data-autosell-interval]')),
            max: Boolean(root.querySelector('[data-autosell-max]')),
-           estimate: root.querySelector('.kp-autosell-estimate')?.innerText || '',
+           estimate: root.querySelector('.kp-autosell-summary')?.innerText || '',
            detach: Boolean(root.querySelector('.kp-detach')),
            detachAct: root.querySelector('.kp-detach')?.getAttribute('data-act') || '',
            sound: Boolean(root.querySelector('#kp-sound-btn') && root.querySelector('#kp-sound-range')),
@@ -563,7 +563,7 @@ async function visualPass() {
     check('Prix minimum / intervalle / max cycle supprimés', !autoUi.min && !autoUi.interval && !autoUi.max);
     check(
       'Estimation des gains affichée',
-      autoUi.estimate.toLowerCase().includes('gain estimé') && autoUi.estimate.includes('◆'),
+      /estim/i.test(autoUi.estimate) && autoUi.estimate.includes('◆'),
       autoUi.estimate
     );
     check('Délai anti-flag 5–60 s', autoUi.delay === 5 && autoUi.delayMax === 60, `${autoUi.delay}–${autoUi.delayMax} s`);
@@ -610,8 +610,8 @@ async function visualPass() {
     );
     check(
       'Vente auto : tri « Optimisé : prix + ventes sur 7 j » actif par défaut',
-      optimized.order === 'score' && /ventes sur 7 j/i.test(optimized.hint),
-      `${optimized.order} · ${optimized.hint.replace(/\s+/g, ' ').slice(0, 120)}`
+      optimized.order === 'score' && /ventes?.*7 j/i.test(optimized.pick),
+      `${optimized.order} · ${optimized.pick.replace(/\s+/g, ' ').slice(0, 120)}`
     );
     check(
       'Vente auto : prochaine carte expliquée (prix, ventes 7 j, score)',
@@ -1026,17 +1026,38 @@ async function visualPass() {
       removed.active < auto.active,
       `${removed.active}/${auto.active} active(s) · modale fermée=${removed.modalClosed}`
     );
+    const slots9 = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const p = window.__kyaraPlus;
+         p.state.settings.autoSellMaxActive = 9;
+         const s = p.autoSellSlots();
+         p.state.settings.autoSellMaxActive = 10;
+         return s;
+       })()`
+    );
+    check(
+      'Limite 9/10 : la 10e place reste libre, les annonces actives comptent',
+      slots9.max === 9 && slots9.active === 9 && slots9.remaining === 0,
+      JSON.stringify(slots9)
+    );
     const sales = await evaluate(
       cdp,
       sessionId,
       `(() => {
+         const p = window.__kyaraPlus;
+         p.state.tab = 'sell';
+         p.state.sellView.mode = 'auto';
+         p.state.settings.salesRange = '7d';
+         p.render();
          const root = document.querySelector('#kyara-plus-root').shadowRoot;
          const text = root.querySelector('#kp-view')?.innerText || '';
          const chart = root.querySelector('.kp-sales');
          return {
-           count: window.__kyaraPlus.state.salesLog.length,
-           auto: window.__kyaraPlus.state.salesLog.filter((e) => e.source === 'auto').length,
-           chart: text.toLowerCase().includes('profit réalisé') && text.toLowerCase().includes('ventes confirmées'),
+           count: p.state.salesLog.length,
+           auto: p.state.salesLog.filter((e) => e.source === 'auto').length,
+           chart: text.toLowerCase().includes('profit net des ventes auto') && text.toLowerCase().includes('vente'),
            ranges: Array.from(chart?.querySelectorAll('[data-sales-range] option') || []).map((o) => o.value),
            lines: chart?.querySelectorAll('.kp-sales-line').length || 0,
            legend: chart?.querySelector('.kp-sales-legend')?.innerText || '',
@@ -1128,9 +1149,9 @@ async function visualPass() {
          const now = Date.now();
          const accountId = kp.state.user?.id ?? null;
          kp.state.salesLog = [
-           { id: 't1', at: now - 3 * 3600e3, net: 58, gross: 62, fees: 2, tax: 2, accountId },
-           { id: 't2', at: now - 2 * 3600e3, net: 187, gross: 200, fees: 4, tax: 9, accountId },
-           { id: 't3', at: now - 1 * 3600e3, net: 29, gross: 31, fees: 1, tax: 1, accountId }
+           { id: 't1', at: now - 3 * 3600e3, source: 'auto', net: 58, gross: 62, fees: 2, tax: 2, accountId },
+           { id: 't2', at: now - 2 * 3600e3, source: 'auto', net: 187, gross: 200, fees: 4, tax: 9, accountId },
+           { id: 't3', at: now - 1 * 3600e3, source: 'auto', net: 29, gross: 31, fees: 1, tax: 1, accountId }
          ];
          kp.state.settings.salesRange = '1d';
          kp.render();
@@ -1165,8 +1186,8 @@ async function visualPass() {
       JSON.stringify(curve)
     );
     check(
-      'Graphique : intitulé « Bénéfice par heure »',
-      /bénéfice par heure/i.test(curve.title),
+      'Graphique : intitulé « Profit des ventes automatiques »',
+      /profit des ventes automatiques/i.test(curve.title),
       curve.title
     );
 
@@ -1686,7 +1707,7 @@ async function visualPass() {
     check(
       'Marché global intégré à l’onglet Marché',
       marketText.toLowerCase().includes('marché global') &&
-        marketText.toLowerCase().includes('recherche serveur')
+        marketText.toLowerCase().includes('bons plans')
     );
     const marketShot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
     writeFileSync(join(SHOTS, 'chrome-marche.png'), Buffer.from(marketShot.data, 'base64'));
@@ -1825,7 +1846,7 @@ async function detachPass(cdp, id) {
   await waitFor(
     () =>
       winJs(
-        `(() => { const r = ${ROOT_JS}; return Boolean(r?.querySelector('.kp-panel') && r.querySelectorAll('#kp-tabs button').length >= 8 && /777/.test(r.querySelector('#kp-stats')?.innerText || '')); })()`
+        `(() => { const r = ${ROOT_JS}; const txt = (r?.querySelector('#kp-stats')?.innerText || '') + ' ' + (r?.querySelector('#kp-view')?.innerText || ''); return Boolean(r?.querySelector('.kp-panel') && r.querySelectorAll('#kp-tabs button').length >= 8 && /777/.test(txt)); })()`
       ),
     { label: 'fenêtre : panneau monté avec les données du compte', timeout: 25000 }
   );
