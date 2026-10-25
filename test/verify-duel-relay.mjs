@@ -69,7 +69,8 @@ async function waitFor(pred, ms = 3000) {
 const mythics = data.champions.filter((c) => c.rarity === 'M');
 const deckA = mythics.slice(0, 5).map((c) => c.id);
 const deckB = mythics.slice(5, 10).map((c) => c.id);
-const notMythic = data.champions.find((c) => c.rarity !== 'M');
+// Une rareté non jouable (ni Mythique ni Légendaire), si les données en contiennent une.
+const notPlayable = data.champions.find((c) => !['M', 'L'].includes(c.rarity));
 
 // ---------------------------------------------------------------------------
 // Client brut (WebSocket global de Node)
@@ -339,9 +340,9 @@ async function testRobustness() {
   check('deck de 4 cartes → deck_invalid (message français)', e4 && /[a-zé]/i.test(e4.message || ''), JSON.stringify(e4));
   d.send({ t: 'create', deck: [deckA[0], deckA[0], deckA[1], deckA[2], deckA[3]] });
   check('deck avec doublon → deck_invalid', await d.err('deck_invalid'));
-  if (notMythic) {
-    d.send({ t: 'create', deck: [notMythic.id, ...deckA.slice(0, 4)] });
-    check('deck avec une non-Mythique → deck_invalid', await d.err('deck_invalid'));
+  if (notPlayable) {
+    d.send({ t: 'create', deck: [notPlayable.id, ...deckA.slice(0, 4)] });
+    check('deck avec une carte non jouable → deck_invalid', await d.err('deck_invalid'));
   }
   d.send({ t: 'create', deck: [999999999, ...deckA.slice(0, 4)] });
   check('deck avec une carte inconnue → deck_invalid', await d.err('deck_invalid'));

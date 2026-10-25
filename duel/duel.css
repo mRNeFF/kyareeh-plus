@@ -657,6 +657,23 @@ select:focus {
   font-variant-numeric: tabular-nums;
 }
 
+/* Rareté : Mythique (orange du panneau) ou Légendaire (or). */
+.kd-rar {
+  align-self: flex-start;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.kd-rar.is-M {
+  color: var(--accent);
+}
+
+.kd-rar.is-L {
+  color: var(--accent-2);
+}
+
 .kd-cc-lock {
   color: var(--warn);
   font-size: 10px;

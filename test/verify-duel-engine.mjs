@@ -1,6 +1,6 @@
 // Vérifie le moteur du duel v2 (content/duel-engine.js) : équipe et banc, choix simultanés et secrets,
 // ordre de résolution, changements, remplacement après K.O., types, formule de dégâts, chaque champ
-// d'effet, statuts, passifs (203 Mythiques), fins de duel, IA, immuabilité, déterminisme, JSON, journal
+// d'effet, statuts, passifs (Mythiques et Légendaires), fins de duel, IA, immuabilité, déterminisme, JSON, journal
 // et livre de règles. Les scénarios fins utilisent des champions SYNTHÉTIQUES (chiffres maîtrisés) ;
 // les passifs et les cartes nommées (Subaru…) utilisent les vraies données.
 import { readFileSync } from 'node:fs';
@@ -149,9 +149,12 @@ function playOut(s, max = 4000) {
 
 // ─── 2. Données et decks ──────────────────────────────────────────────────────────────────────
 {
-  const pool = E.mythics(data);
-  check('203 Mythiques jouables', pool.length === 203, String(pool.length));
-  check('Mythiques : 3 capacités attaque / soutien / ultime', pool.every((c) => c.attacks.map((a) => a.kind).join() === 'attack,support,ultimate'));
+  check('203 Mythiques', E.mythics(data).length === 203, String(E.mythics(data).length));
+  const pool = E.playable(data);
+  const legend = data.champions.filter((c) => c.rarity === 'L').length;
+  check('Mythiques et Légendaires jouables', pool.length === 203 + legend && legend > 0, `${pool.length} (dont ${legend} Légendaires)`);
+  check('aucune autre rareté jouable', pool.every((c) => ['M', 'L'].includes(c.rarity)));
+  check('jouables : 3 capacités attaque / soutien / ultime', pool.every((c) => c.attacks.map((a) => a.kind).join() === 'attack,support,ultimate'));
   check('tous les rôles ont un type connu', pool.every((c) => E.TYPES[E.typeOf(c)]));
   const ids = pool.slice(0, 5).map((c) => c.id);
   check('deck valide', E.validateDeck(data, ids).ok === true);
@@ -160,7 +163,9 @@ function playOut(s, max = 4000) {
   check('deck : doublon refusé', /double/.test(E.validateDeck(data, [ids[0], ids[0], ids[1], ids[2], ids[3]]).error));
   check('deck : carte inconnue refusée', !E.validateDeck(data, [-5, ...ids.slice(1)]).ok);
   const leg = data.champions.find((c) => c.rarity === 'L');
-  check('deck : une Légendaire est refusée', !E.validateDeck(data, [leg.id, ...ids.slice(1)]).ok);
+  check('deck : une Légendaire est acceptée', E.validateDeck(data, [leg.id, ...ids.slice(1)]).ok === true);
+  const other = data.champions.find((c) => !['M', 'L'].includes(c.rarity));
+  if (other) check('deck : une autre rareté est refusée', !E.validateDeck(data, [other.id, ...ids.slice(1)]).ok);
   check('deck : pas une liste', !E.validateDeck(data, null).ok && !E.validateDeck(data, 'abc').ok);
   throws('createMatch : un seul joueur', () => E.createMatch({ data, seed: 1, players: [{ name: 'x', deck: ids }] }), /2 joueurs/);
   throws('createMatch : deck invalide nomme le joueur', () => E.createMatch({ data, seed: 1, players: [{ name: 'x', deck: ids }, { name: 'y', deck: ids.slice(1) }] }), /Joueur 2/);
@@ -185,7 +190,7 @@ function playOut(s, max = 4000) {
   check('journal alimenté', s.log.length > 0 && s.log.every((l) => typeof l === 'string' && l.length));
   const r = duel('F1', 'F2', { seed: 'abc' });
   check('graine texte acceptée', Number.isInteger(r.seed) && r.seed !== duel('F1', 'F2', { seed: 'abd' }).seed);
-  const pool = E.mythics(data);
+  const pool = E.playable(data);
   const s2 = E.createMatch({ data, seed: 5, players: [{ name: 'A', deck: pool.slice(0, 5).map((x) => x.id) }, { name: 'B', deck: pool.slice(5, 10).map((x) => x.id) }] });
   check('véritables données : le premier du deck entre en jeu', act(s2, 0).id === pool[0].id && act(s2, 1).id === pool[5].id);
   const custom = duel('F1', 'F2', { rules: { startChakra: 3, maxChakra: 4 } });
@@ -354,7 +359,7 @@ function playOut(s, max = 4000) {
   check('l’ordre utilise la vitesse du remplaçant entrant', o2.order[0] === 1 && same(o2.speeds, [50, 99]));
   // Priorité Subaru (vraies données) : son camp agit d'abord, même plus lent, tant qu'il est actif.
   {
-    const pool = E.mythics(data);
+    const pool = E.playable(data);
     const sub = pool.find((c) => c.name === 'Subaru Natsuki');
     const fast = pool.filter((c) => c.speed > sub.speed + 3);
     const slow = pool.filter((c) => c.speed < 75 && c.id !== sub.id);
@@ -435,7 +440,7 @@ function playOut(s, max = 4000) {
   check('lateGuard : égalité de vitesse, le second tiré au sort est protégé', evs(r, 'guard').length === 1 && evs(r, 'guard')[0].side === evs(r, 'turnOrder')[0].order[1]);
   // Priorité (Subaru) : le plus rapide agit alors en second et se protège.
   {
-    const pool = E.mythics(data);
+    const pool = E.playable(data);
     const sub = pool.find((c) => c.name === 'Subaru Natsuki');
     const fast = pool.filter((c) => c.speed > sub.speed + 3);
     const slow = pool.filter((c) => c.speed < 75 && c.id !== sub.id);
@@ -972,7 +977,7 @@ function playOut(s, max = 4000) {
   // Invariant sur des duels complets de l'IA : jamais de « move » d'un champion déjà K.O. plus tôt dans le même tour.
   {
     let bad = 0;
-    const pool = E.mythics(data);
+    const pool = E.playable(data);
     for (let seed = 1; seed <= 12; seed += 1) {
       let st = E.createMatch({ data, seed, players: [{ name: 'A', deck: pool.slice(seed * 7, seed * 7 + 5).map((c) => c.id) }, { name: 'B', deck: pool.slice(seed * 11 + 3, seed * 11 + 8).map((c) => c.id) }] });
       let n = 0;
@@ -1033,9 +1038,9 @@ function playOut(s, max = 4000) {
   check('ultime : toujours indisponible après être revenu du banc', !E.legalActions(r.state, 0).some((a) => a.type === 'move' && a.move === 2));
 }
 
-// ─── 12. Passifs (les 203 Mythiques) ──────────────────────────────────────────────────────────
+// ─── 12. Passifs (tous les champions jouables) ──────────────────────────────────────────────────────────
 {
-  const mythics = E.mythics(data);
+  const mythics = E.playable(data);
   // Données et schéma.
   const handled = new Set(['turnStart', 'onSwitchIn', 'onDamaged', 'onHit', 'lowHp', 'hpAtMost', 'afterSupport', 'static']);
   const effects = new Set(['heal', 'guard', 'buff', 'atk', 'teamAtk', 'status', 'foeStatus', 'dispel', 'healMostWounded', 'healBonus', 'initiative']);
@@ -1047,7 +1052,7 @@ function playOut(s, max = 4000) {
     if (!bad && same_ && known) ok += 1;
     else check(`passiveFx de ${c.name}`, false, bad ?? (!same_ ? 'données pas à jour (lancer scripts/duel-passives.mjs)' : 'déclencheur ou effet non géré'));
   }
-  check('203 Mythiques : passiveFx valide, à jour et géré par le moteur', ok === 203, `${ok}/203`);
+  check(`${mythics.length} champions : passiveFx valide, à jour et géré par le moteur`, ok === mythics.length, `${ok}/${mythics.length}`);
 
   // Champs d'effet présents dans les données ⊆ champs testés explicitement plus haut.
   const TESTED = new Set(['kind', 'name', 'desc', 'damage', 'randomDamage', 'heal', 'healTeam', 'healTeamFull', 'guard', 'buff', 'selfAtk', 'teamAtk', 'teamHp',
@@ -1121,7 +1126,7 @@ function playOut(s, max = 4000) {
     }
     if (all) covered += 1;
   }
-  check('203 Mythiques : chaque déclencheur de passif se produit en situation réelle', covered === mythics.length, `${covered}/203 — ${holes.slice(0, 6).join('; ')}`);
+  check(`${mythics.length} champions : chaque déclencheur de passif se produit en situation réelle`, covered === mythics.length, `${covered}/${mythics.length} — ${holes.slice(0, 6).join('; ')}`);
 
   // Valeurs précises de passifs nommés (vraies données).
   const mkR = (a, b, opts) => mk(a, b, opts);
@@ -1231,14 +1236,14 @@ function playOut(s, max = 4000) {
       check(`duel avec ${mythics[i].name}`, false, err.message);
     }
   }
-  check('203 duels IA (chaque Mythique joue) : tous terminés', played === pool.length, `${played}/${pool.length}`);
+  check(`${pool.length} duels IA (chaque champion joue) : tous terminés`, played === pool.length, `${played}/${pool.length}`);
 }
 
 // ─── 13. IA ───────────────────────────────────────────────────────────────────────────────────
 {
   const keyOf = (a) => E.actionKey(a);
   // Légalité sur des duels complets avec les vraies données.
-  const pool = E.mythics(data).map((c) => c.id);
+  const pool = E.playable(data).map((c) => c.id);
   let illegal = 0;
   let decisions = 0;
   let switches = 0;
@@ -1313,7 +1318,7 @@ function playOut(s, max = 4000) {
 
 // ─── 14. Déterminisme, JSON, immuabilité, vue réseau ──────────────────────────────────────────
 {
-  const pool = E.mythics(data).map((c) => c.id);
+  const pool = E.playable(data).map((c) => c.id);
   const decks = [pool.slice(10, 15), pool.slice(60, 65)];
   const mkMatch = (seed) => E.createMatch({ data, seed, players: [{ name: 'A', deck: decks[0] }, { name: 'B', deck: decks[1] }] });
   const run = (seed, { roundTrip = false, freeze = false } = {}) => {
@@ -1381,7 +1386,7 @@ function playOut(s, max = 4000) {
 
 // ─── 15. Journal ──────────────────────────────────────────────────────────────────────────────
 {
-  const pool = E.mythics(data).map((c) => c.id);
+  const pool = E.playable(data).map((c) => c.id);
   const types = new Map();
   const bad = [];
   let champEvents = 0;
@@ -1479,7 +1484,7 @@ function playOut(s, max = 4000) {
 
 // ─── 17. Fuzz : actions légales au hasard, règles variées, invariants ────────────────────────
 {
-  const pool = E.mythics(data).map((c) => c.id);
+  const pool = E.playable(data).map((c) => c.id);
   let rs = 12345;
   const rnd = () => {
     let t = (rs = (rs + 0x6D2B79F5) >>> 0);

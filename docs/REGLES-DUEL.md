@@ -26,19 +26,19 @@ Copie lisible du livre de règles affiché dans l’onglet « Règles » du mode
 
 ## Aperçu
 
-Kyara Duel oppose deux joueurs dans un combat 1 contre 1. Chaque joueur aligne une équipe de 5 champions Mythiques, mais un seul champion par camp est « actif » à la fois : il combat. Les 4 autres attendent sur le banc.
+Kyara Duel oppose deux joueurs dans un combat 1 contre 1. Chaque joueur aligne une équipe de 5 champions (Mythiques ou Légendaires), mais un seul champion par camp est « actif » à la fois : il combat. Les 4 autres attendent sur le banc.
 
 À chaque tour, les deux joueurs choisissent EN SECRET et EN MÊME TEMPS une action : utiliser une capacité de leur champion actif, changer de champion, ou passer. Les deux actions sont ensuite résolues dans un ordre fixé par les règles : les changements d’abord, puis les capacités, du champion le plus rapide au plus lent.
 
 Quand un champion actif tombe KO, son joueur envoie un remplaçant du banc. Le but du duel : mettre KO les 5 champions adverses.
 
-Deux modes : En ligne, dans un salon à code de 5 lettres, avec des Mythiques de votre collection ; Entraînement contre l’IA, entièrement local, avec n’importe quelles Mythiques.
+Deux modes : En ligne, dans un salon à code de 5 lettres, avec des cartes de votre collection ; Entraînement contre l’IA, entièrement local, avec n’importe quelles cartes jouables.
 
 <a id="equipe"></a>
 
 ## Équipe et banc
 
-Deck : exactement 5 Mythiques différentes. Seules les cartes Mythiques jouent ; les Légendaires et les autres raretés ne sont pas utilisées dans ce mode.
+Deck : exactement 5 champions différents, Mythiques ou Légendaires, mélangés librement. La rareté ne donne aucun avantage : les deux sont équilibrées ensemble. Les autres raretés ne sont pas utilisées dans ce mode.
 
 L’ordre du deck compte : le premier champion est envoyé au combat par chaque joueur au début du duel, les 4 autres forment le banc. Choisissez bien votre champion de tête.
 
@@ -268,7 +268,7 @@ Un champion KO perd tous ses statuts, sa garde, ses dégâts préparés et ses b
 
 ## Passifs
 
-Chaque Mythique a un passif qui se déclenche tout seul. Le journal indique chaque déclenchement. Les passifs de début de tour ne jouent que pour le champion actif ; ceux qui réagissent à un coup (« quand il encaisse », « quand il touche ») ne jouent que pendant qu’il est au combat.
+Chaque champion a un passif qui se déclenche tout seul. Le journal indique chaque déclenchement. Les passifs de début de tour ne jouent que pour le champion actif ; ceux qui réagissent à un coup (« quand il encaisse », « quand il touche ») ne jouent que pendant qu’il est au combat.
 
 « Au début de son tour » : au début de chaque tour, pour le champion actif vivant (pas sur le banc, pas lors d’une action bonus).
 
@@ -318,7 +318,7 @@ Abandon : le joueur qui abandonne perd immédiatement.
 
 ## Règles en ligne
 
-Un joueur crée un salon et communique son code de 5 lettres ; l’autre le rejoint. Le deck doit être complet et composé de Mythiques possédées.
+Un joueur crée un salon et communique son code de 5 lettres ; l’autre le rejoint. Le deck doit être complet et composé de cartes possédées (Mythiques ou Légendaires).
 
 Le serveur arbitre tout : il vérifie chaque action et diffuse l’état. Il ne révèle jamais votre choix à l’adversaire avant la résolution. Une action refusée n’a aucun effet.
 
@@ -336,7 +336,7 @@ Abandonner en ligne compte comme une défaite.
 
 ## Entraînement contre l’IA
 
-Le mode Entraînement se joue entièrement sur votre ordinateur, sans serveur, avec n’importe quelles Mythiques (le deck peut être complété au hasard).
+Le mode Entraînement se joue entièrement sur votre ordinateur, sans serveur, avec n’importe quelles Mythiques ou Légendaires (le deck peut être complété au hasard).
 
 L’IA applique exactement les mêmes règles. Elle devine votre coup le plus probable, simule chacune de ses actions contre ce coup et contre votre meilleure attaque, et change de champion quand le rapport de force (type, vitesse, PV, menace de KO) l’exige. Après un KO, elle choisit son remplaçant d’après les mêmes critères.
 

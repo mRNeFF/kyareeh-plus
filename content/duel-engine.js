@@ -133,18 +133,25 @@
   }
 
   // ─── Données ──────────────────────────────────────────────────────────────────────────────
+  // Raretés jouables : Mythiques (M) et Légendaires (L), docs/LEGENDAIRES.md.
+  const PLAYABLE = ['M', 'L'];
+
+  function playable(data) {
+    return (data?.champions ?? []).filter((c) => c && PLAYABLE.includes(c.rarity) && Array.isArray(c.attacks) && c.attacks.length === 3);
+  }
+
   function mythics(data) {
-    return (data?.champions ?? []).filter((c) => c && c.rarity === 'M' && Array.isArray(c.attacks) && c.attacks.length === 3);
+    return playable(data).filter((c) => c.rarity === 'M');
   }
 
   function validateDeck(data, ids) {
     if (!Array.isArray(ids)) return { ok: false, error: 'Deck invalide : liste de champions attendue.' };
-    if (ids.length !== RULES.deckSize) return { ok: false, error: `Deck invalide : il faut exactement ${RULES.deckSize} Mythiques (${ids.length} reçues).` };
-    const pool = new Map(mythics(data).map((c) => [Number(c.id), c]));
+    if (ids.length !== RULES.deckSize) return { ok: false, error: `Deck invalide : il faut exactement ${RULES.deckSize} champions (${ids.length} reçus).` };
+    const pool = new Map(playable(data).map((c) => [Number(c.id), c]));
     const seen = new Set();
     for (const raw of ids) {
       const id = Number(raw);
-      if (!pool.has(id)) return { ok: false, error: `Deck invalide : ${raw} n’est pas une Mythique connue.` };
+      if (!pool.has(id)) return { ok: false, error: `Deck invalide : ${raw} n’est pas une Mythique ou une Légendaire connue.` };
       if (seen.has(id)) return { ok: false, error: `Deck invalide : ${pool.get(id).name} est en double.` };
       seen.add(id);
     }
@@ -227,7 +234,7 @@
     const { data, seed, players } = opts ?? {};
     if (!Array.isArray(players) || players.length !== 2) throw new Error('Il faut exactement 2 joueurs.');
     const rules = Object.assign({}, RULES, opts.rules ?? {});
-    const byId = new Map(mythics(data).map((c) => [Number(c.id), c]));
+    const byId = new Map(playable(data).map((c) => [Number(c.id), c]));
     const s = {
       v: 2,
       rules,
@@ -1356,6 +1363,7 @@
     STATUS_LABELS,
     KIND_LABELS,
     mythics,
+    playable,
     validateDeck,
     createMatch,
     pendingPlayers,

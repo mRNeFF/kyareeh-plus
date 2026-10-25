@@ -1,14 +1,14 @@
 // Vérifie la cohérence des champions du duel (content/duel-data.js) :
 // textes ↔ chiffres réels, noms en double, pronoms, textes tronqués.
 // Ne juge pas l'équilibrage : seulement ce que la fiche carte affirme.
+// Exporte aussi checkChampions() pour scripts/duel-legendaires.mjs (contrôle des lots).
 import { readFileSync } from 'node:fs';
-
-const src = readFileSync(new URL('../content/duel-data.js', import.meta.url), 'utf8');
-const data = JSON.parse(src.slice(src.indexOf('{'), src.lastIndexOf('}') + 1));
+import { fileURLToPath } from 'node:url';
 
 let checks = 0;
 let failures = 0;
-function check(label, ok, detail = '') {
+let check = defaultCheck;
+function defaultCheck(label, ok, detail = '') {
   checks += 1;
   if (!ok) {
     failures += 1;
@@ -116,7 +116,17 @@ function gender(card) {
   return f > m ? 'F' : m > f ? 'M' : null;
 }
 
-for (const card of data.champions) {
+/** Contrôle une liste de champions ; `report(label, ok, detail)` reçoit chaque contrôle. */
+export function checkChampions(champions, report = defaultCheck) {
+  check = report;
+  try {
+    for (const card of champions) checkCard(card);
+  } finally {
+    check = defaultCheck;
+  }
+}
+
+function checkCard(card) {
   const name = card.name;
   check(`${name} : passif complet`, /[.!…]$/.test(String(card.passive?.desc ?? '').trim()), JSON.stringify(card.passive?.desc));
   check(`${name} : 3 attaques`, card.attacks?.length === 3);
@@ -133,5 +143,10 @@ for (const card of data.champions) {
   for (const move of card.attacks ?? []) checkMove(card, move);
 }
 
-console.log(`\nChampions : ${data.champions.length} · contrôles : ${checks} · échecs : ${failures}`);
-process.exit(failures ? 1 : 0);
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const src = readFileSync(new URL('../content/duel-data.js', import.meta.url), 'utf8');
+  const data = JSON.parse(src.slice(src.indexOf('{'), src.lastIndexOf('}') + 1));
+  checkChampions(data.champions);
+  console.log(`\nChampions : ${data.champions.length} · contrôles : ${checks} · échecs : ${failures}`);
+  process.exit(failures ? 1 : 0);
+}

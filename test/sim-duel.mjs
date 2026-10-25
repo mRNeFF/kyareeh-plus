@@ -1,4 +1,4 @@
-// Simulation IA contre IA du duel v2 (content/duel-engine.js) avec des decks aléatoires de Mythiques.
+// Simulation IA contre IA du duel v2 (content/duel-engine.js) avec des decks aléatoires de champions jouables (Mythiques et Légendaires).
 //   node test/sim-duel.mjs [N=2000] [--seed=1] [--workers=8] [--rule=nom=valeur …] [--all] [--json]
 // Rapporte : durée moyenne (tours), victoires du camp 0 (aucun avantage attendu : 45–55 %), nuls,
 // duels arrivés à la limite de tours, part des changements dans les actions (choix « changer »
@@ -17,10 +17,11 @@ const require = createRequire(import.meta.url);
 const E = require('../content/duel-engine.js');
 const src = readFileSync(new URL('../content/duel-data.js', import.meta.url), 'utf8');
 const data = JSON.parse(src.slice(src.indexOf('{'), src.lastIndexOf('}') + 1));
-const pool = E.mythics(data);
+const pool = E.playable(data);
 const ids = pool.map((c) => c.id);
 const typeById = new Map(pool.map((c) => [c.id, E.typeOf(c)]));
 const speedById = new Map(pool.map((c) => [c.id, Number(c.speed) || 0]));
+const rarityById = new Map(pool.map((c) => [c.id, c.rarity]));
 
 function mulberry(seed) {
   let a = seed >>> 0;
@@ -140,7 +141,7 @@ if (!isMainThread) {
   const names = new Map(pool.map((c) => [c.id, c.name]));
   const pct = (a, b) => (b ? ((100 * a) / b).toFixed(1) : '—');
   const ranked = Object.entries(res.byChamp).filter(([, e]) => e.games >= 10)
-    .map(([id, e]) => ({ id: Number(id), name: names.get(Number(id)), type: typeById.get(Number(id)), speed: speedById.get(Number(id)), games: e.games, rate: e.wins / e.games }))
+    .map(([id, e]) => ({ id: Number(id), name: names.get(Number(id)), rarity: rarityById.get(Number(id)), type: typeById.get(Number(id)), speed: speedById.get(Number(id)), games: e.games, rate: e.wins / e.games }))
     .sort((a, b) => b.rate - a.rate);
   // Corrélation de Pearson entre la vitesse d'un Mythique et son taux de victoire (0 = la vitesse ne compte pas).
   const mean = (a) => a.reduce((x, y) => x + y, 0) / (a.length || 1);
@@ -160,6 +161,14 @@ if (!isMainThread) {
     chooseActions: res.choose,
     forcedReplacements: res.replaces,
     outOfRange: ranked.filter((r) => r.rate < 0.3 || r.rate > 0.7).map((r) => `${r.name} ${(r.rate * 100).toFixed(1)} %`),
+    // Rareté : présences et victoires cumulées (Mythiques et Légendaires doivent rester au même niveau).
+    byRarity: Object.entries(res.byChamp).reduce((acc, [id, e]) => {
+      const r = (acc[rarityById.get(Number(id)) ?? '?'] ??= { games: 0, wins: 0, champions: 0 });
+      r.games += e.games;
+      r.wins += e.wins;
+      r.champions += 1;
+      return acc;
+    }, {}),
     byType: Object.fromEntries(Object.entries(res.byType).map(([t, e]) => [t, { games: e.games, pct: (100 * e.wins) / e.games }]))
   };
   if (args.includes('--json')) {
@@ -174,6 +183,8 @@ if (!isMainThread) {
     console.log(`Nuls : ${res.draws ?? 0} (${pct(res.draws ?? 0, res.games)} %) · limite de ${E.RULES.maxTurns} tours atteinte : ${res.limit ?? 0} (${pct(res.limit ?? 0, res.games)} % ; objectif < 3)`);
     console.log(`Fins : ${JSON.stringify(res.reasons)}`);
     console.log(`Actions de tour : ${res.choose} dont changements ${res.switches ?? 0} (${summary.switchSharePct.toFixed(1)} %) · remplacements forcés après K.O. : ${res.replaces ?? 0}`);
+    console.log('Victoires par rareté :');
+    for (const [r, e] of Object.entries(summary.byRarity)) console.log(`  ${(r === 'M' ? 'Mythiques' : r === 'L' ? 'Légendaires' : r).padEnd(12)} ${((100 * e.wins) / e.games).toFixed(1).padStart(5)} %  (${e.champions} champions, ${e.games} présences)`);
     console.log('Victoires par type (champions alignés, tous rangs confondus) :');
     for (const [t, e] of Object.entries(res.byType).sort((a, b) => b[1].wins / b[1].games - a[1].wins / a[1].games)) {
       const lead = res.lead[t];
@@ -181,12 +192,12 @@ if (!isMainThread) {
     }
     if (args.includes('--all')) {
       console.log('Tous les champions :');
-      for (const r of ranked) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] v${r.speed} (${r.games})`);
+      for (const r of ranked) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}${r.rarity === 'L' ? ', L' : ''}] v${r.speed} (${r.games})`);
     } else {
       console.log('Champions les plus performants (≥ 10 duels) :');
-      for (const r of ranked.slice(0, 10)) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] v${r.speed} (${r.games})`);
+      for (const r of ranked.slice(0, 10)) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}${r.rarity === 'L' ? ', L' : ''}] v${r.speed} (${r.games})`);
       console.log('Champions les moins performants :');
-      for (const r of ranked.slice(-10).reverse()) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}] v${r.speed} (${r.games})`);
+      for (const r of ranked.slice(-10).reverse()) console.log(`  ${(r.rate * 100).toFixed(1).padStart(5)} %  ${r.name} [${r.type}${r.rarity === 'L' ? ', L' : ''}] v${r.speed} (${r.games})`);
     }
     console.log(`Champions hors de 30–70 % : ${summary.outOfRange.length}${summary.outOfRange.length ? ` — ${summary.outOfRange.join(' ; ')}` : ''}`);
   }

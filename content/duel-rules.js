@@ -42,17 +42,17 @@
       id: 'apercu',
       titre: 'Aperçu',
       paragraphes: [
-        'Kyara Duel oppose deux joueurs dans un combat 1 contre 1. Chaque joueur aligne une équipe de 5 champions Mythiques, mais un seul champion par camp est « actif » à la fois : il combat. Les 4 autres attendent sur le banc.',
+        'Kyara Duel oppose deux joueurs dans un combat 1 contre 1. Chaque joueur aligne une équipe de 5 champions (Mythiques ou Légendaires), mais un seul champion par camp est « actif » à la fois : il combat. Les 4 autres attendent sur le banc.',
         'À chaque tour, les deux joueurs choisissent EN SECRET et EN MÊME TEMPS une action : utiliser une capacité de leur champion actif, changer de champion, ou passer. Les deux actions sont ensuite résolues dans un ordre fixé par les règles : les changements d’abord, puis les capacités, du champion le plus rapide au plus lent.',
         'Quand un champion actif tombe KO, son joueur envoie un remplaçant du banc. Le but du duel : mettre KO les 5 champions adverses.',
-        'Deux modes : En ligne, dans un salon à code de 5 lettres, avec des Mythiques de votre collection ; Entraînement contre l’IA, entièrement local, avec n’importe quelles Mythiques.'
+        'Deux modes : En ligne, dans un salon à code de 5 lettres, avec des cartes de votre collection ; Entraînement contre l’IA, entièrement local, avec n’importe quelles cartes jouables.'
       ]
     },
     {
       id: 'equipe',
       titre: 'Équipe et banc',
       paragraphes: [
-        'Deck : exactement 5 Mythiques différentes. Seules les cartes Mythiques jouent ; les Légendaires et les autres raretés ne sont pas utilisées dans ce mode.',
+        'Deck : exactement 5 champions différents, Mythiques ou Légendaires, mélangés librement. La rareté ne donne aucun avantage : les deux sont équilibrées ensemble. Les autres raretés ne sont pas utilisées dans ce mode.',
         'L’ordre du deck compte : le premier champion est envoyé au combat par chaque joueur au début du duel, les 4 autres forment le banc. Choisissez bien votre champion de tête.',
         `Chaque champion commence avec ses PV pleins, 0 garde, aucun dégât préparé, aucun bonus d’ATQ, aucun statut et son ultime disponible. Chaque joueur commence avec ${chakra(V.startChakra)}.`,
         'Un champion sur le banc garde tout ce qu’il avait : PV, garde, bonus d’ATQ, dégâts préparés, ultime déjà utilisé, protections et statuts. Rien ne se « remet à zéro » en changeant de champion.',
@@ -215,7 +215,7 @@
       id: 'passifs',
       titre: 'Passifs',
       paragraphes: [
-        'Chaque Mythique a un passif qui se déclenche tout seul. Le journal indique chaque déclenchement. Les passifs de début de tour ne jouent que pour le champion actif ; ceux qui réagissent à un coup (« quand il encaisse », « quand il touche ») ne jouent que pendant qu’il est au combat.',
+        'Chaque champion a un passif qui se déclenche tout seul. Le journal indique chaque déclenchement. Les passifs de début de tour ne jouent que pour le champion actif ; ceux qui réagissent à un coup (« quand il encaisse », « quand il touche ») ne jouent que pendant qu’il est au combat.',
         '« Au début de son tour » : au début de chaque tour, pour le champion actif vivant (pas sur le banc, pas lors d’une action bonus).',
         '« Chaque fois qu’il encaisse » : chaque coup d’une capacité ennemie qui lui inflige au moins 1 dégât, garde comprise (une Hâte = deux déclenchements). Pas pour le poison, la malédiction, l’épuisement ni ses propres pertes de PV, et pas s’il tombe sous le coup.',
         '« Quand il touche » / « Ses attaques infligent… » : chaque fois qu’une de ses capacités vise un ennemi sans être annulée ; le statut va sur la cible si elle est encore vivante. Réappliquer garde la durée la plus longue.',
@@ -248,7 +248,7 @@
       id: 'en-ligne',
       titre: 'Règles en ligne',
       paragraphes: [
-        'Un joueur crée un salon et communique son code de 5 lettres ; l’autre le rejoint. Le deck doit être complet et composé de Mythiques possédées.',
+        'Un joueur crée un salon et communique son code de 5 lettres ; l’autre le rejoint. Le deck doit être complet et composé de cartes possédées (Mythiques ou Légendaires).',
         'Le serveur arbitre tout : il vérifie chaque action et diffuse l’état. Il ne révèle jamais votre choix à l’adversaire avant la résolution. Une action refusée n’a aucun effet.',
         `Délai de choix : ${V.chooseSeconds} secondes. Passé ce délai, le joueur qui n’a pas choisi passe automatiquement.`,
         `Délai de remplacement : ${V.replaceSeconds} secondes. Passé ce délai, le premier remplaçant vivant du banc est envoyé automatiquement.`,
@@ -261,7 +261,7 @@
       id: 'entrainement',
       titre: 'Entraînement contre l’IA',
       paragraphes: [
-        'Le mode Entraînement se joue entièrement sur votre ordinateur, sans serveur, avec n’importe quelles Mythiques (le deck peut être complété au hasard).',
+        'Le mode Entraînement se joue entièrement sur votre ordinateur, sans serveur, avec n’importe quelles Mythiques ou Légendaires (le deck peut être complété au hasard).',
         'L’IA applique exactement les mêmes règles. Elle devine votre coup le plus probable, simule chacune de ses actions contre ce coup et contre votre meilleure attaque, et change de champion quand le rapport de force (type, vitesse, PV, menace de KO) l’exige. Après un KO, elle choisit son remplaçant d’après les mêmes critères.',
         'Elle ne lit jamais votre choix secret du tour en cours et ne connaît pas le hasard à venir.'
       ]

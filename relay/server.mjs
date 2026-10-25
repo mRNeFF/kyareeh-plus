@@ -504,7 +504,7 @@ export function createRelay(options = {}) {
 
   function checkDeck(ws, s) {
     if (!s.deck) {
-      fail(ws, 'deck_invalid', 'Aucun deck fourni : choisissez 5 Mythiques.');
+      fail(ws, 'deck_invalid', 'Aucun deck fourni : choisissez 5 champions (Mythiques ou Légendaires).');
       return false;
     }
     let res;

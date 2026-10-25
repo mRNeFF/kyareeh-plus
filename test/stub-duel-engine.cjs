@@ -29,7 +29,7 @@ function rand(state) {
 }
 
 function mythics(data) {
-  return (data && Array.isArray(data.champions) ? data.champions : []).filter((c) => c.rarity === 'M');
+  return (data && Array.isArray(data.champions) ? data.champions : []).filter((c) => c.rarity === 'M' || c.rarity === 'L');
 }
 
 function typeOf(c) {

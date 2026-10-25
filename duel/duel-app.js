@@ -260,11 +260,12 @@
     if (cardsCache && cardsCache.src === src) return cardsCache;
     let list = null;
     const E = window.KYARA_DUEL_ENGINE;
-    if (E && typeof E.mythics === 'function') {
-      const ids = safe(() => new Set((E.mythics(data) || []).map((c) => String(c && c.id))), null);
+    const poolOf = E && (typeof E.playable === 'function' ? E.playable : E.mythics);
+    if (typeof poolOf === 'function') {
+      const ids = safe(() => new Set((poolOf(data) || []).map((c) => String(c && c.id))), null);
       if (ids && ids.size) list = src.filter((c) => ids.has(String(c.id)));
     }
-    if (!list) list = src.filter((c) => String(c && c.rarity).toUpperCase() === 'M');
+    if (!list) list = src.filter((c) => ['M', 'L'].includes(String(c && c.rarity).toUpperCase()));
     cardsCache = { src, list, byId: new Map(src.map((c) => [String(c.id), c])) };
     return cardsCache;
   }
@@ -277,7 +278,7 @@
     return cardIndex().byId.get(String(id)) || null;
   }
 
-  function isMythic(id) {
+  function isPlayable(id) {
     return cards().some((c) => String(c.id) === String(id));
   }
 
@@ -402,6 +403,7 @@
     query: '',
     series: 'all',
     type: 'all',
+    rarity: 'all',
     ownedOnly: false,
     profile: null, // { name, owned: Set, at, test }
     muted: false,
@@ -430,7 +432,7 @@
     if (saved && typeof saved === 'object') {
       if (typeof saved.relay === 'string') app.relay = saved.relay;
       if (Array.isArray(saved.deck)) {
-        app.deck = [...new Set(saved.deck.map(String))].filter((id) => isMythic(id)).slice(0, DECK_SIZE);
+        app.deck = [...new Set(saved.deck.map(String))].filter((id) => isPlayable(id)).slice(0, DECK_SIZE);
       }
       if (typeof saved.muted === 'boolean') app.muted = saved.muted;
       if (Number.isFinite(Number(saved.volume))) app.volume = Math.max(0, Math.min(1, Number(saved.volume)));
@@ -478,7 +480,7 @@
     }
     if (!HAS_EXT_STORAGE) {
       // Hors extension (serveur de test) : profil de test explicite, possède les 8 premières
-      // Mythiques (comme le harness ?duel=1) pour pouvoir essayer le duel en ligne.
+      // cartes jouables (comme le harness ?duel=1) pour pouvoir essayer le duel en ligne.
       app.profile = {
         name: 'Harness',
         owned: new Set(cards().slice(0, 8).map((c) => String(c.id))),
@@ -499,7 +501,7 @@
   /* ------------------------------------------------------------------ */
 
   function fillDeck(deck, { preferOwned = false } = {}) {
-    const out = deck.filter((id) => isMythic(id)).slice(0, DECK_SIZE);
+    const out = deck.filter((id) => isPlayable(id)).slice(0, DECK_SIZE);
     const pool = cards().map((c) => String(c.id));
     const owned = preferOwned ? ownedSet() : new Set();
     const shuffle = (list) => {
@@ -521,7 +523,7 @@
   function onlineDeckIssue() {
     if (!app.profile) return 'Ouvre kyara.games connecté avec le panneau Kyareeh+ : ta collection n’a pas encore été transmise.';
     if (app.deck.length !== DECK_SIZE) {
-      return `Le deck en ligne doit contenir ${DECK_SIZE} Mythiques possédées (actuellement ${app.deck.length}/${DECK_SIZE}).`;
+      return `Le deck en ligne doit contenir ${DECK_SIZE} cartes possédées (actuellement ${app.deck.length}/${DECK_SIZE}).`;
     }
     const owned = ownedSet();
     const missing = app.deck.filter((id) => !owned.has(id));
@@ -1457,6 +1459,12 @@
   /* Rendu : collection et deck                                          */
   /* ------------------------------------------------------------------ */
 
+  function rarityTag(card) {
+    const r = String(card && card.rarity).toUpperCase();
+    if (r !== 'M' && r !== 'L') return '';
+    return `<span class="kd-rar is-${r}">${r === 'M' ? 'Mythique' : 'Légendaire'}</span>`;
+  }
+
   function typeBadge(champ, extraClass) {
     const t = typeInfo(champ);
     return `<span class="kd-type ${extraClass || ''}" style="--t:${esc(t.color)}">${esc(t.label)}</span>`;
@@ -1486,6 +1494,7 @@
       if (app.ownedOnly && !owned.has(String(c.id))) return false;
       if (app.series !== 'all' && c.series !== app.series) return false;
       if (app.type !== 'all' && typeInfo(c).key !== app.type) return false;
+      if (app.rarity !== 'all' && String(c.rarity).toUpperCase() !== app.rarity) return false;
       if (query && !String(c.name).toLowerCase().includes(query) && !String(c.series || '').toLowerCase().includes(query)) return false;
       return true;
     });
@@ -1502,6 +1511,7 @@
             </button>
             <div class="kd-cc-body">
               <b title="${esc(c.name)}">${esc(c.name)}</b>
+              ${rarityTag(c)}
               <span class="kd-cc-stats"><span>${fmt(c.hp)} PV</span><span>ATQ ${fmt(c.atk)}</span>${c.speed != null ? `<span>VIT ${fmt(c.speed)}</span>` : ''}</span>
               ${mine ? '' : '<span class="kd-cc-lock">Non possédée</span>'}
             </div>
@@ -1511,19 +1521,19 @@
       .join('');
     const unownedInDeck = app.deck.filter((id) => !owned.has(id)).length;
     const profileNote = !app.profile
-      ? '<p class="kd-note is-warn">Collection inconnue : ouvre le panneau Kyareeh+ sur kyara.games (connecté) pour transmettre tes Mythiques. L’entraînement reste possible avec toutes les cartes.</p>'
+      ? '<p class="kd-note is-warn">Collection inconnue : ouvre le panneau Kyareeh+ sur kyara.games (connecté) pour transmettre tes cartes. L’entraînement reste possible avec toutes les cartes.</p>'
       : app.profile.test
-        ? '<p class="kd-note">Page ouverte hors extension : profil de test « Harness » (8 Mythiques simulées).</p>'
+        ? '<p class="kd-note">Page ouverte hors extension : profil de test « Harness » (8 cartes simulées).</p>'
         : '';
     return `<section class="kd-screen kd-collection">
         <div class="kd-deckbar">
           <div class="kd-deckbar-head">
             <h2>Ton équipe</h2>
-            <p>${fmt(app.deck.length)} / ${DECK_SIZE} Mythiques${unownedInDeck ? `, dont ${fmt(unownedInDeck)} non possédée(s) : entraînement uniquement` : ''}</p>
+            <p>${fmt(app.deck.length)} / ${DECK_SIZE} cartes${unownedInDeck ? `, dont ${fmt(unownedInDeck)} non possédée(s) : entraînement uniquement` : ''}</p>
           </div>
           <div class="kd-slots">${deckSlots()}</div>
           <div class="kd-deckbar-actions">
-            <button class="kd-btn" type="button" data-act="fill" ${app.deck.length >= DECK_SIZE || !all.length ? 'disabled' : ''} title="Complète avec tes Mythiques possédées en priorité">Compléter au hasard</button>
+            <button class="kd-btn" type="button" data-act="fill" ${app.deck.length >= DECK_SIZE || !all.length ? 'disabled' : ''} title="Complète avec tes cartes possédées en priorité">Compléter au hasard</button>
             <button class="kd-btn is-ghost" type="button" data-act="clear" ${app.deck.length ? '' : 'disabled'}>Vider</button>
           </div>
         </div>
@@ -1534,14 +1544,19 @@
             <option value="all">Tous les types</option>
             ${typeList.map((t) => `<option value="${esc(t)}" ${app.type === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
           </select>
+          <select data-role="rarity" aria-label="Rareté">
+            <option value="all">Toutes les raretés</option>
+            <option value="M" ${app.rarity === 'M' ? 'selected' : ''}>Mythiques</option>
+            <option value="L" ${app.rarity === 'L' ? 'selected' : ''}>Légendaires</option>
+          </select>
           <select data-role="series" aria-label="Série">
             <option value="all">Toutes les séries</option>
             ${seriesList.map((s) => `<option value="${esc(s)}" ${app.series === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
           </select>
           <label class="kd-check"><input type="checkbox" data-role="owned" ${app.ownedOnly ? 'checked' : ''}> Possédées (${app.profile ? fmt(ownedCount) : '—'})</label>
         </div>
-        <p class="kd-count">${all.length ? `${fmt(filtered.length)} Mythique(s) sur ${fmt(all.length)}` : 'Données du duel indisponibles (content/duel-data.js non chargé).'}</p>
-        <div class="kd-grid">${grid || (all.length ? '<p class="kd-empty">Aucune Mythique ne correspond à ces filtres.</p>' : '')}</div>
+        <p class="kd-count">${all.length ? `${fmt(filtered.length)} carte(s) sur ${fmt(all.length)}` : 'Données du duel indisponibles (content/duel-data.js non chargé).'}</p>
+        <div class="kd-grid">${grid || (all.length ? '<p class="kd-empty">Aucune carte ne correspond à ces filtres.</p>' : '')}</div>
       </section>`;
   }
 
@@ -1599,8 +1614,8 @@
     const practiceNote = !E
       ? `<p class="kd-note is-bad">${esc(engineIssue())} Entraînement indisponible.</p>`
       : app.deck.length < DECK_SIZE
-        ? `<p class="kd-note">Ton équipe compte ${fmt(app.deck.length)}/${DECK_SIZE} Mythiques : elle sera complétée au hasard pour cette partie.</p>`
-        : '<p class="kd-note">Toutes les Mythiques sont permises, possédées ou non. La partie se joue dans ton navigateur, sans relais.</p>';
+        ? `<p class="kd-note">Ton équipe compte ${fmt(app.deck.length)}/${DECK_SIZE} cartes : elle sera complétée au hasard pour cette partie.</p>`
+        : '<p class="kd-note">Toutes les Mythiques et Légendaires sont permises, possédées ou non. La partie se joue dans ton navigateur, sans relais.</p>';
 
     let room = '';
     if (net) {
@@ -2031,7 +2046,7 @@
           <span class="kd-roundbox">Tour <b id="kd-round">${fmt(view.round ?? match.state.round ?? 0)}</b><small>/ ${fmt(maxRounds)}</small></span>
           ${mode}
           ${timer}
-          ${match.filled ? '<span class="kd-mode is-muted" title="Ton équipe comptait moins de 5 Mythiques">Équipe complétée au hasard</span>' : ''}
+          ${match.filled ? '<span class="kd-mode is-muted" title="Ton équipe comptait moins de 5 cartes">Équipe complétée au hasard</span>' : ''}
           ${app.net && app.net.peer === 'left' && match.kind === 'online' && !over ? '<span class="kd-mode is-warn">Adversaire déconnecté (60 s pour revenir)</span>' : ''}
           <span class="kd-spacer"></span>
           <button class="kd-btn is-ghost is-small" type="button" data-act="log" aria-expanded="${app.logOpen}">Journal</button>
@@ -2182,7 +2197,7 @@
         break;
       case 'pick': {
         const id = String(el.getAttribute('data-id') || '');
-        if (!isMythic(id)) break;
+        if (!isPlayable(id)) break;
         if (app.deck.includes(id)) app.deck = app.deck.filter((x) => x !== id);
         else if (app.deck.length < DECK_SIZE) app.deck = [...app.deck, id];
         persistPrefs();
@@ -2345,6 +2360,7 @@
     const role = t && t.getAttribute && t.getAttribute('data-role');
     if (role === 'series') app.series = t.value;
     else if (role === 'type') app.type = t.value;
+    else if (role === 'rarity') app.rarity = t.value;
     else if (role === 'owned') app.ownedOnly = Boolean(t.checked);
     else return;
     render();

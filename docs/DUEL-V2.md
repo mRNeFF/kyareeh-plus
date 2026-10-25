@@ -1,7 +1,7 @@
 # Kyara Duel v2 — combat « à la Pokémon », application détachable, effets
 
 Plan **et** contrat des chantiers v2 (branche `duel-v2`, partie de `duel-natif`). Remplace, pour
-le combat, les §2–§5 de `docs/DUEL-SPEC.md` ; le reste de DUEL-SPEC (périmètre Mythiques,
+le combat, les §2–§5 de `docs/DUEL-SPEC.md` ; le reste de DUEL-SPEC (périmètre étendu aux Légendaires, voir `docs/LEGENDAIRES.md`,
 conventions, relais autoritatif) reste valable. Conventions : `AGENTS.md` (français partout,
 `esc()`, aucune donnée inventée, aucun chiffre de carte modifié pour équilibrer).
 
