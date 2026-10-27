@@ -334,7 +334,7 @@ npm run verify:duel-relay        # relais : salon, prêt, duel complet
 node test/verify-duel-bet.mjs    # prêt + mise déclarative (aucun transfert)
 npm run build
 npm run build:chrome     # paquet Chrome / Edge (dist/chrome + zip)
-npm run verify:chrome    # charge le paquet dans un Chrome headless (131 contrôles)
+npm run verify:chrome    # charge le paquet dans un Chrome headless (155 contrôles)
 ```
 
 Structure :

@@ -22,14 +22,14 @@ npm install                 # web-ext en devDependency (61 Mo, non versionné)
 npm run start               # lance Firefox avec l'extension chargée
 npm run lint                # web-ext lint -> doit rester à 0 erreur
 npm run build:chrome        # manifeste Chrome dérivé + zip (dist/chrome)
-npm run verify:chrome       # 145 contrôles dans un Chrome headless réel
+npm run verify:chrome       # 155 contrôles dans un Chrome headless réel
 node test/verify-analysis.mjs    # 53 contrôles
 node test/verify-autosell.mjs    # 133 contrôles (sélection pure + stratégies + ordre + ventes actives + classement optimisé + remise en vente + tableau 2 + règlement de mise)
 node test/verify-autosell-expiry.mjs # 81 contrôles (délai configurable, retrait, carte conservée, vente protégée, retour en fin de file, anti-boucle)
 node test/verify-recycle.mjs     # 62 contrôles (exemplaires recyclables, verrou/engagés, plan, totaux, décision après expiration)
 node test/verify-sales-chart.mjs # 92 contrôles (profit net, ventes confirmées, source auto/manual, bénéfice par heure, cumul 1 j / 7 j / total, dédoublonnage)
 node test/verify-statglobal.mjs  # 55 contrôles
-node test/verify-completion.mjs  # 140 contrôles (séries, progression, marché des manquants, panier, garde-fous d'achat)
+node test/verify-completion.mjs  # 142 contrôles (séries, progression, marché des manquants, panier, garde-fous d'achat)
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
 node test/verify-duel-engine.mjs # règles du moteur de duel
 node test/verify-duel-relay.mjs  # relais : partie complète en ligne, erreurs, reconnexion
