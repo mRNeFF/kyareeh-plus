@@ -256,6 +256,7 @@ async function visualPass() {
       ['account', 'chrome-compte.png'],
       ['sell', 'chrome-vente.png'],
       ['recycle', 'chrome-recyclage.png'],
+      ['completion', 'chrome-completion.png'],
       ['stat', 'chrome-stat.png']
     ]) {
       await evaluate(
@@ -1749,6 +1750,217 @@ async function visualPass() {
       'Emulation.setDeviceMetricsOverride',
       { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false },
       sessionId
+    );
+
+    console.log('\n— Completion : séries incomplètes et achat (harness) —');
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => { window.__kyaraPlus.setOpen(true); window.__kyaraPlus.setTab('completion'); return true; })()`
+    );
+    await sleep(600);
+    const completionList = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         return {
+           series: [...root.querySelectorAll('.kp-cplt-row')].map((el) => el.getAttribute('data-series')),
+           rows: root.querySelectorAll('.kp-cplt-row').length,
+           scan: Boolean(root.querySelector('[data-act="completion-scan"]')),
+           stats: root.querySelectorAll('.kp-card-stat').length
+         };
+       })()`
+    );
+    check(
+      'completion : seules les séries incomplètes sont listées',
+      completionList.rows === 2 && completionList.series.includes('Naruto') && completionList.series.includes('ONE PIECE'),
+      JSON.stringify(completionList.series)
+    );
+    check('completion : aucune série complète ni série d’une carte', !completionList.series.includes('Test'), JSON.stringify(completionList.series));
+    check('completion : vue d’ensemble présente', completionList.stats === 4, `${completionList.stats} encart(s)`);
+    check('completion : bouton de relecture du marché', completionList.scan);
+
+    // Relecture du marché : deux séries, une requête par série.
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="completion-scan"]').click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          sessionId,
+          `(() => {
+             const root = document.querySelector('#kyara-plus-root').shadowRoot;
+             return root.querySelector('.kp-cplt-row[data-series="Naruto"]')?.classList.contains('has-dispo') === true;
+           })()`
+        ),
+      { label: 'marché de complétion relu' }
+    );
+    const narutoRow = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const row = root.querySelector('.kp-cplt-row[data-series="Naruto"]');
+         return { text: row?.innerText || '', market: row?.querySelector('.kp-cplt-market')?.innerText || '' };
+       })()`
+    );
+    check(
+      'completion : manquants en vente et coût affichés',
+      /2 en vente/.test(narutoRow.market) && /52/.test(narutoRow.market),
+      narutoRow.market.replace(/\n/g, ' ')
+    );
+
+    // Fiche série : 4 manquantes, 2 disponibles déjà cochées.
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('.kp-cplt-row[data-series="Naruto"] [data-act="completion-open"]').click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          sessionId,
+          `!document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-modal').hidden`
+        ),
+      { label: 'fiche de série ouverte' }
+    );
+    const detail = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const card = root.querySelector('#kp-modal-card');
+         return {
+           cards: card.querySelectorAll('.kp-cplt-card').length,
+           checked: card.querySelectorAll('input[data-completion-pick]:checked').length,
+           disabled: card.querySelectorAll('input[data-completion-pick]:disabled').length,
+           button: card.querySelector('[data-act="completion-start"]')?.textContent.trim() || ''
+         };
+       })()`
+    );
+    check('completion : les 4 manquants sont listés', detail.cards === 4, `${detail.cards} carte(s)`);
+    check('completion : 2 cartes disponibles cochées', detail.checked === 2, `${detail.checked} cochée(s)`);
+    check('completion : 2 cartes introuvables désactivées', detail.disabled === 2, `${detail.disabled} désactivée(s)`);
+    check('completion : total du panier annoncé', /2 cartes/.test(detail.button) && /52/.test(detail.button), detail.button);
+
+    // Panier puis achat réel : le harness débite le chakra et ajoute les cartes.
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="completion-start"]').click();
+         return true;
+       })()`
+    );
+    await sleep(500);
+    const plan = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const card = root.querySelector('#kp-modal-card');
+         return { rows: card.querySelectorAll('.kp-plan-row').length, buy: card.querySelector('[data-act="completion-buy"]')?.textContent.trim() || '' };
+       })()`
+    );
+    check('completion : panier de 2 lignes', plan.rows === 2, `${plan.rows} ligne(s)`);
+    check('completion : confirmation explicite', /Acheter 2 cartes/.test(plan.buy) && /52/.test(plan.buy), plan.buy);
+
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => { window.__chakra = 1000; return true; })()`
+    );
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="completion-buy"]').click();
+         return true;
+       })()`
+    );
+    await waitFor(
+      () => evaluate(cdp, sessionId, 'window.__bought?.length === 2'),
+      { label: 'deux achats de complétion' }
+    );
+    const bought = await evaluate(
+      cdp,
+      sessionId,
+      `(() => ({
+         bought: window.__bought,
+         chakra: window.__chakra,
+         owned: window.__marketState.collection.filter((r) => [770001, 770002].includes(Number(r.characterId))).map((r) => Number(r.characterId)),
+         others: window.__otherListings.length
+       }))()`
+    );
+    check(
+      'completion : achat réel débité (2 cartes, ◆ 52)',
+      bought.chakra === 948 && bought.bought.reduce((sum, b) => sum + b.price, 0) === 52,
+      JSON.stringify({ chakra: bought.chakra, prix: bought.bought.map((b) => b.price) })
+    );
+    check(
+      'completion : cartes ajoutées à la collection',
+      bought.owned.length === 2 && bought.owned.includes(770001) && bought.owned.includes(770002),
+      JSON.stringify(bought.owned)
+    );
+    check('completion : annonces achetées retirées du marché', bought.others === 1, `${bought.others} autre(s) annonce(s)`);
+    await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="completion-plan-close"]')?.click();
+         return true;
+       })()`
+    );
+    await sleep(400);
+    // La collection est relue en fin de lot (plusieurs requêtes) : on attend la
+    // mise à jour plutôt que de lire un rendu intermédiaire.
+    await waitFor(
+      () =>
+        evaluate(
+          cdp,
+          sessionId,
+          `(() => {
+             const root = document.querySelector('#kyara-plus-root').shadowRoot;
+             const row = root.querySelector('.kp-cplt-row[data-series="Naruto"]');
+             return /4\\/6/.test(row?.innerText || '');
+           })()`
+        ),
+      { label: 'progression relue après achat', timeout: 20000 }
+    );
+    const completionAfter = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const row = root.querySelector('.kp-cplt-row[data-series="Naruto"]');
+         return { series: [...root.querySelectorAll('.kp-cplt-row')].map((el) => el.getAttribute('data-series')), text: row?.innerText || '' };
+       })()`
+    );
+    check(
+      'completion : progression relue après achat (4/6, plus rien en vente)',
+      /4\/6/.test(completionAfter.text) && /2 manquantes/.test(completionAfter.text),
+      completionAfter.text.replace(/\n/g, ' | ')
+    );
+    check(
+      'completion : la série reste incomplète tant qu’il manque des cartes',
+      completionAfter.series.includes('Naruto'),
+      JSON.stringify(completionAfter.series)
     );
 
     check('Aucune exception JS pendant le rendu', cdp.exceptions.length === 0, cdp.exceptions.join(' | '));

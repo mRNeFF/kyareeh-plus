@@ -57,6 +57,15 @@
   const SOUND_KEY = 'kyareeh.sound.v1';
   const UI_KEY = 'kyareeh.ui.v1';
   const PANEL_WINDOW_KEY = 'kyareeh.panel.window';
+  // Onglet Completion : filtres + plafond de budget (rien d'autre n'est persisté).
+  const COMPLETION_KEY = 'kyareeh.completion.v1';
+  // Une série est relue au marché au plus toutes les 5 min.
+  const COMPLETION_MARKET_TTL = 5 * 60 * 1000;
+  // Annonces parcourues par série (pages de 50) : le tri serveur est croissant,
+  // donc les 150 moins chères suffisent à trouver le prix plancher de chaque carte.
+  const COMPLETION_MAX_PAGES = 3;
+  // Garde-fou : nombre de séries relues en une passe (≈ 0,4 s par série).
+  const COMPLETION_SCAN_MAX = 150;
   // Les comptes suivis sont relus au bout de 12 h (ou à la demande).
   const STAT_CACHE_MS = 12 * 3600 * 1000;
   const STAT_MAX_ACCOUNTS = 20;
@@ -298,6 +307,45 @@
     dealsMeta: null,
     dealsError: null,
     dealsScanning: false,
+    // Onglet Completion : progression des séries + marché des manquants.
+    completion: {
+      // Index du catalogue et lignes calculées (jamais persistés).
+      index: null,
+      rows: null,
+      totals: null,
+      progress: null,
+      // characterId → { best, count, auctions } relu sur le marché.
+      market: new Map(),
+      marketAt: 0,
+      scan: { running: false, done: 0, total: 0, error: '', stop: false, partial: false },
+      filter: {
+        query: '',
+        // Valeur de départ ; `loadCompletionPrefs` applique la vraie valeur
+        // (COMPLETION_DEFAULT_MIN, dans le bloc COMPLETION) au démarrage.
+        minSize: 5,
+        dispoOnly: false,
+        includeAuctions: false,
+        sort: 'closest',
+        limit: 40
+      },
+      budgetCap: 0,
+      detail: null,
+      picks: new Map(),
+      plan: {
+        open: false,
+        items: [],
+        running: false,
+        stop: false,
+        done: 0,
+        total: 0,
+        bought: 0,
+        spent: 0,
+        failed: [],
+        log: [],
+        finished: false,
+        stopped: null
+      }
+    },
     settings: { ...DEFAULT_SETTINGS },
     priceRun: { running: false, done: 0, total: 0, startedAt: 0 },
     lastSync: 0,
@@ -1102,6 +1150,7 @@
     await loadExpiryJournal();
     await loadSoundPrefs();
     await loadUiPrefs();
+    await loadCompletionPrefs();
     // Fenêtre détachée : le panneau est toujours ouvert (il remplit la fenêtre).
     if (IS_PANEL) state.open = true;
     // L'état de la fenêtre (aller-retour avec le fond) ne retarde pas le montage du panneau,
@@ -6511,6 +6560,698 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Onglet Completion : séries incomplètes, marché, achats confirmés    */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Recalcule l'index des séries et la progression depuis le catalogue et la
+   * collection déjà chargés (aucun appel réseau). Rejoué à chaque rendu :
+   * 6 736 cartes et 1 154 séries se recalculent en quelques millisecondes.
+   */
+  function completionRebuild() {
+    const c = state.completion;
+    c.index = completionIndex([...state.characters.values()]);
+    c.progress = completionProgress(c.index, state.collection, { minSize: c.filter.minSize });
+    c.rows = c.progress.rows;
+    c.totals = c.progress.totals;
+    completionApplyMarket(c.rows, c.market);
+    return c.progress;
+  }
+
+  /** Lignes affichées : séries incomplètes uniquement, puis filtres et tri. */
+  function completionFilteredRows(rows) {
+    const filter = state.completion.filter;
+    const query = filter.query.trim().toLowerCase();
+    let list = (Array.isArray(rows) ? rows : []).filter((row) => row.missing > 0);
+    if (filter.dispoOnly) list = list.filter((row) => row.dispo > 0);
+    if (query) list = list.filter((row) => row.name.toLowerCase().includes(query));
+    return completionSortRows(list, filter.sort);
+  }
+
+  /** Préférences persistées : filtres + plafond de budget. Rien d'autre. */
+  function completionLoadPrefs(raw) {
+    const c = state.completion;
+    const source = raw && typeof raw === 'object' ? raw : {};
+    const filter = source.filter && typeof source.filter === 'object' ? source.filter : {};
+    const minSize = Math.round(Number(filter.minSize));
+    c.filter.query = '';
+    // 0 = toutes les séries, y compris celles d'une seule carte.
+    c.filter.minSize = Number.isFinite(minSize) ? Math.min(500, Math.max(0, minSize)) : COMPLETION_DEFAULT_MIN;
+    c.filter.dispoOnly = filter.dispoOnly === true;
+    c.filter.includeAuctions = filter.includeAuctions === true;
+    c.filter.sort = COMPLETION_SORT_KEYS.includes(String(filter.sort)) ? String(filter.sort) : 'closest';
+    c.budgetCap = Math.max(0, Math.round(Number(source.budgetCap) || 0));
+  }
+
+  async function loadCompletionPrefs() {
+    completionLoadPrefs(await storageGet(COMPLETION_KEY, null));
+  }
+
+  let completionSaveTimer = null;
+  function persistCompletionSoon() {
+    if (completionSaveTimer) return;
+    completionSaveTimer = setTimeout(() => {
+      completionSaveTimer = null;
+      persistCompletionNow();
+    }, 800);
+  }
+
+  function persistCompletionNow() {
+    const c = state.completion;
+    return storageSet(COMPLETION_KEY, {
+      filter: {
+        minSize: c.filter.minSize,
+        dispoOnly: c.filter.dispoOnly,
+        includeAuctions: c.filter.includeAuctions,
+        sort: c.filter.sort
+      },
+      budgetCap: c.budgetCap
+    });
+  }
+
+  const COMPLETION_MIN_OPTIONS = [
+    [10, '10 cartes et plus'],
+    [5, '5 cartes et plus'],
+    [2, '2 cartes et plus'],
+    [0, 'Toutes les séries']
+  ];
+
+  function viewCompletion() {
+    if (!state.user) return state.error ? errorHTML() : loginHTML();
+    if (!state.characters.size) {
+      return `
+        <div class="kp-empty">
+          <b>Catalogue indisponible</b>
+          Le catalogue des cartes n'a pas pu être lu : sans lui, une série ne peut pas être comptée.
+          <div style="margin-top:14px">
+            <button class="kp-btn is-primary" type="button" data-act="refresh">Réessayer</button>
+          </div>
+        </div>`;
+    }
+    const c = state.completion;
+    const progress = completionRebuild();
+    const totals = progress.totals;
+    const rows = completionFilteredRows(progress.visible);
+    const shown = rows.slice(0, c.filter.limit);
+    const scan = c.scan;
+    const dispoTotal = progress.rows.reduce((sum, row) => sum + row.dispo, 0);
+    const costTotal = progress.rows.reduce((sum, row) => sum + row.cost, 0);
+    const pct = totals.cards ? Math.round((totals.owned / totals.cards) * 1000) / 10 : 0;
+    const scanPct = scan.total ? Math.round((scan.done / scan.total) * 100) : 0;
+    const marketAt = c.marketAt ? `marché relu à ${nowTime(c.marketAt)}` : 'marché pas encore relu';
+    const catalogAt = state.characters.size ? `${fmt(state.characters.size)} cartes au catalogue` : 'catalogue absent';
+    const auctions = c.filter.includeAuctions;
+
+    return `
+      <div class="kp-grid">
+        <div class="kp-card-stat"><span>Séries complètes</span><b>${fmt(totals.complete)}</b><small>sur ${plural(totals.series, 'série')}</small></div>
+        <div class="kp-card-stat"><span>Séries incomplètes</span><b>${fmt(totals.incomplete)}</b><small>${fmt(totals.visible)} affichée(s) avec ce filtre</small></div>
+        <div class="kp-card-stat"><span>Cartes manquantes</span><b>${fmt(totals.missing)}</b><small>${fmt(totals.owned)} / ${fmt(totals.cards)} possédées</small></div>
+        <div class="kp-card-stat"><span>Manquants en vente</span><b>${fmt(dispoTotal)}</b><small>${c.marketAt ? `coût connu ◆ ${fmt(costTotal)}` : 'à relire'}</small></div>
+      </div>
+
+      <div class="kp-hero" style="margin-top:10px">
+        <div class="kp-hero-label">Complétion du catalogue</div>
+        <div class="kp-hero-value">${pct.toLocaleString('fr-FR')} %</div>
+        <div class="kp-hero-sub">${plural(totals.owned, 'carte')} possédée(s) sur ${fmt(totals.cards)} · ${catalogAt}</div>
+        <div class="kp-progress">
+          <div class="kp-progress-bar"><i style="width:${Math.max(1, pct)}%"></i></div>
+          <div class="kp-progress-row">
+            <span>${marketAt}${auctions ? ' · enchères avec achat immédiat incluses' : ' · prix fixe uniquement'}</span>
+            <span>${fmt(totals.incomplete)} série(s) incomplète(s) à relire</span>
+          </div>
+        </div>
+        ${
+          scan.running
+            ? `<div class="kp-progress">
+                 <div class="kp-progress-bar"><i style="width:${scanPct}%"></i></div>
+                 <div class="kp-progress-row">
+                   <span>Lecture du marché… ${fmt(scan.done)}/${fmt(scan.total)} séries</span>
+                   <span class="kp-link" data-act="completion-scan-stop">Arrêter</span>
+                 </div>
+               </div>`
+            : scan.error
+              ? `<div class="kp-alert is-bad" style="margin-top:8px">Lecture du marché interrompue : ${esc(scan.error)}</div>`
+              : ''
+        }
+      </div>
+
+      <div class="kp-toolbar kp-toolbar-search">
+        <input class="kp-input" type="search" data-completion-search autocomplete="off"
+          placeholder="Chercher une série…" value="${esc(c.filter.query)}">
+        <button class="kp-btn ${scan.running ? '' : 'is-primary'}" type="button" data-act="completion-scan" ${scan.running ? 'disabled' : ''}>
+          ${scan.running ? '<span class="kp-spinner"></span> Lecture…' : 'Relire le marché'}
+        </button>
+      </div>
+
+      <div class="kp-filters">
+        <label class="kp-filter">
+          <span>Taille minimale</span>
+          <select class="kp-select" data-completion-min>
+            ${COMPLETION_MIN_OPTIONS.map(
+              ([value, label]) => `<option value="${value}" ${c.filter.minSize === value ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </label>
+        <label class="kp-filter">
+          <span>Tri</span>
+          <select class="kp-select" data-completion-sort>
+            ${COMPLETION_SORTS.map(
+              ([value, label]) => `<option value="${value}" ${c.filter.sort === value ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </label>
+      </div>
+
+      <div class="kp-chips">
+        <button class="kp-chip ${c.filter.dispoOnly ? 'is-on' : ''}" type="button" data-act="completion-dispo">
+          <em>Manquants en vente</em> ${fmt(dispoTotal)}
+        </button>
+        <button class="kp-chip ${auctions ? 'is-on' : ''}" type="button" data-act="completion-auctions">
+          <em>Enchères</em> ${auctions ? 'avec achat immédiat' : 'exclues'}
+        </button>
+      </div>
+
+      ${
+        shown.length
+          ? `<div class="kp-section">
+               <div class="kp-section-title">Séries incomplètes <span class="kp-muted">${fmt(rows.length)} au total</span></div>
+               <div class="kp-cplt-list">${shown
+                 .map(
+                   (row) => `
+                 <div class="kp-cplt-row ${row.dispo ? 'has-dispo' : ''}" data-act="completion-series" data-series="${esc(
+                   row.name
+                 )}" title="Voir les cartes manquantes de ${esc(row.name)}">
+                   <div class="kp-cplt-head">
+                     <b>${esc(row.name)}</b>
+                     <small>${fmt(row.owned)}/${fmt(row.total)} · ${plural(row.missing, 'manquante')}${
+                       row.auctions ? ` · ${fmt(row.auctions)} enchère(s)` : ''
+                     }</small>
+                   </div>
+                   <div class="kp-cplt-bar"><i style="width:${Math.max(1.5, row.pct)}%"></i></div>
+                   <div class="kp-cplt-pct">${row.pct.toLocaleString('fr-FR')} %</div>
+                   <div class="kp-cplt-market">${
+                     row.dispo
+                       ? `<b>${fmt(row.dispo)}</b> en vente${row.costKnown ? ` · ◆ ${fmt(row.cost)}` : ''}`
+                       : '<span class="kp-muted">—</span>'
+                   }</div>
+                   <button class="kp-btn" type="button" data-act="completion-open" data-series="${esc(row.name)}" ${
+                     row.dispo ? '' : 'disabled'
+                   }>Préparer</button>
+                 </div>`
+                 )
+                 .join('')}</div>
+               ${
+                 rows.length > shown.length
+                   ? `<button class="kp-btn is-ghost kp-more" type="button" data-act="completion-more">Afficher ${Math.min(
+                       40,
+                       rows.length - shown.length
+                     )} série(s) de plus</button>`
+                   : ''
+               }
+             </div>`
+          : `<div class="kp-empty">
+               <b>Aucune série incomplète avec ce filtre</b>
+               ${totals.incomplete ? 'Élargis la taille minimale ou vide la recherche.' : 'Toutes les séries du catalogue sont complètes.'}
+             </div>`
+      }
+
+      <div class="kp-hint">
+        Périmètre : catalogue du site (${catalogAt}, cartes « héritage » exclues) comparé à ta collection ;
+        une carte compte dès que tu en possèdes au moins un exemplaire. Le marché n'est lu que sur les
+        ${fmt(COMPLETION_MAX_PAGES * 50)} annonces les moins chères de chaque série incomplète, et seulement
+        quand tu cliques sur « Relire le marché » (aucune lecture en arrière-plan).
+        ${c.filter.minSize ? `Les séries de moins de ${fmt(c.filter.minSize)} cartes sont masquées.` : ''}
+      </div>
+    `;
+  }
+
+  /** Ligne de série ouverte (la fiche travaille sur la même source que la liste). */
+  function completionDetailRow() {
+    const c = state.completion;
+    if (!c.detail) return null;
+    if (!c.progress) completionRebuild();
+    const rows = c.progress?.rows ?? c.rows ?? [];
+    return rows.find((row) => row.name === c.detail) ?? null;
+  }
+
+  /** Manquants réellement achetables d'une série, triés par prix. */
+  function completionOffersOf(row) {
+    const c = state.completion;
+    const offers = [];
+    for (const id of Array.isArray(row?.missingIds) ? row.missingIds : []) {
+      const entry = c.market.get(String(id));
+      const best = entry?.best ?? null;
+      if (!best) continue;
+      const card = c.index?.byCard?.get(String(id)) ?? null;
+      offers.push({
+        characterId: String(id),
+        listingId: best.listingId,
+        price: best.price,
+        auction: best.auction === true,
+        seller: best.seller ?? '',
+        endsAt: best.endsAt ?? null,
+        count: entry.count ?? 1,
+        name: card?.name ?? `Carte #${id}`,
+        rarity: card?.rarity ?? '',
+        image: card?.image ?? null
+      });
+    }
+    return offers.sort((a, b) => a.price - b.price || a.name.localeCompare(b.name, 'fr'));
+  }
+
+  function openCompletionSeries(name) {
+    const c = state.completion;
+    if (!c.index || !c.progress) completionRebuild();
+    const rows = c.progress?.rows ?? c.rows ?? [];
+    const row = rows.find((item) => item.name === String(name ?? ''));
+    if (!row) {
+      notify('Série introuvable dans le catalogue.');
+      return;
+    }
+    c.detail = row.name;
+    // Toutes les cartes disponibles sont cochées : décocher est le geste rare.
+    c.picks = new Map();
+    for (const offer of completionOffersOf(row)) c.picks.set(offer.characterId, offer);
+    render();
+  }
+
+  /** Fiche d'une série : possédées, manquantes, disponibles, sélection. */
+  function renderCompletionDetail() {
+    const c = state.completion;
+    const row = completionDetailRow();
+    if (!row) {
+      c.detail = null;
+      return;
+    }
+    const offers = completionOffersOf(row);
+    const picks = offers.filter((offer) => c.picks.has(offer.characterId));
+    const planPreview = completionPlan(picks, { cap: c.budgetCap, chakra: toNum(state.user?.chakra) });
+    const ownedQty = completionOwnedMap(state.collection);
+    const missingCards = row.missingIds
+      .map((id) => {
+        const card = c.index?.byCard?.get(String(id)) ?? null;
+        const offer = offers.find((item) => item.characterId === String(id)) ?? null;
+        return {
+          id: String(id),
+          name: card?.name ?? `Carte #${id}`,
+          rarity: card?.rarity ?? '',
+          image: card?.image ?? null,
+          qty: ownedQty.get(String(id)) ?? 0,
+          offer
+        };
+      })
+      .sort((a, b) => (a.offer ? 0 : 1) - (b.offer ? 0 : 1) || a.name.localeCompare(b.name, 'fr'));
+
+    ui.modal.hidden = false;
+    ui.modalCard.classList.add('is-wide');
+    ui.modalCard.dataset.kind = `completion-detail:${row.name}`;
+    ui.modalCard.innerHTML = `
+      <div class="kp-modal-head">
+        <b>${esc(row.name)} · ${fmt(row.owned)}/${fmt(row.total)}</b>
+        <button class="kp-icon-btn" type="button" data-act="completion-close">✕</button>
+      </div>
+      <div class="kp-modal-body">
+        <div class="kp-progress">
+          <div class="kp-progress-bar"><i style="width:${Math.max(1, row.pct)}%"></i></div>
+          <div class="kp-progress-row">
+            <span>${row.pct.toLocaleString('fr-FR')} % complétée · ${plural(row.missing, 'manquante')}</span>
+            <span>${row.dispo ? `${fmt(row.dispo)} en vente · ◆ ${fmt(row.cost)}` : 'aucune annonce connue'}</span>
+          </div>
+        </div>
+
+        ${
+          !c.marketAt
+            ? `<div class="kp-alert" style="margin-top:8px">
+                 Marché pas encore relu : clique sur « Relire le marché » dans l'onglet Completion
+                 pour connaître les prix et les annonces de cette série.
+               </div>`
+            : ''
+        }
+
+        ${
+          row.dispo
+            ? `<div class="kp-cplt-actions">
+                 <button class="kp-btn is-ghost" type="button" data-act="completion-pick-all">Tout cocher</button>
+                 <button class="kp-btn is-ghost" type="button" data-act="completion-pick-none">Tout décocher</button>
+                 <span class="kp-muted">${fmt(picks.length)} sélectionnée(s) · ◆ ${fmt(planPreview.total)}</span>
+               </div>`
+            : ''
+        }
+
+        <div class="kp-cplt-cards">
+          ${missingCards
+            .map((card) => {
+              const info = rarityInfo(card.rarity);
+              const checked = card.offer ? c.picks.has(card.id) : false;
+              return `
+                <label class="kp-cplt-card ${card.offer ? 'is-available' : ''}">
+                  <input type="checkbox" data-completion-pick="${esc(card.id)}" ${checked ? 'checked' : ''} ${
+                    card.offer ? '' : 'disabled'
+                  }>
+                  <img src="${esc(imgSrc({ image: card.image }))}" alt="" loading="lazy">
+                  <span class="kp-cplt-card-main">
+                    <b>${esc(card.name)}</b>
+                    <small><span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>${
+                      card.offer
+                        ? ` · ◆ ${fmt(card.offer.price)}${card.offer.auction ? ' · enchère (achat immédiat)' : ''} · ${plural(
+                            card.offer.count,
+                            'annonce'
+                          )}`
+                        : ' · introuvable en vente'
+                    }</small>
+                  </span>
+                </label>`;
+            })
+            .join('')}
+        </div>
+        <div class="kp-hint">
+          Seules les cartes cochées seront achetées. Le prix affiché est l'achat immédiat le moins cher connu
+          au moment de la lecture ; il est revérifié juste avant chaque achat, et le lot s'arrête au premier écart.
+        </div>
+      </div>
+      <div class="kp-modal-foot">
+        <button class="kp-btn is-ghost" type="button" data-act="completion-close">Fermer</button>
+        <button class="kp-btn is-primary" type="button" data-act="completion-start" ${planPreview.count ? '' : 'disabled'}>
+          Préparer ${plural(planPreview.count, 'carte')} · ◆ ${fmt(planPreview.total)}
+        </button>
+      </div>
+    `;
+  }
+
+  /** Panier : récapitulatif, plafond, confirmation puis progression des achats. */
+  function renderCompletionPlan() {
+    const c = state.completion;
+    const plan = c.plan;
+    const stateplan = completionPlan(plan.items, { cap: c.budgetCap, chakra: toNum(state.user?.chakra) });
+    const running = plan.running;
+    const chakra = toNum(state.user?.chakra);
+    const blocked = stateplan.blocker;
+
+    ui.modal.hidden = false;
+    ui.modalCard.classList.add('is-wide');
+    ui.modalCard.dataset.kind = 'completion-plan';
+    ui.modalCard.innerHTML = `
+      <div class="kp-modal-head">
+        <b>Achat de complétion · ${plural(stateplan.count, 'carte')}</b>
+        <button class="kp-icon-btn" type="button" data-act="completion-plan-close" ${running ? 'disabled' : ''}>✕</button>
+      </div>
+      <div class="kp-modal-body">
+        <div class="kp-alert ${blocked ? 'is-bad' : ''}">
+          <b>${running ? 'Achat en cours' : blocked ? 'Achat impossible en l’état' : 'Aucune dépense sans confirmation'}</b><br>
+          ${
+            running
+              ? `Achats effectués : ${fmt(plan.bought)} · dépensé ◆ ${fmt(plan.spent)}`
+              : blocked
+                ? esc(blocked.message)
+                : 'Vérifie le total, le plafond et le solde. Chaque annonce est revérifiée juste avant son achat ; un écart de prix arrête cette carte, jamais tout le lot sans raison.'
+          }
+        </div>
+        <div class="kp-summary">
+          <div><span>Cartes</span><b>${fmt(stateplan.count)}</b></div>
+          <div><span>Total</span><b>◆ ${fmt(stateplan.total)}</b></div>
+          <div><span>Chakra</span><b>${chakra == null ? '—' : `◆ ${fmt(chakra)}`}</b></div>
+          <div><span>Après achat</span><b>${chakra == null ? '—' : `◆ ${fmt(Math.max(0, chakra - stateplan.total))}`}</b></div>
+        </div>
+        <div class="kp-filters">
+          <label class="kp-filter">
+            <span>Plafond de budget (◆, 0 = aucun)</span>
+            <input class="kp-input" type="number" min="0" step="50" data-completion-cap value="${c.budgetCap}" ${
+              running ? 'disabled' : ''
+            }>
+          </label>
+        </div>
+        <div class="kp-plan">
+          ${stateplan.items
+            .map(
+              (item) => `
+            <div class="kp-plan-row kp-cplt-plan-row">
+              <div class="kp-name">${esc(item.name)} <small>${esc(item.series)}${
+                item.auction ? ' · enchère (achat immédiat)' : ''
+              }</small></div>
+              <div class="kp-net">◆ ${fmt(item.price)}</div>
+            </div>`
+            )
+            .join('')}
+        </div>
+        ${plan.failed.length ? `<div class="kp-hint">Écartés : ${plan.failed.map((f) => `${esc(f.name)} (${esc(f.code || 'erreur')})`).join(' · ')}</div>` : ''}
+        ${plan.log.length ? `<div class="kp-log">${plan.log.map((l) => `<div class="is-${l.kind}">${esc(l.text)}</div>`).join('')}</div>` : ''}
+      </div>
+      <div class="kp-modal-foot">
+        <button class="kp-btn is-ghost" type="button" data-act="completion-plan-close" ${running ? 'disabled' : ''}>${
+          plan.finished ? 'Fermer' : 'Annuler'
+        }</button>
+        ${
+          running
+            ? `<button class="kp-btn is-danger" type="button" data-act="completion-buy-stop">Arrêter</button>`
+            : plan.finished
+              ? `<button class="kp-btn is-primary" type="button" data-act="completion-plan-close">Terminé</button>`
+              : `<button class="kp-btn is-primary" type="button" data-act="completion-buy" ${blocked ? 'disabled' : ''}>
+                   Acheter ${plural(stateplan.count, 'carte')} · ◆ ${fmt(stateplan.total)}
+                 </button>`
+        }
+      </div>
+    `;
+  }
+
+  /** Ouvre le panier depuis la sélection de la fiche série. */
+  function completionPreparePlan() {
+    const c = state.completion;
+    const row = completionDetailRow();
+    if (!row) return;
+    const items = completionOffersOf(row).filter((offer) => c.picks.has(offer.characterId));
+    if (!items.length) {
+      notify('Aucune carte cochée : rien à préparer.');
+      return;
+    }
+    c.plan = {
+      open: true,
+      items,
+      running: false,
+      stop: false,
+      done: 0,
+      total: items.length,
+      bought: 0,
+      spent: 0,
+      failed: [],
+      log: [],
+      finished: false,
+      stopped: null
+    };
+    c.detail = null;
+    render();
+  }
+
+  /**
+   * Une lecture de marché par série incomplète. `missing=1` limite la réponse
+   * aux cartes qui manquent au compte ; le tri serveur est croissant, donc les
+   * pages lues contiennent les annonces les moins chères.
+   */
+  async function completionFetchSeries(name) {
+    const c = state.completion;
+    const params = new URLSearchParams();
+    params.set('series', name);
+    params.set('pageSize', '50');
+    params.set('sort', 'price_asc');
+    params.set('missing', '1');
+    if (!c.filter.includeAuctions) params.set('type', 'fixed');
+    const items = [];
+    for (let page = 1; page <= COMPLETION_MAX_PAGES; page += 1) {
+      params.set('page', String(page));
+      const data = await api(`/api/market/listings?${params.toString()}`, { timeout: 20000 });
+      const batch = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
+      items.push(...batch);
+      if (batch.length < 50) break;
+      const total = toNum(data?.total);
+      if (total != null && page * 50 >= total) break;
+    }
+    return items;
+  }
+
+  /** Relecture du marché des séries incomplètes, une requête à la fois. */
+  async function completionScanMarket() {
+    const c = state.completion;
+    const scan = c.scan;
+    if (scan.running) return;
+    const progress = completionRebuild();
+    const target = completionSortRows(
+      progress.rows.filter((row) => row.missing > 0 && row.total >= c.filter.minSize),
+      'closest'
+    ).slice(0, COMPLETION_SCAN_MAX);
+    if (!target.length) {
+      notify('Aucune série incomplète à relire.');
+      return;
+    }
+    scan.running = true;
+    scan.stop = false;
+    scan.done = 0;
+    scan.total = target.length;
+    scan.error = '';
+    scan.partial = false;
+    c.market = new Map();
+    c.marketAt = 0;
+    render();
+    try {
+      for (const row of target) {
+        if (scan.stop) break;
+        const listings = await completionFetchSeries(row.name).catch((err) => {
+          scan.error = friendlyError(err);
+          return [];
+        });
+        completionMergeMarket(c.market, listings, {
+          includeAuctions: c.filter.includeAuctions,
+          now: Date.now()
+        });
+        scan.done += 1;
+        c.marketAt = Date.now();
+        if (scan.done % 3 === 0 || scan.done === scan.total) {
+          completionApplyMarket(c.rows, c.market);
+          render();
+        }
+      }
+      scan.partial = scan.done < scan.total;
+    } finally {
+      scan.running = false;
+      c.marketAt = Date.now();
+      completionApplyMarket(c.rows, c.market);
+      render();
+    }
+  }
+
+  /** Libellé lisible d'un échec d'achat. */
+  function completionFailText(code, guard) {
+    const key = String(code ?? '');
+    const table = {
+      listing_closed: 'annonce terminée, vendue ou retirée',
+      own_listing: 'c’est ta propre annonce',
+      price_changed: guard?.price && guard?.expected ? `prix passé de ◆ ${guard.expected} à ◆ ${guard.price}` : 'prix modifié',
+      chakra: 'pas assez de chakra',
+      rate_limited: 'trop d’actions d’un coup, patiente quelques secondes',
+      pass_required: 'laissez-passer expiré : ouvre un booster sur le site puis réessaie',
+      market_locked: 'le marché n’est pas débloqué sur ce compte',
+      guest_limit: 'compte invité : connecte-toi avec Discord'
+    };
+    return table[key] || key || 'erreur inconnue';
+  }
+
+  /**
+   * Achats réels, un par un, avec contrôle juste avant chaque dépense.
+   * Aucune relance automatique : le premier incident bloquant arrête le lot.
+   */
+  async function completionRun() {
+    const c = state.completion;
+    const plan = c.plan;
+    if (plan.running) return;
+    const preview = completionPlan(plan.items, { cap: c.budgetCap, chakra: toNum(state.user?.chakra) });
+    if (preview.blocker) {
+      notify(preview.blocker.message);
+      render();
+      return;
+    }
+    plan.running = true;
+    plan.stop = false;
+    plan.finished = false;
+    plan.done = 0;
+    plan.bought = 0;
+    plan.spent = 0;
+    plan.failed = [];
+    plan.log = [];
+    plan.stopped = null;
+    render();
+
+    for (const item of [...plan.items]) {
+      if (plan.stop) break;
+      // 0) Une carte possédée entre-temps n'est jamais achetée en double.
+      const ownedNow = completionOwnedMap(state.collection);
+      if ((ownedNow.get(String(item.characterId)) ?? 0) > 0) {
+        plan.log.push({ kind: 'warn', text: `${item.name} · déjà possédée, ignorée` });
+        plan.done += 1;
+        render();
+        continue;
+      }
+      // 1) Le plafond et le solde sont revérifiés à chaque carte : le chakra a
+      //    pu bouger pendant le lot.
+      const cap = c.budgetCap;
+      const chakra = toNum(state.user?.chakra);
+      if (cap > 0 && plan.spent + item.price > cap) {
+        plan.stopped = 'cap';
+        plan.log.push({ kind: 'bad', text: `Plafond ◆ ${fmt(cap)} atteint : lot arrêté.` });
+        plan.stop = true;
+        break;
+      }
+      if (chakra != null && plan.spent + item.price > chakra) {
+        plan.stopped = 'chakra';
+        plan.log.push({ kind: 'bad', text: 'Chakra insuffisant : lot arrêté.' });
+        plan.stop = true;
+        break;
+      }
+
+      // 2) Contrôle de fraîcheur : prix, état, propriétaire, échéance.
+      let fresh = null;
+      try {
+        fresh = await api(`/api/market/listings/${encodeURIComponent(item.listingId)}`, { timeout: 15000 });
+      } catch {
+        fresh = null;
+      }
+      const guard = completionBuyGuard(item, fresh, { now: Date.now() });
+      if (!guard.ok) {
+        plan.failed.push({ name: item.name, code: guard.code });
+        plan.log.push({ kind: guard.code === 'price_changed' ? 'warn' : 'bad', text: `${item.name} · ${completionFailText(guard.code, guard)}` });
+        plan.done += 1;
+        render();
+        continue;
+      }
+
+      // 3) Achat réel.
+      try {
+        const res = await api(`/api/market/listings/${encodeURIComponent(item.listingId)}/buy`, {
+          method: 'POST',
+          timeout: 25000
+        });
+        plan.bought += 1;
+        plan.spent += guard.price;
+        const nextChakra = toNum(res?.user?.chakra);
+        if (nextChakra != null && state.user) state.user.chakra = nextChakra;
+        c.market.delete(item.characterId);
+        c.picks.delete(item.characterId);
+        plan.log.push({ kind: 'good', text: `${item.name} · achetée ◆ ${fmt(guard.price)}` });
+      } catch (err) {
+        const code = String(err?.code || '');
+        plan.failed.push({ name: item.name, code });
+        plan.log.push({ kind: 'bad', text: `${item.name} · ${completionFailText(code)}` });
+        const outcome = completionBuyOutcome(code);
+        if (outcome === 'stop') {
+          plan.stopped = code;
+          plan.stop = true;
+        }
+      }
+      plan.done += 1;
+      render();
+      // Rythme volontairement lent : le site limite les actions d'un coup.
+      if (!plan.stop) await sleep(1400);
+    }
+
+    plan.running = false;
+    plan.finished = true;
+    if (!plan.stop) completionApplyMarket(c.rows, c.market);
+    render();
+
+    // 4) La collection et le compte sont relus une seule fois, en fin de lot.
+    if (plan.bought) {
+      await loadData({ keepPrices: true }).catch(() => null);
+      completionRebuild();
+      render();
+    }
+    notify(
+      plan.bought
+        ? `Complétion : ${plural(plan.bought, 'carte')} achetée(s) · ◆ ${fmt(plan.spent)}${
+            plan.failed.length ? ` · ${plural(plan.failed.length, 'échec')}` : ''
+          }`
+        : 'Complétion : aucun achat effectué'
+    );
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Render                                                              */
   /* ------------------------------------------------------------------ */
 
@@ -6534,8 +7275,11 @@
     }
     syncSoundControls();
     ui.panel.hidden = !state.open;
-    // Les onglets denses (Vente, Recyclage, Stat) gardent un peu plus de largeur.
-    ui.panel.classList.toggle('is-wide', state.tab === 'sell' || state.tab === 'recycle' || state.tab === 'stat');
+    // Les onglets denses (Vente, Recyclage, Completion, Stat) gardent un peu plus de largeur.
+    ui.panel.classList.toggle(
+      'is-wide',
+      state.tab === 'sell' || state.tab === 'recycle' || state.tab === 'completion' || state.tab === 'stat'
+    );
     // +Duel : l'application occupe toute la hauteur (pas de stats ni d'onglets au-dessus).
     ui.panel.classList.toggle('is-duel', duelState().mode === 'duel');
     ui.fab.classList.toggle('is-open', state.open);
@@ -7221,6 +7965,7 @@
       ['sell', sellable ? `Vente (${sellable})` : 'Vente'],
       ['recycle', 'Recyclage'],
       ['market', 'Marché'],
+      ['completion', 'Completion'],
       ['cards', '%Drop'],
       ['auto', 'Auto-Open'],
       ['stat', 'Stat'],
@@ -7272,6 +8017,7 @@
       sell: viewSell,
       recycle: viewRecycle,
       market: viewMarket,
+      completion: viewCompletion,
       cards: viewCards,
       auto: viewAuto,
       stat: viewStat,
@@ -7804,6 +8550,387 @@
   }
 
   /* STATS:END */
+
+  /* COMPLETION:BEGIN — logique pure de l'onglet Completion, testée par
+   * test/verify-completion.mjs. Aucune fonction ici ne touche au DOM, au réseau
+   * ou au stockage.
+   *
+   * Périmètre : catalogue `/api/characters` seulement. Les 660 cartes
+   * « héritage » (`/api/characters/heritage`) ne sont ni comptées ni affichées :
+   * elles n'ont aucune annonce sur le marché et fausseraient la complétion.
+   *
+   * Identifiants canoniques : l'id de carte (`characterId`). Une série n'a pas
+   * d'identifiant côté site : sa clé est son libellé exact du catalogue,
+   * normalisé une seule fois par `completionSeriesKey`. */
+
+  const COMPLETION_DEFAULT_MIN = 5;
+  const COMPLETION_UNKNOWN_SERIES = 'Sans série';
+
+  /** Nombre exploitable ou `null` (une donnée absente reste absente). */
+  function completionNum(value) {
+    if (value == null || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  /** Clé de série : libellé du catalogue, espaces normalisés, jamais vide. */
+  function completionSeriesKey(value) {
+    const text = String(value ?? '')
+      .normalize('NFC')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text || COMPLETION_UNKNOWN_SERIES;
+  }
+
+  /**
+   * Index des séries du catalogue.
+   * → `{ series: Map(nom → { name, total, cards[] }), byCard: Map(id → carte), cards }`
+   * Les cartes sans identifiant et les doublons de catalogue sont ignorés.
+   */
+  function completionIndex(catalog) {
+    const series = new Map();
+    const byCard = new Map();
+    let cards = 0;
+    for (const card of Array.isArray(catalog) ? catalog : []) {
+      const raw = card?.id ?? card?.characterId;
+      if (raw == null || raw === '') continue;
+      const id = String(raw);
+      if (byCard.has(id)) continue;
+      const name = completionSeriesKey(card?.series);
+      const rarity = String(card?.rarity ?? '').trim().toUpperCase();
+      byCard.set(id, {
+        id,
+        series: name,
+        rarity,
+        name: String(card?.name ?? ''),
+        image: card?.image ?? null
+      });
+      let entry = series.get(name);
+      if (!entry) {
+        entry = { name, total: 0, cards: [], byRarity: {} };
+        series.set(name, entry);
+      }
+      entry.cards.push(id);
+      entry.total += 1;
+      if (rarity) entry.byRarity[rarity] = (entry.byRarity[rarity] ?? 0) + 1;
+      cards += 1;
+    }
+    return { series, byCard, cards };
+  }
+
+  /**
+   * Quantités possédées par carte, depuis `Map`, collection brute
+   * (`/api/me/collection`) ou objet `{ id: qty }`.
+   */
+  function completionOwnedMap(source) {
+    const out = new Map();
+    if (source instanceof Map) {
+      for (const [id, qty] of source) out.set(String(id), Math.max(0, Math.floor(Number(qty) || 0)));
+      return out;
+    }
+    if (Array.isArray(source)) {
+      for (const entry of source) {
+        const id = entry?.characterId ?? entry?.id;
+        if (id == null || id === '') continue;
+        const qty = entry?.qty == null ? 1 : Number(entry.qty);
+        out.set(String(id), Math.max(0, Math.floor(Number.isFinite(qty) ? qty : 1)));
+      }
+      return out;
+    }
+    for (const [id, qty] of Object.entries(source ?? {})) {
+      out.set(String(id), Math.max(0, Math.floor(Number(qty) || 0)));
+    }
+    return out;
+  }
+
+  /**
+   * Progression de chaque série : une carte est possédée dès que sa quantité
+   * est supérieure à zéro. Les doublons et les exemplaires déjà en vente ne
+   * comptent jamais une complétion de plus.
+   */
+  function completionProgress(index, owned, options = {}) {
+    const qtys = completionOwnedMap(owned);
+    const rows = [];
+    let complete = 0;
+    let incomplete = 0;
+    let cardsOwned = 0;
+    const series = index?.series instanceof Map ? index.series : new Map();
+    for (const entry of series.values()) {
+      let has = 0;
+      let copies = 0;
+      const missingIds = [];
+      for (const id of entry.cards) {
+        const qty = qtys.get(id) ?? 0;
+        copies += qty;
+        if (qty > 0) has += 1;
+        else missingIds.push(id);
+      }
+      const total = entry.total;
+      if (total - has > 0) incomplete += 1;
+      else complete += 1;
+      cardsOwned += has;
+      rows.push({
+        name: entry.name,
+        total,
+        owned: has,
+        missing: Math.max(0, total - has),
+        pct: total ? Math.round((has / total) * 1000) / 10 : 0,
+        missingIds,
+        copies,
+        byRarity: entry.byRarity,
+        cards: entry.cards,
+        // Remplis par `completionApplyMarket` quand le marché a été relu.
+        dispo: 0,
+        dispoIds: [],
+        cost: 0,
+        costKnown: 0,
+        auctions: 0,
+        cheapest: null
+      });
+    }
+    const minSize =
+      completionNum(options.minSize) == null
+        ? COMPLETION_DEFAULT_MIN
+        : Math.max(1, Math.round(Number(options.minSize)));
+    const visible = rows.filter((row) => row.total >= minSize && row.missing > 0);
+    const totalCards = index?.cards ?? rows.reduce((sum, row) => sum + row.total, 0);
+    return {
+      rows,
+      visible,
+      totals: {
+        series: rows.length,
+        complete,
+        incomplete,
+        visible: visible.length,
+        cards: totalCards,
+        owned: cardsOwned,
+        missing: Math.max(0, totalCards - cardsOwned),
+        minSize
+      }
+    };
+  }
+
+  /**
+   * Une annonce est achetable tout de suite si elle est active, qu'elle n'est
+   * pas la nôtre et qu'elle a un prix d'achat immédiat : prix fixe, ou enchère
+   * **avec** achat immédiat (`buyoutPrice`). Une enchère sans achat immédiat
+   * n'est jamais retenue : on ne mise pas à la place du joueur.
+   */
+  function completionListingOffer(listing, options = {}) {
+    if (!listing || typeof listing !== 'object') return null;
+    if (listing.isMine === true) return null;
+    const status = String(listing.status ?? 'active');
+    if (status && status !== 'active') return null;
+    const auction = String(listing.type ?? '') === 'auction';
+    if (auction && options.includeAuctions !== true) return null;
+    const rawEnd = listing.endsAt ?? listing.expiresAt ?? null;
+    const endMs = rawEnd ? Date.parse(rawEnd) : NaN;
+    const now = completionNum(options.now) == null ? Date.now() : Number(options.now);
+    if (Number.isFinite(endMs) && endMs <= now) return null;
+    const price = auction ? completionNum(listing.buyoutPrice) : completionNum(listing.price);
+    if (price == null || price <= 0) return null;
+    const rawId = listing.characterId ?? listing.character?.id;
+    if (rawId == null || rawId === '') return null;
+    return {
+      listingId: String(listing.id ?? ''),
+      characterId: String(rawId),
+      price: Math.round(price),
+      auction,
+      seller: String(listing.seller?.pseudo ?? listing.seller?.name ?? ''),
+      endsAt: rawEnd ?? null,
+      endMs: Number.isFinite(endMs) ? endMs : null,
+      createdAt: listing.createdAt ?? null
+    };
+  }
+
+  /**
+   * Regroupe des annonces par carte : meilleur prix d'achat immédiat et nombre
+   * d'annonces réellement achetables. Aucune fusion par nom : tout passe par
+   * l'identifiant de carte.
+   */
+  function completionMarket(listings, options = {}) {
+    const market = new Map();
+    for (const listing of Array.isArray(listings) ? listings : []) {
+      const offer = completionListingOffer(listing, options);
+      if (!offer) continue;
+      const entry = market.get(offer.characterId) ?? {
+        characterId: offer.characterId,
+        best: null,
+        count: 0,
+        auctions: 0
+      };
+      entry.count += 1;
+      if (offer.auction) entry.auctions += 1;
+      if (!entry.best || offer.price < entry.best.price) entry.best = offer;
+      market.set(offer.characterId, entry);
+    }
+    return market;
+  }
+
+  /** Ajoute une lecture d'annonces à un cache existant (sans perdre le meilleur prix). */
+  function completionMergeMarket(target, listings, options = {}) {
+    const market = target instanceof Map ? target : new Map();
+    const fresh = completionMarket(listings, options);
+    for (const [id, entry] of fresh) {
+      const prev = market.get(id);
+      if (!prev) {
+        market.set(id, entry);
+        continue;
+      }
+      prev.count += entry.count;
+      prev.auctions += entry.auctions;
+      if (!prev.best || (entry.best && entry.best.price < prev.best.price)) prev.best = entry.best;
+    }
+    return market;
+  }
+
+  /**
+   * Enrichit les séries avec le marché : nombre de manquants disponibles, prix
+   * le plus bas par carte, coût connu pour terminer la série. Les manquants
+   * introuvables restent manquants et ne sont jamais valorisés d'office.
+   */
+  function completionApplyMarket(rows, market) {
+    const offers = market instanceof Map ? market : new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      let dispo = 0;
+      let cost = 0;
+      let costKnown = 0;
+      let auctions = 0;
+      let cheapest = null;
+      const dispoIds = [];
+      for (const id of Array.isArray(row?.missingIds) ? row.missingIds : []) {
+        const best = offers.get(String(id))?.best ?? null;
+        if (!best) continue;
+        dispo += 1;
+        dispoIds.push(String(id));
+        cost += best.price;
+        costKnown += 1;
+        if (best.auction) auctions += 1;
+        if (cheapest == null || best.price < cheapest) cheapest = best.price;
+      }
+      row.dispo = dispo;
+      row.dispoIds = dispoIds;
+      row.cost = cost;
+      row.costKnown = costKnown;
+      row.auctions = auctions;
+      row.cheapest = cheapest;
+    }
+    return rows;
+  }
+
+  /** Tris de la liste des séries (toutes les valeurs sont calculées localement). */
+  const COMPLETION_SORTS = [
+    ['closest', 'Série la plus proche d’être complétée'],
+    ['missing_desc', 'Nombre de manquants ↓'],
+    ['cheapest', 'Manquant le moins cher'],
+    ['cost_asc', 'Coût pour terminer ↑'],
+    ['ratio', 'Meilleur rapport complétion / prix'],
+    ['name', 'Nom A→Z']
+  ];
+
+  const COMPLETION_SORT_KEYS = COMPLETION_SORTS.map(([key]) => key);
+
+  function completionSortRows(rows, sort) {
+    const list = [...(Array.isArray(rows) ? rows : [])];
+    const key = COMPLETION_SORT_KEYS.includes(String(sort)) ? String(sort) : 'closest';
+    const byName = (a, b) => String(a.name).localeCompare(String(b.name), 'fr');
+    const priceOrLast = (row) => (row.cheapest == null ? Number.MAX_SAFE_INTEGER : row.cheapest);
+    const costOrLast = (row) => (row.costKnown > 0 ? row.cost : Number.MAX_SAFE_INTEGER);
+    // Rapport : part des manquants déjà disponibles pour le prix le plus bas.
+    const ratioOf = (row) => (row.cost > 0 ? row.dispo / row.cost : row.dispo > 0 ? 1 : 0);
+    const comparators = {
+      closest: (a, b) => a.missing - b.missing || b.pct - a.pct || byName(a, b),
+      missing_desc: (a, b) => b.missing - a.missing || byName(a, b),
+      cheapest: (a, b) => priceOrLast(a) - priceOrLast(b) || b.dispo - a.dispo || byName(a, b),
+      cost_asc: (a, b) => costOrLast(a) - costOrLast(b) || b.dispo - a.dispo || byName(a, b),
+      ratio: (a, b) => ratioOf(b) - ratioOf(a) || b.dispo - a.dispo || byName(a, b),
+      name: byName
+    };
+    return list.sort(comparators[key]);
+  }
+
+  /**
+   * Panier de complétion : une carte manquante → au plus une annonce.
+   * Les garde-fous (plafond, solde) sont calculés ici, jamais dans la vue.
+   */
+  function completionPlan(items, options = {}) {
+    const list = [];
+    const seen = new Set();
+    let total = 0;
+    for (const item of Array.isArray(items) ? items : []) {
+      const id = String(item?.characterId ?? '');
+      const price = completionNum(item?.price);
+      const listingId = String(item?.listingId ?? '');
+      if (!id || !listingId || price == null || price <= 0) continue;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const rounded = Math.round(price);
+      list.push({
+        characterId: id,
+        listingId,
+        name: String(item?.name ?? ''),
+        series: String(item?.series ?? ''),
+        price: rounded,
+        auction: item?.auction === true,
+        endsAt: item?.endsAt ?? null
+      });
+      total += rounded;
+    }
+    const cap = completionNum(options.cap) ?? 0;
+    const chakra = completionNum(options.chakra);
+    const overCap = cap > 0 && total > cap;
+    const overBalance = chakra != null && total > chakra;
+    let blocker = null;
+    if (!list.length) blocker = { code: 'empty', message: 'Aucune carte manquante disponible à acheter.' };
+    else if (overBalance) blocker = { code: 'chakra', message: 'Le total dépasse le chakra disponible.' };
+    else if (overCap) blocker = { code: 'cap', message: 'Le total dépasse le plafond de budget.' };
+    return { items: list, count: list.length, total, cap, chakra, overCap, overBalance, blocker };
+  }
+
+  // Un achat peut échouer sans remettre en cause la suite du lot.
+  const COMPLETION_STOP_CODES = ['chakra', 'rate_limited', 'pass_required', 'market_locked', 'guest_limit'];
+
+  /** Décision après une erreur d'achat : `stop` le lot, `skip` la carte, sinon `error`. */
+  function completionBuyOutcome(code) {
+    const key = String(code ?? '').trim();
+    if (!key) return 'ok';
+    if (COMPLETION_STOP_CODES.includes(key)) return 'stop';
+    if (key === 'listing_closed' || key === 'own_listing') return 'skip';
+    return 'error';
+  }
+
+  /**
+   * Contrôle juste avant l'achat : l'annonce existe encore, elle n'est pas à
+   * nous, et son prix n'a pas monté. Un prix plus bas est accepté (on paie le
+   * prix réel, jamais un prix supposé).
+   */
+  function completionBuyGuard(item, listing, options = {}) {
+    const now = completionNum(options.now) == null ? Date.now() : Number(options.now);
+    if (!listing || typeof listing !== 'object') return { ok: false, code: 'listing_closed' };
+    if (listing.isMine === true) return { ok: false, code: 'own_listing' };
+    const status = String(listing.status ?? 'active');
+    if (status && status !== 'active') return { ok: false, code: 'listing_closed' };
+    const rawEnd = listing.endsAt ?? listing.expiresAt ?? null;
+    const endMs = rawEnd ? Date.parse(rawEnd) : NaN;
+    if (Number.isFinite(endMs) && endMs <= now) return { ok: false, code: 'listing_closed' };
+    const auction = String(listing.type ?? '') === 'auction';
+    const price = auction ? completionNum(listing.buyoutPrice) : completionNum(listing.price);
+    if (price == null || price <= 0) return { ok: false, code: 'listing_closed' };
+    const actual = Math.round(price);
+    const expected = completionNum(item?.price);
+    if (expected != null && actual > Math.round(expected)) {
+      return { ok: false, code: 'price_changed', price: actual, expected: Math.round(expected) };
+    }
+    return { ok: true, code: 'ok', price: actual, auction };
+  }
+
+  /** Série d'une carte du catalogue, ou `null` si elle n'y figure pas (héritage). */
+  function completionSeriesOfCard(index, id) {
+    const card = index?.byCard instanceof Map ? index.byCard.get(String(id)) : null;
+    return card ? card.series : null;
+  }
+
+  /* COMPLETION:END */
 
   /* ------------------------------------------------------------------ */
   /* Statistiques : collecte et stockage                                 */
@@ -13548,6 +14675,21 @@
   function renderModal() {
     if (!ui) return;
 
+    // Le panier de complétion prime sur la fiche : c'est lui qui porte les achats.
+    if (state.completion.plan.open) {
+      renderCompletionPlan();
+      return;
+    }
+    if (state.completion.detail) {
+      if (completionDetailRow()) {
+        renderCompletionDetail();
+        return;
+      }
+      // Série disparue du catalogue (relecture) : on referme proprement.
+      state.completion.detail = null;
+      state.completion.picks = new Map();
+    }
+
     // L'aperçu de recyclage prend la modale tant qu'il est ouvert (il suit la
     // progression de l'action, même si l'utilisateur change d'onglet).
     if (state.recycle.open) {
@@ -13958,6 +15100,9 @@
       case 'tab':
         state.tab = el.getAttribute('data-tab') || 'account';
         if (state.tab !== 'debug') state.debugReturnTab = state.tab;        // Quitter l'onglet ferme l'aperçu de recyclage, sauf pendant l'action.
+        // Quitter Completion arrête une relecture de marché en cours : aucune
+        // requête ne doit continuer en arrière-plan.
+        if (state.tab !== 'completion' && state.completion.scan.running) state.completion.scan.stop = true;
         if (state.tab !== 'recycle' && state.recycle.open && !state.recycle.running) {
           state.recycle.open = false;
           state.recycle.plan = [];
@@ -13983,6 +15128,87 @@
         if (ui?.view) ui.view.scrollTop = 0;
         persistUiSoon();
         render();
+        break;
+      /* ---- Onglet Completion ---- */
+      case 'completion-series':
+      case 'completion-open':
+        openCompletionSeries(el.getAttribute('data-series'));
+        break;
+      case 'completion-close':
+        state.completion.detail = null;
+        state.completion.picks = new Map();
+        render();
+        break;
+      case 'completion-scan':
+        completionScanMarket();
+        break;
+      case 'completion-scan-stop':
+        if (state.completion.scan.running) state.completion.scan.stop = true;
+        break;
+      case 'completion-more':
+        state.completion.filter.limit += 40;
+        render();
+        break;
+      case 'completion-dispo':
+        state.completion.filter.dispoOnly = !state.completion.filter.dispoOnly;
+        state.completion.filter.limit = 40;
+        persistCompletionSoon();
+        render();
+        break;
+      case 'completion-auctions':
+        // Les enchères ne sont retenues que si elles ont un achat immédiat.
+        state.completion.filter.includeAuctions = !state.completion.filter.includeAuctions;
+        state.completion.filter.limit = 40;
+        state.completion.market = new Map();
+        state.completion.marketAt = 0;
+        completionApplyMarket(state.completion.rows ?? [], state.completion.market);
+        persistCompletionSoon();
+        notify(
+          state.completion.filter.includeAuctions
+            ? 'Enchères incluses : seules celles avec achat immédiat peuvent être achetées. Relis le marché.'
+            : 'Enchères exclues : prix fixe uniquement. Relis le marché.'
+        );
+        break;
+      case 'completion-pick-all': {
+        const row = completionDetailRow();
+        const c = state.completion;
+        c.picks = new Map();
+        for (const offer of row ? completionOffersOf(row) : []) c.picks.set(offer.characterId, offer);
+        render();
+        break;
+      }
+      case 'completion-pick-none':
+        state.completion.picks = new Map();
+        render();
+        break;
+      case 'completion-start':
+        completionPreparePlan();
+        break;
+      case 'completion-buy':
+        completionRun();
+        break;
+      case 'completion-buy-stop':
+        if (state.completion.plan.running) state.completion.plan.stop = true;
+        render();
+        break;
+      case 'completion-plan-close':
+        if (!state.completion.plan.running) {
+          state.completion.plan = {
+            open: false,
+            items: [],
+            running: false,
+            stop: false,
+            done: 0,
+            total: 0,
+            bought: 0,
+            spent: 0,
+            failed: [],
+            log: [],
+            finished: false,
+            stopped: null
+          };
+          render();
+        }
         break;
       case 'open-site':
         window.open('https://kyara.games/', '_blank', 'noopener');
@@ -14529,6 +15755,49 @@
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
 
+    // --- Onglet Completion : filtres, sélection, plafond de budget ---
+    const completionMin = target.closest('[data-completion-min]');
+    if (completionMin) {
+      state.completion.filter.minSize = Math.max(0, Math.round(Number(completionMin.value) || 0));
+      state.completion.filter.limit = 40;
+      persistCompletionSoon();
+      render();
+      return;
+    }
+
+    const completionSort = target.closest('[data-completion-sort]');
+    if (completionSort) {
+      const value = String(completionSort.value);
+      state.completion.filter.sort = COMPLETION_SORT_KEYS.includes(value) ? value : 'closest';
+      state.completion.filter.limit = 40;
+      persistCompletionSoon();
+      render();
+      return;
+    }
+
+    const completionPick = target.closest('input[data-completion-pick]');
+    if (completionPick) {
+      const id = String(completionPick.getAttribute('data-completion-pick') || '');
+      const c = state.completion;
+      const row = completionDetailRow();
+      const offer = row ? completionOffersOf(row).find((item) => item.characterId === id) : null;
+      if (completionPick.checked) {
+        if (offer) c.picks.set(id, offer);
+      } else {
+        c.picks.delete(id);
+      }
+      render();
+      return;
+    }
+
+    const completionCap = target.closest('[data-completion-cap]');
+    if (completionCap) {
+      state.completion.budgetCap = Math.max(0, Math.round(Number(completionCap.value) || 0));
+      persistCompletionSoon();
+      render();
+      return;
+    }
+
     // --- Onglet Recyclage : sélection et options ---
     const recycleSel = target.closest('input[data-recycle-sel]');
     if (recycleSel) {
@@ -14952,6 +16221,24 @@
       return;
     }
 
+    const completionSearch = target.closest('[data-completion-search]');
+    if (completionSearch) {
+      state.completion.filter.query = completionSearch.value;
+      state.completion.filter.limit = 40;
+      render();
+      const again = qs('[data-completion-search]');
+      if (again) {
+        again.focus();
+        const pos = again.value.length;
+        try {
+          again.setSelectionRange(pos, pos);
+        } catch {
+          /* type=search peut refuser la sélection */
+        }
+      }
+      return;
+    }
+
     const statSearch = target.closest('[data-role="stat-account-search"]');
     if (statSearch) {
       state.stats.query = statSearch.value;
@@ -15150,6 +16437,20 @@
       statCollectionValue,
       statAccountMetrics,
       statOwnerCounts,
+      // Onglet Completion
+      completionRebuild,
+      completionScanMarket,
+      completionRun,
+      completionOffersOf,
+      completionDetailRow,
+      openCompletionSeries,
+      completionIndex,
+      completionProgress,
+      completionMarket,
+      completionApplyMarket,
+      completionSortRows,
+      completionPlan,
+      completionBuyGuard,
       // +Duel
       duelState,
       publishDuelProfile
