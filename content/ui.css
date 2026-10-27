@@ -3729,6 +3729,10 @@ img.kp-avatar {
   margin-bottom: 8px;
 }
 
+.kp-filters-4 {
+  grid-template-columns: 1.1fr 1.3fr 0.7fr 0.9fr;
+}
+
 .kp-filter {
   display: grid;
   gap: 3px;
@@ -5380,4 +5384,117 @@ img.kp-avatar {
 .kp-cplt-note.is-good,
 .kp-cplt-note.is-info {
   color: var(--kp-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* Auto-Achat : règles, déficits, conditions et file                    */
+/* ------------------------------------------------------------------ */
+
+.kp-autobuy-rules {
+  margin: 10px 0 8px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.kp-autobuy-rules > summary {
+  color: var(--kp-muted);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.kp-autobuy-rules ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: var(--kp-muted);
+  font-size: 9.5px;
+  line-height: 1.55;
+}
+
+.kp-autobuy-rules li + li {
+  margin-top: 3px;
+}
+
+.kp-autobuy-gaps,
+.kp-autobuy-conditions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.kp-autobuy-gap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 9px;
+}
+
+.kp-autobuy-gap b {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9.5px;
+}
+
+.kp-autobuy-gap small {
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-autobuy-gap.is-open {
+  border-color: rgba(255, 77, 46, 0.3);
+}
+
+.kp-autobuy-gap.is-done {
+  border-color: rgba(74, 222, 128, 0.25);
+}
+
+.kp-autobuy-condition {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 9px;
+}
+
+.kp-autobuy-condition.is-ok {
+  color: #86efac;
+}
+
+.kp-autobuy-condition.is-bad {
+  color: #fca5a5;
+}
+
+.kp-autobuy-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(74, 222, 128, 0.14);
+  color: #86efac;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
+.kp-autobuy-tag.is-off {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--kp-muted);
+}
+
+.kp-autobuy-list .kp-sell-row {
+  cursor: default;
+}
+
+.kp-autobuy-plan-list {
+  max-height: 42vh;
+  overflow-y: auto;
 }

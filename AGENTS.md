@@ -10,7 +10,7 @@ Extension **Firefox et Chrome / Edge (Manifest V3, un seul code)** nommée **Kya
 tableau de bord du compte, valorisation en chakra, vente assistée, marché, chasses de cartes,
 auto-open de boosters et statistiques.
 
-- Version actuelle : **2.8.1** (`manifest.json` + `package.json` doivent rester synchronisés)
+- Version actuelle : **2.9.0** (`manifest.json` + `package.json` doivent rester synchronisés)
 - Dépôt : `https://github.com/mRNeFF/kyareeh-plus` (branche `master`)
 - Auteur / utilisateur : **Axel** — parle-lui en **français**, réponses concises et concrètes.
 - Dernier commit de référence : `9ed5384`
@@ -30,6 +30,8 @@ node test/verify-recycle.mjs     # 62 contrôles (exemplaires recyclables, verro
 node test/verify-sales-chart.mjs # 92 contrôles (profit net, ventes confirmées, source auto/manual, bénéfice par heure, cumul 1 j / 7 j / total, dédoublonnage)
 node test/verify-statglobal.mjs  # 55 contrôles
 node test/verify-completion.mjs  # 142 contrôles (séries, progression, marché des manquants, panier, garde-fous d'achat)
+node test/verify-autobuy.mjs     # 117 contrôles (statut Renaissance, déficits, filtres, 9 tris, file, plafonds, garde-fous, marché)
+node scripts/autobuy-shots.mjs   # 44 contrôles navigateur + captures de l'onglet Auto-Achat (hors dépôt)
 node test/verify-duel-data.mjs   # cohérence des champions du duel (textes ↔ chiffres, pronoms, doublons)
 node test/verify-duel-engine.mjs # règles du moteur de duel
 node test/verify-duel-relay.mjs  # relais : partie complète en ligne, erreurs, reconnexion
@@ -55,8 +57,8 @@ l'extension depuis la console ou un navigateur automatisé.
 
 | Fichier | Rôle |
 |---|---|
-| `content/ui.js` (~16 500 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
-| `content/ui.css` (~5 300 lignes) | Styles injectés dans un Shadow DOM (préfixe `kp-`). |
+| `content/ui.js` (~19 000 lignes) | **Tout le panneau** : état, appels API, vues, événements, calculs purs. |
+| `content/ui.css` (~5 500 lignes) | Styles injectés dans un Shadow DOM (préfixe `kp-`). |
 | `content/duel-data.js` | Champions du duel (données + `passiveFx` générés par `scripts/duel-passives.mjs`). |
 | `content/duel-engine.js` | Moteur du duel, **pur** (aucun DOM/réseau/aléa hors graine), partagé par l'extension et le relais. |
 | `content/duel-rules.js` | Livre de règles affiché dans l'onglet Règles (copie : `docs/REGLES-DUEL.md`). |
@@ -65,6 +67,7 @@ l'extension depuis la console ou un navigateur automatisé.
 | `panel/` | Fenêtre **détachée** (`panel.html`, `panel.css`, `panel-boot.js`) : le panneau complet (+Tools et +Duel) dans sa propre fenêtre ; monte `content/ui.js` sans site web (`IS_PANEL`) et relaie les appels `/api/…` vers un onglet kyara.games ouvert. La mise en page plein écran est dans `content/ui.css` (`.kp-panel.is-window`) : le panneau est en Shadow DOM, `panel.css` ne l'atteint pas. |
 | `relay/` | Serveur Node autoritatif des salons en ligne (Railway). Exclu du zip AMO. |
 | `docs/DUEL-SPEC.md`, `docs/DUEL-V2.md` | Contrats du duel (v1, puis v2 : combat 1 contre 1, application détachable, effets). |
+| `docs/AUTO-ACHAT-EVEIL.md` | Règles vérifiées de l'Éveil et de la Renaissance, hypothèses, limites et sécurité de l'onglet Auto-Achat. |
 | `background/background.js` | Service worker minimal (messages popup ↔ onglet). |
 | `popup/` | Popup de la barre d'outils (recharger l'extension). |
 | `test/harness.html` | Faux site + fausse API (comptes, marché, packs, amis, classements). |
@@ -135,6 +138,11 @@ lu depuis `localStorage.kyara_token` + `x-pass` pour les écritures).
 | `GET /api/characters/news` | Dernière révision du catalogue (`removed`, `heritage`, `before`, `after`, `series[]`) : le catalogue bouge. |
 | `POST /api/me/collection/:id/recycle` | Recyclage d'exemplaires (`{ qty }`), **une carte à la fois** ; réponse `{ user, entry, gained }`. |
 | `GET /api/market/buy-orders?characterId=` | Carnet d'achat. |
+| `GET /api/me/renaissance` | Statut de la prochaine Renaissance : `level`, `next`, `eligible`, `requirements[]` (`key`, `have`, `need`, `ok`). **503** tant que `renaissanceOpen` est faux dans `/api/config`. |
+| `POST /api/me/renaissance` | Renaissance (`{ confirm: 'RENAISSANCE' }`) — action irréversible, **jamais appelée** par l'extension. |
+| `GET /api/eveil/catalog`, `/api/eveil/market` | Catalogue et marché Éveil : `{ revealAt, cards[] }` / annonces `{ eveilId, serial, price, total }`. Vides avant `eveilRevealAt`. |
+| `GET /api/me/eveil`, `/api/me/eveil/chance` | Copies Éveil possédées et chance de tirage (session). |
+| `POST /api/eveil/cards/:id/buy` | Achat d'une copie Éveil (`{ price }`), réservé aux comptes ayant fait une Renaissance. |
 
 **Échange / don (vérifié dans les chunks du site et les règles publiques, 25/10/2026)** :
 il n'existe **aucun endpoint de don unilatéral**. Un échange est une proposition avec **séquestre**
@@ -180,6 +188,7 @@ relais, lui, ne transporte que les conditions et les identifiants, jamais de cha
 | **Recyclage** | Sélection ciblée des doublons : recherche, filtres rareté/série, tri par valeur de recyclage / doublons / prix / ventes 7 j / rareté / nom, compteur − / + par carte (1 → `qty − locked − 1`), bandeau total et **aperçu** avant confirmation. Les cartes **verrouillées** (`pinned`), les exemplaires **engagés** (`listable`) et les uniques sont exclus ; **L/M décochées par défaut**. Relecture de la collection juste avant l'action (rien n'est recyclé si une quantité a changé), un `POST …/recycle` par carte, progression/arrêt/journal, chakra réellement crédité. |
 | **Marché** | Deux vues internes : **Marché global** (recherche serveur, une ligne par carte, prix fixe/enchère le plus bas, achat immédiat, dépliant des ventes) et **Bons plans** (scan sous la médiane, tri, pages, seuil). Mes annonces actives en bas. |
 | **Completion** | **Séries incomplètes uniquement** (catalogue `/api/characters`, **héritage exclu**). Vue d'ensemble (séries complètes/incomplètes, cartes manquantes, manquants en vente), barre de progression globale, liste des séries avec progression, manquants, nombre d'annonces et coût connu ; filtres recherche / **taille minimale** / **manquants en vente** / **enchères**, 6 tris. **Filtre de raretés** : boutons « Légendaire » / « Mythique » qui retirent la rareté de toute l'analyse (total de série, manquants, pourcentage, compteurs et marché) — l'inventaire n'est jamais modifié ; persistant (`kyareeh.completion.v1`) et état vide explicite quand toutes les manquantes restantes sont masquées. **Rafraîchir une série** : bouton `↻ Rafraîchir` par ligne, une requête par page (3 max) sur cette seule série, purge puis fusion du cache (une annonce vendue/annulée/expirée disparaît immédiatement), heure de dernière lecture, note « annonce disparue », erreur discrète, anti-spam de 5 s par série. **Fiche série** : cartes manquantes avec prix d'achat immédiat, nombre d'annonces, case à cocher. **Panier** : total, **plafond de budget persisté**, comparaison au chakra, confirmation explicite puis **achat réel** (`POST /api/market/listings/:id/buy`) carte par carte — annonce relue juste avant (état, échéance, prix, propriétaire), hausse de prix = carte écartée, `chakra`/`rate_limited`/`pass_required` = arrêt du lot, collection relue une fois en fin de lot. **Enchères décochées par défaut** : seules celles avec achat immédiat sont achetables. Marché relu **à la demande**, série par série, sur les **150 annonces les moins chères** (`series=…&missing=1&sort=price_asc`, 3 pages max) ; aucune lecture en arrière-plan. Bloc pur `/* COMPLETION:BEGIN … END */` testé par `test/verify-completion.mjs`. |
+| **Auto-Achat** | File d'achats **orientée Éveil** : lit `/api/me/renaissance` et cible les prérequis de rareté (cartes différentes C/U/R/E, L/M), seuls achetables. Affiche cartes manquantes, progression officielle (`—` si la Renaissance est fermée), cartes restantes, coût estimé, annonces par carte (prix fixe ; enchères avec achat immédiat en option) et manquants sans annonce connue. Filtres rareté/série/prix max/disponibles/séries incomplètes/masquer L-M/nécessaires à l'Éveil ; **9 tris** dont **Priorité Éveil** (gain `100/(conditions × need)` par carte). File **une carte à la fois** : annonce relue et classement recalculé avant chaque achat, prix monté/annonce disparue = carte ignorée, **plafond de budget** et **prix unitaire** persistés (`kyareeh.autobuy.v1`), **Arrêter** permanent, **simulation par défaut**, confirmation réelle supplémentaire, journal horodaté. Aucune lecture en arrière-plan ; la Renaissance n'est jamais déclenchée par l'extension. Bloc pur `/* AUTOBUY:BEGIN … END */` testé par `test/verify-autobuy.mjs` ; captures et scénarios par `scripts/autobuy-shots.mjs`. |
 | **%Drop** | Chasse à la carte : probabilité exacte par booster, boosters attendus, coût moyen, espérance de chakra. |
 | **Auto-Open** | Boucle d'ouverture avec `T_max = (9 − B) × I + R`, watchdog, arrêt sur L/M, anti-AFK, journal horodaté, reprise après rechargement. |
 | **Stat** | Classement de comptes suivis (recherche manuelle + import auto des amis) sur 10 métriques. Menu déroulant du critère, tableau réduit à ce critère, camembert à droite avec tous les comptes et 50 couleurs max, rangs ex æquo, rang site sous le pseudo, détail par compte. |
@@ -189,9 +198,9 @@ relais, lui, ne transporte que les conditions et les identifiants, jamais de cha
 
 ## 8. Limites connues / dette
 
-- `content/ui.js` est un monolithe (~16 500 lignes). Toute nouvelle vue l'agrandit : extraire un
+- `content/ui.js` est un monolithe (~19 000 lignes). Toute nouvelle vue l'agrandit : extraire un
   module serait utile mais risqué sans tests de non-régression UI.
-- 29 avertissements `web-ext lint` : `UNSAFE_VAR_ASSIGNMENT` sur `innerHTML` dans `content/ui.js`
+- 30 avertissements `web-ext lint` : `UNSAFE_VAR_ASSIGNMENT` sur `innerHTML` dans `content/ui.js`
   et `duel/duel-app.js`, plus un `INLINE_SCRIPT` dans `duel/fx-demo.html` ; inhérents au rendu
   par chaînes ; à traiter seulement si on migre vers du DOM construit.
 - L'onglet Stat dépend de `trades/owned` + `fair-play/prices` : si le site change ces endpoints,
@@ -209,6 +218,11 @@ relais, lui, ne transporte que les conditions et les identifiants, jamais de cha
   CDP `Extensions.loadUnpacked` et travaille sur une copie autorisant `127.0.0.1:8787`.
 - Les textes qui nomment le navigateur ou sa page de réglages passent par `IS_GECKO` /
   `BROWSER_NAME` dans `ui.js` (et `popup.js`) : ne pas réintroduire « Firefox » en dur.
+- **Éveil / Renaissance (27/10/2026)** : `renaissanceOpen: false` et `/api/eveil/catalog` vide
+  jusqu'au **3 novembre 2026, 21:00 Paris** (`eveilRevealAt`). L'onglet Auto-Achat affiche donc
+  `—` et un mode préparation ; aucune règle de Renaissance n'est inventée. Le marché Éveil
+  (`/api/eveil/market`, achat par `POST /api/eveil/cards/:id/buy`) n'est **pas** encore automatisé :
+  données absentes et limite « une carte Éveil par paire et par mois ». Voir `docs/AUTO-ACHAT-EVEIL.md`.
 
 ## 9. Pistes proposées, non développées
 

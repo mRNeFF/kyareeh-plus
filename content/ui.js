@@ -59,6 +59,8 @@
   const PANEL_WINDOW_KEY = 'kyareeh.panel.window';
   // Onglet Completion : filtres + plafond de budget (rien d'autre n'est persisté).
   const COMPLETION_KEY = 'kyareeh.completion.v1';
+  // Onglet Auto-Achat : filtres, tri, plafonds et journal (persistés).
+  const AUTOBUY_KEY = 'kyareeh.autobuy.v1';
   // Une série est relue au marché au plus toutes les 5 min.
   const COMPLETION_MARKET_TTL = 5 * 60 * 1000;
   // Annonces parcourues par série (pages de 50) : le tri serveur est croissant,
@@ -353,6 +355,58 @@
         log: [],
         finished: false,
         stopped: null
+      }
+    },
+    // Onglet Auto-Achat : file d'achats contrôlée des cartes manquantes,
+    // orientée vers le déblocage de l'Éveil (prérequis de la Renaissance).
+    autobuy: {
+      filter: {
+        query: '',
+        rarity: 'all',
+        series: '',
+        maxPrice: 0,
+        dispoOnly: false,
+        incompleteOnly: false,
+        hideL: false,
+        hideM: false,
+        eveilOnly: true,
+        includeAuctions: false,
+        sort: 'eveil',
+        limit: 40
+      },
+      // Statut `/api/me/renaissance` normalisé (jamais persisté).
+      status: null,
+      statusAt: 0,
+      statusLoading: false,
+      statusError: '',
+      // characterId → annonces normalisées (les moins chères d'abord).
+      market: new Map(),
+      marketAt: 0,
+      scan: { running: false, done: 0, total: 0, error: '', stop: false },
+      budgetCap: 0,
+      maxUnit: 0,
+      // Simulation par défaut : aucune dépense réelle sans geste explicite.
+      dryRun: true,
+      // Cumul des achats réels effectués depuis cet onglet (jamais masqué).
+      totalSpent: 0,
+      expanded: new Set(),
+      log: [],
+      plan: {
+        open: false,
+        running: false,
+        starting: false,
+        stop: false,
+        items: [],
+        previewCount: 0,
+        previewTotal: 0,
+        bought: 0,
+        spent: 0,
+        failed: [],
+        finished: false,
+        stopped: null,
+        confirmReal: false,
+        simOwned: null,
+        simStatus: null
       }
     },
     settings: { ...DEFAULT_SETTINGS },
@@ -1269,6 +1323,7 @@
     await loadSoundPrefs();
     await loadUiPrefs();
     await loadCompletionPrefs();
+    await loadAutobuyPrefs();
     // Fenêtre détachée : le panneau est toujours ouvert (il remplit la fenêtre).
     if (IS_PANEL) state.open = true;
     // L'état de la fenêtre (aller-retour avec le fond) ne retarde pas le montage du panneau,
@@ -7557,6 +7612,1260 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Onglet Auto-Achat : file d'achats orientée Éveil                    */
+  /* ------------------------------------------------------------------ */
+
+  function autobuyPrefsPayload() {
+    const a = state.autobuy;
+    return {
+      filter: {
+        rarity: a.filter.rarity,
+        series: a.filter.series,
+        maxPrice: a.filter.maxPrice,
+        dispoOnly: a.filter.dispoOnly,
+        incompleteOnly: a.filter.incompleteOnly,
+        hideL: a.filter.hideL,
+        hideM: a.filter.hideM,
+        eveilOnly: a.filter.eveilOnly,
+        includeAuctions: a.filter.includeAuctions,
+        sort: a.filter.sort
+      },
+      budgetCap: a.budgetCap,
+      maxUnit: a.maxUnit,
+      dryRun: a.dryRun,
+      totalSpent: a.totalSpent,
+      log: a.log.slice(-80)
+    };
+  }
+
+  /** Filtres, tri, plafonds et journal : conservés d'une session à l'autre. */
+  function autobuyLoadPrefs(raw) {
+    const a = state.autobuy;
+    const source = raw && typeof raw === 'object' ? raw : {};
+    const filter = source.filter && typeof source.filter === 'object' ? source.filter : {};
+    a.filter.query = '';
+    a.filter.rarity = ['C', 'U', 'R', 'E', 'L', 'M'].includes(filter.rarity) ? filter.rarity : 'all';
+    a.filter.series = typeof filter.series === 'string' ? filter.series.slice(0, 120) : '';
+    a.filter.maxPrice = Math.max(0, Math.round(Number(filter.maxPrice) || 0));
+    a.filter.dispoOnly = filter.dispoOnly === true;
+    a.filter.incompleteOnly = filter.incompleteOnly === true;
+    a.filter.hideL = filter.hideL === true;
+    a.filter.hideM = filter.hideM === true;
+    // Le filtre « Éveil uniquement » est actif par défaut ; il ne s'applique
+    // réellement que si le statut Renaissance est lisible.
+    a.filter.eveilOnly = filter.eveilOnly !== false;
+    a.filter.includeAuctions = filter.includeAuctions === true;
+    a.filter.sort = AUTOBUY_SORT_KEYS.includes(String(filter.sort)) ? String(filter.sort) : 'eveil';
+    a.filter.limit = 40;
+    a.budgetCap = Math.max(0, Math.round(Number(source.budgetCap) || 0));
+    a.maxUnit = Math.max(0, Math.round(Number(source.maxUnit) || 0));
+    a.dryRun = source.dryRun !== false;
+    a.totalSpent = Math.max(0, Math.round(Number(source.totalSpent) || 0));
+    a.log = Array.isArray(source.log)
+      ? source.log
+          .filter((entry) => entry && typeof entry === 'object' && entry.text)
+          .slice(0, 80)
+          .map((entry) => ({
+            at: Number(entry.at) || 0,
+            kind: ['ok', 'err', 'info'].includes(entry.kind) ? entry.kind : 'info',
+            text: String(entry.text).slice(0, 400)
+          }))
+      : [];
+  }
+
+  async function loadAutobuyPrefs() {
+    autobuyLoadPrefs(await storageGet(AUTOBUY_KEY, null));
+  }
+
+  let autobuySaveTimer = null;
+  function persistAutobuySoon() {
+    if (autobuySaveTimer) return;
+    autobuySaveTimer = setTimeout(() => {
+      autobuySaveTimer = null;
+      persistAutobuyNow();
+    }, 700);
+  }
+
+  function persistAutobuyNow() {
+    if (autobuySaveTimer) {
+      clearTimeout(autobuySaveTimer);
+      autobuySaveTimer = null;
+    }
+    return storageSet(AUTOBUY_KEY, autobuyPrefsPayload());
+  }
+
+  /** Journal horodaté, borné : achats, erreurs et cartes ignorées. */
+  function autobuyLog(kind, text) {
+    const a = state.autobuy;
+    a.log.push({
+      at: Date.now(),
+      kind: ['ok', 'err', 'info'].includes(kind) ? kind : 'info',
+      text: String(text).slice(0, 400)
+    });
+    if (a.log.length > 80) a.log.splice(0, a.log.length - 80);
+    persistAutobuySoon();
+  }
+
+  /**
+   * Statut Renaissance réel. Quand `/api/config` dit `renaissanceOpen: false`,
+   * on n'appelle même pas l'endpoint : aucune règle n'est publiée, et la vue
+   * l'affiche comme telle. Aucune exigence n'est inventée.
+   */
+  async function autobuyEnsureStatus(force = false) {
+    const a = state.autobuy;
+    if (a.statusLoading) return;
+    if (!force && a.statusAt && Date.now() - a.statusAt < 60 * 1000) return;
+    const open = state.config?.renaissanceOpen !== false;
+    // Même avec `renaissanceOpen: false`, on tente une lecture : si le site
+    // publie déjà ses prérequis, ils sont meilleurs qu'un « — ». Un 503 est
+    // traité comme « pas encore ouverte », sans inventer de chiffres.
+    a.statusLoading = true;
+    a.statusError = '';
+    render();
+    try {
+      const raw = await api('/api/me/renaissance', { timeout: 15000 });
+      const status = autobuyStatusFrom(raw);
+      a.status = status.active ? status : null;
+      if (!status.active) {
+        a.statusError = 'Le serveur ne renvoie aucun prérequis de Renaissance exploitable pour ce compte.';
+      }
+    } catch (err) {
+      a.status = null;
+      const code = Number(err?.status) || 0;
+      a.statusError =
+        code === 503
+          ? open
+            ? 'Le serveur ne publie pas encore les prérequis de la Renaissance (503) : aucun chiffre n’est inventé.'
+            : 'La Renaissance n’est pas encore ouverte : le site ne publie pas ses prérequis. La progression vers l’Éveil ne peut donc pas être calculée sans inventer de chiffres.'
+          : code === 401
+            ? 'Session expirée : reconnecte-toi sur kyara.games, puis relis le statut.'
+            : `Statut de Renaissance illisible : ${friendlyError(err)}`;
+    } finally {
+      a.statusAt = Date.now();
+      a.statusLoading = false;
+      render();
+    }
+  }
+
+  /** Raretés à relire : seulement celles qui ont encore un déficit. */
+  function autobuyTargetRarities(status) {
+    if (status?.active) {
+      return AUTOBUY_CARD_REQUIREMENTS.map((entry) => entry.rarity).filter(
+        (rarity) => (status.gaps?.[rarity]?.gap ?? 0) > 0
+      );
+    }
+    return ['C', 'U', 'R', 'E', 'L', 'M'];
+  }
+
+  /**
+   * Relecture du marché des cartes manquantes, rareté par rareté. On ne lit que
+   * les annonces les moins chères (`missing=1`, tri serveur croissant) : la vue
+   * dit explicitement « non vue dans les annonces lues », jamais « absente du
+   * marché ». Aucune lecture en arrière-plan.
+   */
+  async function autobuyScanMarket() {
+    const a = state.autobuy;
+    const scan = a.scan;
+    if (scan.running) return;
+    if (!state.user) {
+      notify('Connecte-toi à Kyara pour lire le marché.');
+      return;
+    }
+    if (!a.statusAt && !a.statusLoading) await autobuyEnsureStatus(true);
+    const target = autobuyTargetRarities(a.status);
+    if (!target.length) {
+      notify('Tous les prérequis de rareté sont déjà remplis : rien à chercher.');
+      return;
+    }
+    scan.running = true;
+    scan.stop = false;
+    scan.done = 0;
+    scan.total = target.length;
+    scan.error = '';
+    a.market = new Map();
+    a.marketAt = 0;
+    render();
+    const errors = [];
+    try {
+      for (const rarity of target) {
+        if (scan.stop) break;
+        const gap = a.status?.gaps?.[rarity]?.gap ?? null;
+        const pages = gap == null ? 4 : Math.min(4, Math.max(1, Math.ceil(gap / 25)));
+        for (let page = 1; page <= pages; page += 1) {
+          if (scan.stop) break;
+          const params = new URLSearchParams();
+          params.set('missing', '1');
+          params.set('rarity', rarity);
+          params.set('sort', 'price_asc');
+          params.set('pageSize', '50');
+          params.set('page', String(page));
+          if (!a.filter.includeAuctions) params.set('type', 'fixed');
+          try {
+            const data = await api(`/api/market/listings?${params.toString()}`, { timeout: 20000 });
+            const items = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
+            autobuyMergeOffers(a.market, items, {
+              includeAuctions: a.filter.includeAuctions,
+              now: Date.now(),
+              userId: state.user?.id
+            });
+            if (items.length < 50) break;
+          } catch (err) {
+            errors.push(`${rarity} · ${friendlyError(err)}`);
+            break;
+          }
+        }
+        scan.done += 1;
+        a.marketAt = Date.now();
+        if (scan.done % 2 === 0 || scan.done === scan.total) render();
+      }
+      if (errors.length) {
+        scan.error = errors.slice(0, 2).join(' · ');
+        autobuyLog('err', `Lecture du marché incomplète : ${scan.error}`);
+      }
+    } finally {
+      scan.running = false;
+      a.marketAt = Date.now();
+      autobuyLog(
+        'info',
+        `Marché relu : ${plural(a.market.size, 'carte')} avec au moins une annonce (${scan.done}/${scan.total} raretés).`
+      );
+      render();
+    }
+  }
+
+  /** Recalcule les lignes, les filtres, le tri et la file prévisionnelle. */
+  function autobuyRebuild(options = {}) {
+    const a = state.autobuy;
+    const status = options.status !== undefined ? options.status : a.status;
+    const owned = options.owned !== undefined ? options.owned : state.collection;
+    const offers = options.offers instanceof Map ? options.offers : a.market;
+    const index = completionIndex([...state.characters.values()]);
+    const progress = completionProgress(index, state.collection, { minSize: 0 });
+    const rows = autobuyBuildRows({ index, progress, owned, status, offers });
+    const hasStatus = Boolean(status?.active);
+    const filtered = autobuyFilterRows(rows, a.filter, { hasStatus });
+    const sorted = autobuySortRows(filtered, a.filter.sort, { hasStatus });
+    const plan = autobuyPlan(sorted, {
+      status,
+      cap: a.budgetCap,
+      maxUnit: a.maxUnit,
+      chakra: toNum(state.user?.chakra)
+    });
+    const estimate = autobuyEstimateCost(filtered, status);
+    const useful = hasStatus ? rows.filter((row) => row.useful) : null;
+    return {
+      status,
+      hasStatus,
+      rows,
+      filtered,
+      sorted,
+      plan,
+      estimate,
+      totals: {
+        catalog: state.characters.size,
+        missing: rows.length,
+        filtered: filtered.length,
+        useful: useful ? useful.length : null,
+        usefulAvailable: useful ? useful.filter((row) => row.best).length : null,
+        usefulNoOffer: useful ? useful.filter((row) => !row.best).length : null,
+        available: filtered.filter((row) => row.best).length,
+        noOffer: filtered.filter((row) => !row.best).length
+      }
+    };
+  }
+
+  /** Reconfiguration manuelle du plafond / prix unitaire, sans dépasser. */
+  function autobuySetCaps(cap, unit) {
+    const a = state.autobuy;
+    a.budgetCap = Math.max(0, Math.round(Number(cap) || 0));
+    a.maxUnit = Math.max(0, Math.round(Number(unit) || 0));
+    persistAutobuySoon();
+  }
+
+  /** Ouvre la confirmation : nombre, coût, budget, prix unitaire, mode. */
+  function autobuyPrepare() {
+    const a = state.autobuy;
+    if (a.plan.running || a.plan.starting) return;
+    if (a.scan.running) {
+      notify('Attends la fin de la lecture du marché.');
+      return;
+    }
+    const data = autobuyRebuild();
+    const queue = data.plan;
+    if (!queue.count) {
+      notify(
+        queue.reason === 'cap'
+          ? `Budget ◆ ${fmt(a.budgetCap)} insuffisant pour la première carte.`
+          : queue.reason === 'chakra'
+            ? 'Chakra insuffisant pour la première carte.'
+            : 'Aucune carte éligible à acheter avec ces filtres.'
+      );
+      return;
+    }
+    a.plan = {
+      open: true,
+      running: false,
+      starting: false,
+      stop: false,
+      rows: data.sorted,
+      items: queue.items,
+      previewCount: queue.count,
+      previewTotal: queue.total,
+      bought: 0,
+      spent: 0,
+      failed: [],
+      finished: false,
+      stopped: null,
+      confirmReal: false,
+      simOwned: null,
+      simStatus: null,
+      startedAt: 0,
+      done: 0,
+      reason: queue.reason
+    };
+    render();
+  }
+
+  /** Ajoute une carte achetée à la collection locale (jamais de doublon). */
+  function autobuyMarkOwned(id) {
+    const key = String(id);
+    const row = state.collection.find((entry) => String(entry.characterId ?? entry.id) === key);
+    if (row) {
+      row.qty = Math.max(1, Number(row.qty ?? 1) + 1);
+      if (row.listable != null) row.listable = Number(row.listable) + 1;
+      return;
+    }
+    state.collection.push({ characterId: key, qty: 1, listable: 0, locked: 0 });
+  }
+
+  function autobuyRemoveOffer(characterId, listingId, map = state.autobuy.market) {
+    const key = String(characterId);
+    const list = map.get(key);
+    if (!list) return;
+    const next = list.filter((entry) => entry.listingId !== listingId);
+    if (next.length) map.set(key, next);
+    else map.delete(key);
+  }
+
+  /** Pause interruptible : le bouton Arrêter est respecté en 100 ms. */
+  async function autobuyWait(ms, plan) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (plan.stop) return;
+      await sleep(Math.min(100, end - Date.now()));
+    }
+  }
+
+  /**
+   * File d'achats réelle ou simulée. Une carte à la fois, file et classement
+   * recalculés avant chaque achat, garde-fou de prix juste avant la dépense.
+   */
+  async function autobuyRun() {
+    const a = state.autobuy;
+    const plan = a.plan;
+    if (plan.running || plan.starting) return;
+    if (!a.dryRun && a.budgetCap <= 0) {
+      notify('Définis un plafond de budget supérieur à 0 avant tout achat réel.');
+      return;
+    }
+    if (!a.dryRun && !plan.confirmReal) {
+      notify('Coche la confirmation de dépense réelle avant de lancer.');
+      return;
+    }
+    if (!a.dryRun) {
+      const preview = autobuyPlan(plan.rows ?? [], {
+        status: a.status,
+        cap: a.budgetCap,
+        maxUnit: a.maxUnit,
+        chakra: toNum(state.user?.chakra)
+      });
+      if (!preview.count) {
+        notify(
+          preview.reason === 'cap'
+            ? `Aucune carte ne rentre dans le plafond ◆ ${fmt(a.budgetCap)}.`
+            : preview.reason === 'chakra'
+              ? 'Chakra insuffisant pour la première carte.'
+              : 'Aucune annonce éligible.'
+        );
+        return;
+      }
+    }
+    plan.running = true;
+    plan.starting = false;
+    plan.stop = false;
+    plan.finished = false;
+    plan.bought = 0;
+    plan.spent = 0;
+    plan.failed = [];
+    plan.done = 0;
+    plan.startedAt = Date.now();
+    plan.stopped = null;
+    plan.simOwned = completionOwnedMap(state.collection);
+    plan.simStatus = a.status;
+    // La simulation travaille sur une copie du marché : une annonce simulée ne
+    // disparaît jamais du cache réel, sinon on ne pourrait pas relancer l'essai.
+    plan.simMarket = a.dryRun
+      ? new Map([...a.market].map(([id, list]) => [id, list.map((offer) => ({ ...offer }))]))
+      : null;
+    plan.boughtIds = new Set();
+    autobuyLog(
+      'info',
+      `${a.dryRun ? 'Simulation' : 'Achat réel'} démarré · plafond ${
+        a.budgetCap > 0 ? `◆ ${fmt(a.budgetCap)}` : 'aucun'
+      } · prix unitaire ${a.maxUnit > 0 ? `◆ ${fmt(a.maxUnit)}` : 'aucun'}`
+    );
+    render();
+
+    try {
+      for (let guard = 0; guard < 5000; guard += 1) {
+        if (plan.stop) {
+          plan.stopped = 'stop';
+          autobuyLog('info', 'Arrêt demandé : file stoppée avant le prochain achat.');
+          break;
+        }
+        const status = a.dryRun ? plan.simStatus : a.status;
+        const owned = a.dryRun ? plan.simOwned : state.collection;
+        const offers = a.dryRun ? plan.simMarket : a.market;
+        const data = autobuyRebuild({ status, owned, offers });
+        const next = autobuyPlan(data.sorted, {
+          status,
+          cap: a.budgetCap,
+          maxUnit: a.maxUnit,
+          chakra: toNum(state.user?.chakra),
+          maxItems: 1
+        });
+        if (!next.count) {
+          plan.stopped = next.reason || 'empty';
+          if (next.reason === 'done') autobuyLog('ok', 'Tous les prérequis de rareté sont remplis.');
+          else if (next.reason === 'cap') autobuyLog('info', `Plafond ◆ ${fmt(a.budgetCap)} atteint : file arrêtée.`);
+          else if (next.reason === 'chakra') autobuyLog('err', 'Chakra insuffisant : file arrêtée.');
+          else autobuyLog('info', 'Aucune annonce éligible restante : file arrêtée.');
+          break;
+        }
+        const item = next.items[0];
+        if (plan.boughtIds.has(String(item.characterId))) {
+          // Ceinture et bretelles : une carte déjà achetée ne repasse jamais.
+          autobuyRemoveOffer(item.characterId, item.listingId, offers);
+          continue;
+        }
+        if (a.budgetCap > 0 && plan.spent + item.price > a.budgetCap) {
+          plan.stopped = 'cap';
+          autobuyLog('info', `Plafond ◆ ${fmt(a.budgetCap)} atteint : file arrêtée.`);
+          break;
+        }
+        const chakraNow = toNum(state.user?.chakra);
+        if (chakraNow != null && plan.spent + item.price > chakraNow) {
+          plan.stopped = 'chakra';
+          autobuyLog('err', 'Chakra insuffisant : file arrêtée.');
+          break;
+        }
+
+        // Contrôle de fraîcheur : l'annonce existe, elle est active, pas à
+        // nous, et son prix n'a pas monté depuis la lecture.
+        let fresh = null;
+        try {
+          fresh = await api(`/api/market/listings/${encodeURIComponent(item.listingId)}`, { timeout: 15000 });
+        } catch (err) {
+          const code = String(err?.code || '');
+          if (code === 'listing_closed' || Number(err?.status) === 404) {
+            autobuyRemoveOffer(item.characterId, item.listingId, offers);
+            autobuyLog('info', `${item.name} · annonce disparue avant l’achat, carte ignorée.`);
+            plan.failed.push({ name: item.name, code: 'listing_closed' });
+            plan.done += 1;
+            render();
+            continue;
+          }
+          plan.stopped = 'error';
+          autobuyLog('err', `${item.name} · relecture de l’annonce impossible : ${friendlyError(err)}`);
+          break;
+        }
+        const check = autobuyGuard(
+          { ...item, price: item.price },
+          fresh,
+          { now: Date.now(), userId: state.user?.id, maxUnit: a.maxUnit }
+        );
+        if (!check.ok) {
+          autobuyRemoveOffer(item.characterId, item.listingId, offers);
+          plan.failed.push({ name: item.name, code: check.code });
+          plan.done += 1;
+          autobuyLog(
+            check.code === 'price_changed' ? 'info' : 'err',
+            `${item.name} · ${autobuyFailureText(check.code, check)} — carte ignorée.`
+          );
+          render();
+          continue;
+        }
+        // Dernier point de contrôle : un Arrêt cliqué pendant la relecture
+        // de l'annonce ne doit jamais laisser passer la dépense.
+        if (plan.stop) {
+          plan.stopped = 'stop';
+          break;
+        }
+
+        if (a.dryRun) {
+          plan.bought += 1;
+          plan.spent += check.price;
+          plan.done += 1;
+          plan.boughtIds.add(String(item.characterId));
+          if (plan.simOwned) plan.simOwned.set(String(item.characterId), 1);
+          plan.simStatus = autobuyStatusPurchase(plan.simStatus, item.rarity, 1);
+          autobuyRemoveOffer(item.characterId, item.listingId, offers);
+          autobuyLog('ok', `${item.name} · simulée ◆ ${fmt(check.price)} (aucun chakra dépensé).`);
+          render();
+          await autobuyWait(500, plan);
+          continue;
+        }
+
+        try {
+          const res = await api(`/api/market/listings/${encodeURIComponent(item.listingId)}/buy`, {
+            method: 'POST',
+            timeout: 25000
+          });
+          plan.bought += 1;
+          plan.spent += check.price;
+          plan.done += 1;
+          plan.boughtIds.add(String(item.characterId));
+          const nextChakra = toNum(res?.user?.chakra);
+          if (nextChakra != null && state.user) state.user.chakra = nextChakra;
+          else if (state.user) state.user.chakra = Math.max(0, (toNum(state.user.chakra) ?? 0) - check.price);
+          autobuyMarkOwned(item.characterId);
+          a.status = autobuyStatusPurchase(a.status, item.rarity, 1);
+          a.totalSpent += check.price;
+          autobuyRemoveOffer(item.characterId, item.listingId, offers);
+          autobuyLog('ok', `${item.name} · achetée ◆ ${fmt(check.price)} (total onglet ◆ ${fmt(a.totalSpent)}).`);
+          persistAutobuySoon();
+        } catch (err) {
+          const code = String(err?.code || '');
+          plan.failed.push({ name: item.name, code });
+          autobuyLog('err', `${item.name} · ${autobuyFailureText(code)}`);
+          const outcome = autobuyBuyOutcome(code);
+          if (outcome === 'stop') {
+            plan.stopped = code;
+            plan.stop = true;
+            break;
+          }
+          if (outcome === 'skip') {
+            autobuyRemoveOffer(item.characterId, item.listingId, offers);
+            plan.done += 1;
+            render();
+            continue;
+          }
+          plan.stopped = 'error';
+          break;
+        }
+        render();
+        await autobuyWait(1400, plan);
+      }
+    } finally {
+      plan.running = false;
+      plan.finished = true;
+      render();
+    }
+
+    if (plan.bought) {
+      await loadData({ keepPrices: true }).catch(() => null);
+      await autobuyEnsureStatus(true).catch(() => null);
+      // La file affichée après coup doit refléter la collection réelle, pas
+      // les lignes figées avant les achats (sinon une carte achetée réapparaît).
+      if (plan.open && !a.dryRun) plan.rows = autobuyRebuild().sorted;
+    }
+    render();
+    notify(
+      plan.bought
+        ? `Auto-achat ${a.dryRun ? '(simulation) ' : ''}: ${plural(plan.bought, 'carte')} achetée(s) · ◆ ${fmt(
+            plan.spent
+          )}${a.dryRun ? ' simulés' : ''}${plan.failed.length ? ` · ${plural(plan.failed.length, 'échec')}` : ''}`
+        : 'Auto-achat : aucun achat effectué'
+    );
+    persistAutobuySoon();
+  }
+
+  /** Date de révélation des cartes Éveil, telle que publiée par `/api/config`. */
+  function autobuyRevealLabel() {
+    const raw = state.config?.eveilRevealAt;
+    if (!raw) return 'date non publiée';
+    const at = Date.parse(raw);
+    if (!Number.isFinite(at)) return 'date non publiée';
+    const text = new Date(at).toLocaleString('fr-FR', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    if (at <= Date.now()) return `${text} (passée)`;
+    const days = Math.floor((at - Date.now()) / 86400000);
+    const hours = Math.floor(((at - Date.now()) % 86400000) / 3600000);
+    return `${text} · dans ${days > 0 ? `${days} j ` : ''}${hours} h`;
+  }
+
+  /** Ligne d'une carte manquante + dépliant de ses annonces connues. */
+  function autobuyRowHtml(row) {
+    const a = state.autobuy;
+    const info = rarityInfo(row.rarity);
+    const expanded = a.expanded.has(row.id);
+    const statusActive = Boolean(a.status?.active);
+    const tag = row.useful
+      ? `<em class="kp-autobuy-tag" title="Part du pourcentage officiel gagnée par cette carte">+${row.gainPct.toFixed(
+          2
+        )} % Éveil</em>`
+      : `<em class="kp-autobuy-tag is-off" title="${
+          statusActive ? 'Cette rareté n’a plus de déficit : inutile pour l’Éveil' : 'Préparation : règles indisponibles'
+        }">${statusActive ? 'hors quota' : 'préparation'}</em>`;
+    const series = row.seriesTotal
+      ? `${row.seriesOwned ?? 0}/${row.seriesTotal} · ${row.seriesPct.toLocaleString('fr-FR')} %`
+      : '';
+    const date = row.createdAt ? new Date(row.createdAt).toLocaleDateString('fr-FR') : '';
+    return `
+      <div class="kp-mkt-group ${expanded ? 'is-open' : ''}">
+        <div class="kp-sell-row kp-autobuy-row">
+          <span class="kp-sell-owned">${row.useful ? '★' : '+'}</span>
+          <img src="${esc(imgSrc({ image: row.image }))}" alt="" loading="lazy">
+          <div class="kp-sell-main">
+            <div class="kp-row-name">
+              ${esc(row.name)}
+              ${row.count > 1 ? `<span class="kp-mkt-count">${fmt(row.count)} annonces</span>` : ''}
+              ${tag}
+            </div>
+            <div class="kp-row-meta">
+              <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
+              · ${esc(row.series)}${series ? ` · ${esc(series)}` : ''}
+              ${row.sales7d != null ? ` · ${fmt(row.sales7d)} vente(s)/7 j` : ''}
+              ${row.gap != null ? ` · déficit ${fmt(row.gap)}` : ''}
+              ${date ? ` · annonce du ${esc(date)}` : ''}
+            </div>
+          </div>
+          <div class="kp-sell-price">
+            <b>${row.price == null ? '—' : `◆ ${fmt(row.price)}`}</b>
+            <small>${
+              row.price == null
+                ? 'aucune annonce'
+                : `le moins cher${row.best?.auction ? ' · achat immédiat' : ''}`
+            }</small>
+          </div>
+        </div>
+        <button class="kp-mkt-toggle" type="button" data-act="autobuy-expand" data-id="${esc(row.id)}"
+          aria-expanded="${expanded ? 'true' : 'false'}">
+          <span class="kp-mkt-caret">${expanded ? '▾' : '▸'}</span>
+          ${expanded ? 'Masquer' : row.count ? 'Voir les annonces' : 'Détail'}
+        </button>
+        ${
+          expanded
+            ? `<div class="kp-mkt-sublist">
+                 ${
+                   row.offers.length
+                     ? row.offers
+                         .map(
+                           (offer) =>
+                             `<div class="kp-mkt-listing ${offer.auction ? 'is-auction' : 'is-fixed'}">
+                                <span class="kp-mkt-type">${offer.auction ? 'Enchère' : 'Prix fixe'}</span>
+                                <b>◆ ${fmt(offer.price)}</b>
+                                <span class="kp-mkt-seller">${offer.seller ? esc(offer.seller) : '—'}</span>
+                                <span class="kp-mkt-ends">${
+                                  offer.createdAt
+                                    ? `vu le ${esc(new Date(offer.createdAt).toLocaleDateString('fr-FR'))}`
+                                    : ''
+                                }${offer.endsAt ? ` · fin ${esc(listingTimeLeft({ endsAt: offer.endsAt }))}` : ''}</span>
+                                <button class="kp-mkt-open" type="button" data-act="open-listing"
+                                  data-listing="${esc(offer.listingId)}" data-type="${offer.auction ? 'auction' : 'fixed'}"
+                                  title="Ouvrir cette annonce sur kyara.games ↗">↗</button>
+                              </div>`
+                         )
+                         .join('')
+                     : `<div class="kp-empty" style="padding:14px">
+                          <b>Aucune annonce connue</b>
+                          Cette carte n’apparaît pas dans les annonces lues (prix fixe, cartes manquantes).
+                          Ce n’est pas une preuve qu’elle est absente de tout le marché : seules les
+                          annonces les moins chères de chaque rareté sont relues.
+                          <div style="margin-top:10px">
+                            <button class="kp-btn" type="button" data-act="autobuy-refresh">Relire le marché</button>
+                          </div>
+                        </div>`
+                 }
+               </div>`
+            : ''
+        }
+      </div>`;
+  }
+
+  function viewAutobuy() {
+    if (!state.user) return state.error ? errorHTML() : loginHTML();
+    if (!state.characters.size) {
+      return `
+        <div class="kp-empty">
+          <b>Catalogue indisponible</b>
+          Sans le catalogue, impossible de savoir quelles cartes manquent : la file d’achats serait inventée.
+          <div style="margin-top:14px">
+            <button class="kp-btn is-primary" type="button" data-act="refresh">Réessayer</button>
+          </div>
+        </div>`;
+    }
+    const a = state.autobuy;
+    if (!a.statusAt && !a.statusLoading && !a.statusError) {
+      setTimeout(() => {
+        if (state.tab === 'autobuy' && !a.statusAt && !a.statusLoading) autobuyEnsureStatus();
+      }, 0);
+    }
+    const data = autobuyRebuild();
+    const status = data.status;
+    const totals = data.totals;
+    const pct = status?.pct ?? null;
+    const pctLabel = pct == null ? '—' : `${pct} %`;
+    const remaining = status?.remaining ?? null;
+    const gapChips = status?.active
+      ? AUTOBUY_CARD_REQUIREMENTS.map((entry) => {
+          const gap = status.gaps?.[entry.rarity];
+          if (!gap) return '';
+          const info = rarityInfo(entry.rarity);
+          return `<span class="kp-autobuy-gap ${gap.gap > 0 ? 'is-open' : 'is-done'}">
+            <span class="kp-rar" style="--rc:${info.color}">${esc(entry.label)}</span>
+            <b>${fmt(gap.have)}/${fmt(gap.need)}</b>
+            <small>${gap.gap > 0 ? `${fmt(gap.gap)} manquante(s)` : 'complet'}</small>
+          </span>`;
+        }).join('')
+      : '';
+    const nonCard = status?.active
+      ? status.requirements
+          .filter((req) => req.kind !== 'card')
+          .map(
+            (req) =>
+              `<span class="kp-autobuy-condition ${req.ok ? 'is-ok' : 'is-bad'}">${
+                req.ok ? '✓' : '✕'
+              } ${esc(req.label)}${req.need > 0 ? ` · ${fmt(req.have)}/${fmt(req.need)}` : ''}</span>`
+          )
+          .join('')
+      : '';
+    const closed = state.config?.renaissanceOpen === false;
+    const statusAlert = a.statusError
+      ? `<div class="kp-alert ${closed ? '' : 'is-bad'}" style="margin-top:8px">
+           <b>${closed ? 'Préparation — règles de la Renaissance non publiées' : 'Statut Éveil indisponible'}</b><br>
+           ${esc(a.statusError)}
+           ${
+             closed
+               ? `<br><span class="kp-muted">En attendant l’ouverture, l’onglet reste utilisable en mode préparation :
+                    le tri « Complétion de la série » classe les manquants les plus proches d’une série complète.
+                    Aucun chiffre de progression Éveil n’est affiché, car il serait inventé.</span>`
+               : `<div style="margin-top:8px"><button class="kp-btn" type="button" data-act="autobuy-refresh">Réessayer</button></div>`
+           }
+         </div>`
+      : '';
+    const eligibleAlert =
+      status?.eligible === true
+        ? `<div class="kp-alert" style="margin-top:8px">
+             <b>Prérequis remplis : la Renaissance est possible.</b><br>
+             L’extension ne la déclenche jamais à ta place (action irréversible). Lance-la sur
+             <a href="https://kyara.games/renaissance" target="_blank" rel="noopener">kyara.games/renaissance</a>,
+             puis reviens relire le marché : l’Éveil et son marché seront accessibles.
+           </div>`
+        : '';
+    const estimate = data.estimate;
+    const catalogPct = totals.catalog
+      ? Math.round(((totals.catalog - totals.missing) / totals.catalog) * 1000) / 10
+      : 0;
+    const shown = data.sorted.slice(0, a.filter.limit);
+    const scan = a.scan;
+    const scanPct = scan.total ? Math.round((scan.done / scan.total) * 100) : 0;
+    const marketAt = a.marketAt ? `marché relu à ${nowTime(a.marketAt)}` : 'marché pas encore relu';
+    const seriesList = [...new Set(data.rows.map((row) => row.series).filter(Boolean))]
+      .sort((x, y) => x.localeCompare(y, 'fr'))
+      .slice(0, 500);
+    const running = a.plan.running;
+    const gapText = status?.active
+      ? AUTOBUY_CARD_REQUIREMENTS.filter((entry) => (status.gaps?.[entry.rarity]?.gap ?? 0) > 0)
+          .map((entry) => `${entry.rarity} ${fmt(status.gaps[entry.rarity].gap)}`)
+          .join(' · ') || 'complet'
+      : 'règles indisponibles';
+    const planLabel = data.plan.count
+      ? `Lancer l’auto-achat · ${plural(data.plan.count, 'carte')} · ◆ ${fmt(data.plan.total)}`
+      : 'Lancer l’auto-achat';
+    const runningBanner = running
+      ? `<section class="kp-autosell is-running" style="margin:0 0 10px">
+           <div class="kp-autosell-head">
+             <div class="kp-autosell-title">
+               <span class="kp-autosell-dot"></span>
+               <div><b>Auto-achat ${a.dryRun ? 'en simulation' : 'en cours'}</b>
+                 <small>${a.dryRun ? 'aucun chakra dépensé' : `dépense réelle · total ◆ ${fmt(a.plan.spent)}`}</small>
+               </div>
+             </div>
+             <div class="kp-autosell-stats">
+               <span><b>${fmt(a.plan.bought)}</b> achetée(s)</span>
+               <span><b>◆ ${fmt(a.plan.spent)}</b> ${a.dryRun ? 'simulés' : 'dépensés'}</span>
+               <span><b>${remaining == null ? '—' : fmt(remaining)}</b> restante(s)</span>
+             </div>
+             <button class="kp-btn is-danger" type="button" data-act="autobuy-stop">Arrêter</button>
+           </div>
+         </section>`
+      : '';
+
+    return `
+      ${runningBanner}
+      <div class="kp-grid">
+        <div class="kp-card-stat"><span>Cartes manquantes</span><b>${fmt(totals.missing)}</b><small>sur ${fmt(
+          totals.catalog
+        )} au catalogue · héritage exclu</small></div>
+        <div class="kp-card-stat"><span>Progression Éveil</span><b>${pctLabel}</b><small>${
+          status?.active
+            ? `${fmt(status.conditionsMet)}/${fmt(status.conditionsTotal)} conditions · reste ${fmt(
+                100 - status.pct
+              )} % · palier R${fmt(status.level)}`
+            : 'règles indisponibles'
+        }</small></div>
+        <div class="kp-card-stat"><span>Encore nécessaires</span><b>${
+          remaining == null ? '—' : fmt(remaining)
+        }</b><small>${esc(gapText)}</small></div>
+        <div class="kp-card-stat"><span>Coût estimé</span><b>◆ ${fmt(estimate.total)}</b><small>${plural(
+          estimate.count,
+          'carte'
+        )}${estimate.partial ? ` · ${plural(estimate.partial, 'manquante')} sans annonce` : ''}</small></div>
+      </div>
+
+      <div class="kp-hero" style="margin-top:10px">
+        <div class="kp-hero-label">Objectif Éveil — prérequis de la Renaissance${
+          status?.next != null ? ` ${fmt(status.next)}` : ''
+        }</div>
+        <div class="kp-hero-value">${pctLabel}</div>
+        <div class="kp-hero-sub">
+          ${
+            status?.active
+              ? `${fmt(status.remaining)} carte(s) encore nécessaire(s) · ${fmt(
+                  status.cardRequirements
+                )} prérequis de rareté · ${esc(status.eligible ? 'Renaissance possible' : 'Renaissance non encore possible')}`
+              : `Progression officielle indisponible · révélation des cartes Éveil : ${esc(autobuyRevealLabel())}`
+          }
+        </div>
+        <div class="kp-progress">
+          <div class="kp-progress-bar"><i style="width:${Math.max(1, pct ?? 0)}%"></i></div>
+          <div class="kp-progress-row">
+            <span>${esc(marketAt)}</span>
+            <span>${fmt(totals.filtered)} carte(s) affichée(s) avec ces filtres</span>
+          </div>
+        </div>
+        ${
+          scan.running
+            ? `<div class="kp-progress">
+                 <div class="kp-progress-bar"><i style="width:${scanPct}%"></i></div>
+                 <div class="kp-progress-row">
+                   <span>Lecture du marché… ${fmt(scan.done)}/${fmt(scan.total)} raretés</span>
+                   <span class="kp-link" data-act="autobuy-scan-stop">Arrêter</span>
+                 </div>
+               </div>`
+            : scan.error
+              ? `<div class="kp-alert is-bad" style="margin-top:8px">Lecture incomplète : ${esc(scan.error)}</div>`
+              : ''
+        }
+        ${statusAlert}
+        ${eligibleAlert}
+        ${gapChips ? `<div class="kp-autobuy-gaps">${gapChips}</div>` : ''}
+        ${
+          nonCard
+            ? `<div class="kp-autobuy-conditions"><span class="kp-chip-label">Conditions non achetables :</span>${nonCard}</div>`
+            : ''
+        }
+        ${
+          !status?.active
+            ? `<div class="kp-hint" style="margin-top:6px">
+                 Complétion du catalogue : <b>${catalogPct.toLocaleString('fr-FR')} %</b>
+                 (${fmt(totals.missing)} carte(s) manquante(s)). Cet indicateur sert seulement de
+                 préparation : ce n’est pas un pourcentage officiel de l’Éveil.
+               </div>`
+            : ''
+        }
+      </div>
+
+      <details class="kp-autobuy-rules">
+        <summary>Comment l’Éveil fonctionne (règles vérifiées le 27/10/2026)</summary>
+        <ul>
+          <li>L’Éveil est une <b>carte numérotée et limitée</b>, tirée au hasard dans les boosters :
+              il n’existe <b>aucune liste de personnages</b> à réunir pour le déclencher.</li>
+          <li>Il faut au moins une <b>Renaissance</b>, un compte relié à Discord et de confiance.</li>
+          <li>Les prérequis de la Renaissance comptent des <b>cartes différentes</b> par rareté :
+              les doublons sont inutiles, une carte possédée n’est jamais rachetée.</li>
+          <li>Les séries et les variantes n’entrent pas dans ce décompte. Le catalogue de l’onglet
+              exclut les cartes « héritage », comme l’onglet Completion.</li>
+          <li>Révélation des cartes Éveil : <b>${esc(autobuyRevealLabel())}</b>.
+              L’extension ne déclenche jamais la Renaissance à ta place.</li>
+        </ul>
+      </details>
+
+      <div class="kp-toolbar kp-toolbar-search">
+        <button class="kp-btn is-primary" type="button" data-act="autobuy-refresh" ${
+          scan.running ? 'disabled' : ''
+        }>${scan.running ? '<span class="kp-spinner"></span> Lecture…' : 'Relire le marché'}</button>
+        <button class="kp-btn" type="button" data-act="autobuy-start" ${
+          running || scan.running || !data.plan.count ? 'disabled' : ''
+        }>${esc(planLabel)}</button>
+        ${
+          running
+            ? `<button class="kp-btn is-danger" type="button" data-act="autobuy-stop">Arrêter</button>`
+            : ''
+        }
+      </div>
+
+      <div class="kp-filters">
+        <label class="kp-filter">
+          <span>Budget max (◆, 0 = aucun)</span>
+          <input class="kp-input" type="number" min="0" step="50" data-autobuy-cap value="${a.budgetCap}" ${
+            running ? 'disabled' : ''
+          }>
+        </label>
+        <label class="kp-filter">
+          <span>Prix unitaire max (◆, 0 = aucun)</span>
+          <input class="kp-input" type="number" min="0" step="10" data-autobuy-unit value="${a.maxUnit}" ${
+            running ? 'disabled' : ''
+          }>
+        </label>
+        <label class="kp-check">
+          <input type="checkbox" data-autobuy-dryrun ${a.dryRun ? 'checked' : ''} ${running ? 'disabled' : ''}>
+          Simulation <em>${a.dryRun ? '· aucun achat réel' : '· achats réels'}</em>
+        </label>
+      </div>
+
+      <div class="kp-filters kp-filters-4">
+        <label class="kp-filter">
+          <span>Tri</span>
+          <select class="kp-select" data-autobuy-sort>
+            ${AUTOBUY_SORTS.map(
+              ([value, label]) =>
+                `<option value="${value}" ${a.filter.sort === value ? 'selected' : ''}>${esc(label)}</option>`
+            ).join('')}
+          </select>
+        </label>
+        <label class="kp-filter">
+          <span>Série</span>
+          <input class="kp-input" type="search" list="autobuy-series-list" data-role="autobuy-series"
+            placeholder="Toutes les séries" value="${esc(a.filter.series)}">
+          <datalist id="autobuy-series-list">
+            ${seriesList.map((name) => `<option value="${esc(name)}"></option>`).join('')}
+          </datalist>
+        </label>
+        <label class="kp-filter">
+          <span>Prix max (◆)</span>
+          <input class="kp-input" type="number" min="0" step="10" data-role="autobuy-max-price"
+            value="${a.filter.maxPrice || ''}" placeholder="Tous">
+        </label>
+        <label class="kp-filter">
+          <span>Recherche</span>
+          <input class="kp-input" type="search" data-role="autobuy-search"
+            placeholder="Nom de carte…" value="${esc(a.filter.query)}">
+        </label>
+      </div>
+      ${
+        !status?.active && a.filter.sort === 'eveil'
+          ? `<div class="kp-hint">Règles de la Renaissance indisponibles : « Priorité Éveil » bascule
+               automatiquement sur « Complétion de la série » (le tri le plus proche d’une préparation utile).
+               Il redeviendra un vrai classement Éveil dès que le statut sera lisible.</div>`
+          : ''
+      }
+
+      <div class="kp-rarities">
+        <button class="kp-rchip ${a.filter.rarity === 'all' ? 'is-active' : ''}" type="button"
+          data-act="autobuy-rarity" data-rarity="all">Toutes</button>
+        ${AUTOBUY_CARD_REQUIREMENTS.map((entry) => {
+          const info = rarityInfo(entry.rarity);
+          const count = data.rows.filter((row) => row.rarity === entry.rarity).length;
+          const gap = status?.gaps?.[entry.rarity];
+          return `<button class="kp-rchip ${a.filter.rarity === entry.rarity ? 'is-active' : ''}" type="button"
+            data-act="autobuy-rarity" data-rarity="${entry.rarity}" style="--rc:${info.color}">
+            ${esc(entry.label)} <em>${fmt(count)}${gap && gap.gap > 0 ? ` · ${fmt(gap.gap)}` : ''}</em>
+          </button>`;
+        }).join('')}
+      </div>
+
+      <div class="kp-chips">
+        <button class="kp-chip ${a.filter.dispoOnly ? 'is-on' : ''}" type="button" data-act="autobuy-flag" data-flag="dispoOnly">
+          <em>Disponibles uniquement</em> ${fmt(totals.available)}
+        </button>
+        <button class="kp-chip ${a.filter.incompleteOnly ? 'is-on' : ''}" type="button" data-act="autobuy-flag" data-flag="incompleteOnly">
+          <em>Séries incomplètes</em>
+        </button>
+        <button class="kp-chip ${a.filter.hideL ? 'is-on' : ''}" type="button" data-act="autobuy-flag" data-flag="hideL">
+          <em>Masquer les légendaires</em>
+        </button>
+        <button class="kp-chip ${a.filter.hideM ? 'is-on' : ''}" type="button" data-act="autobuy-flag" data-flag="hideM">
+          <em>Masquer les mythiques</em>
+        </button>
+        <button class="kp-chip ${a.filter.eveilOnly && status?.active ? 'is-on' : ''}" type="button"
+          data-act="autobuy-flag" data-flag="eveilOnly" ${status?.active ? '' : 'disabled'}
+          title="${status?.active ? 'Ne garder que les raretés qui ont encore un déficit' : 'Règles indisponibles : filtre inactif'}">
+          <em>Nécessaires à l’Éveil uniquement</em>
+        </button>
+        <button class="kp-chip ${a.filter.includeAuctions ? 'is-on' : ''}" type="button" data-act="autobuy-flag" data-flag="includeAuctions">
+          <em>Enchères</em> ${a.filter.includeAuctions ? 'avec achat immédiat' : 'exclues'}
+        </button>
+      </div>
+
+      <div class="kp-hint">
+        ${fmt(totals.filtered)} carte(s) après filtres · ${fmt(totals.available)} avec au moins une annonce connue ·
+        ${fmt(totals.noOffer)} sans annonce lue${
+          status?.active
+            ? ` · ${fmt(totals.useful)} au total dans une rareté à compléter, dont ${fmt(
+                status.remaining
+              )} encore nécessaires`
+            : ''
+        }.
+        Les cartes manquantes absentes de cette lecture ne sont pas achetables ici : relis le marché ou élargis les filtres.
+        ${a.filter.eveilOnly && !status?.active ? ' Le filtre « Éveil uniquement » attend le statut de la Renaissance.' : ''}
+      </div>
+
+      ${
+        shown.length
+          ? `<div class="kp-sell-list kp-autobuy-list">${shown.map((row) => autobuyRowHtml(row)).join('')}</div>
+             ${
+               data.sorted.length > shown.length
+                 ? `<div class="kp-toolbar"><button class="kp-btn" type="button" data-act="autobuy-more">Afficher ${Math.min(
+                     40,
+                     data.sorted.length - shown.length
+                   )} carte(s) de plus</button></div>`
+                 : ''
+             }`
+          : `<div class="kp-empty">
+               <b>${
+                 totals.missing === 0
+                   ? 'Toutes les cartes du catalogue sont possédées'
+                   : 'Aucune carte avec ces filtres'
+               }</b>
+               ${
+                 totals.missing
+                   ? 'Élargis la recherche, vide le filtre de série ou désactive « Disponibles uniquement » : les cartes sans annonce restent affichées.'
+                   : 'Il n’y a plus rien à acheter pour compléter le catalogue.'
+               }
+               ${
+                 totals.missing
+                   ? `<div style="margin-top:14px"><button class="kp-btn" type="button" data-act="autobuy-reset-filters">Réinitialiser les filtres</button></div>`
+                   : ''
+               }
+             </div>`
+      }
+
+      ${
+        a.log.length
+          ? `<div class="kp-section">
+               <div class="kp-section-title">Journal d’achats, erreurs et cartes ignorées</div>
+               <div class="kp-toolbar" style="justify-content:space-between;align-items:center">
+                 <span class="kp-muted">${fmt(a.log.length)} entrée(s) · total de l’onglet ◆ ${fmt(a.totalSpent)}</span>
+                 <button class="kp-btn is-ghost" type="button" data-act="autobuy-log-clear">Effacer</button>
+               </div>
+               <div class="kp-log">
+                 ${a.log
+                   .slice(-30)
+                   .map(
+                     (entry) =>
+                       `<div class="is-${entry.kind}">${entry.at ? `${nowTime(entry.at)} · ` : ''}${esc(entry.text)}</div>`
+                   )
+                   .join('')}
+               </div>
+             </div>`
+          : ''
+      }
+      <div class="kp-hint">
+        Dépensé depuis cet onglet (cumul réel) : <b>◆ ${fmt(a.totalSpent)}</b>.
+        ${a.dryRun ? 'La simulation n’ajoute rien à ce cumul.' : ''}
+        Aucune dépense ne dépasse le plafond ni le prix unitaire configurés ; le bouton Arrêter reste disponible
+        pendant toute la file.
+      </div>
+    `;
+  }
+
+  /** Confirmation puis progression de la file d'achats. */
+  function renderAutobuyPlan() {
+    const a = state.autobuy;
+    const plan = a.plan;
+    if (!plan.open) return;
+    const preview = autobuyPlan(plan.rows ?? [], {
+      status: a.status,
+      cap: a.budgetCap,
+      maxUnit: a.maxUnit,
+      chakra: toNum(state.user?.chakra)
+    });
+    const running = plan.running;
+    const chakra = toNum(state.user?.chakra);
+    const blocked = !preview.count;
+    const needCap = !a.dryRun && a.budgetCap <= 0;
+    const needRealConfirm = !a.dryRun && (!plan.confirmReal || needCap);
+
+    ui.modal.hidden = false;
+    ui.modalCard.classList.add('is-wide');
+    ui.modalCard.dataset.kind = 'autobuy-plan';
+    ui.modalCard.innerHTML = `
+      <div class="kp-modal-head">
+        <b>Auto-achat orienté Éveil · ${plural(plan.finished ? plan.bought : preview.count, 'carte')}</b>
+        <button class="kp-icon-btn" type="button" data-act="autobuy-close" ${running ? 'disabled' : ''}>✕</button>
+      </div>
+      <div class="kp-modal-body">
+        <div class="kp-alert ${blocked ? 'is-bad' : ''}">
+          <b>${
+            running
+              ? a.dryRun
+                ? 'Simulation en cours — aucun chakra dépensé'
+                : 'Achat réel en cours — total dépensé visible ci-dessous'
+              : plan.finished && plan.bought
+                ? `Terminé — ${fmt(plan.bought)} carte(s) · ◆ ${fmt(plan.spent)} ${a.dryRun ? 'simulés' : 'dépensés'}`
+                : blocked
+                  ? 'Aucun achat possible en l’état'
+                  : a.dryRun
+                    ? 'Simulation : aucun chakra ne sera dépensé'
+                    : needCap
+                      ? 'Achat réel bloqué : définis un plafond de budget supérieur à 0'
+                      : 'Dépense réelle : vérifie le total et le plafond'
+          }</b><br>
+          ${
+            running
+              ? `${fmt(plan.bought)} carte(s) · ◆ ${fmt(plan.spent)} ${a.dryRun ? 'simulés' : 'dépensés'} ·
+                 ${plan.failed.length ? `${fmt(plan.failed.length)} échec(s) · ` : ''}arrêt toujours possible.`
+              : plan.finished && plan.bought
+                ? `Progression ${a.dryRun ? 'simulée' : 'réelle'} : ${
+                    (a.dryRun ? plan.simStatus : a.status)?.pct ?? '—'
+                  } % · ${fmt(plan.failed.length)} carte(s) ignorée(s) · raison d’arrêt : ${esc(
+                    plan.stopped === 'cap'
+                      ? 'plafond atteint'
+                      : plan.stopped === 'chakra'
+                        ? 'chakra insuffisant'
+                        : plan.stopped === 'done'
+                          ? 'prérequis remplis'
+                          : plan.stopped === 'stop'
+                            ? 'arrêt manuel'
+                            : plan.stopped === 'error'
+                              ? 'erreur bloquante'
+                              : 'plus aucune annonce éligible'
+                  )}.`
+                : blocked
+                  ? preview.reason === 'cap'
+                    ? `Le plafond ◆ ${fmt(a.budgetCap)} ne couvre pas la première carte.`
+                    : preview.reason === 'chakra'
+                      ? 'Le chakra disponible ne couvre pas la première carte.'
+                      : 'Aucune annonce éligible avec ces filtres.'
+                  : `Une carte à la fois. Chaque annonce est relue juste avant l’achat : prix modifié ou annonce
+                     disparue = carte ignorée, sans dépasser le budget.`
+          }
+        </div>
+
+        <div class="kp-summary">
+          ${
+            plan.finished
+              ? `<div><span>Achetées</span><b>${fmt(plan.bought)}</b></div>
+                 <div><span>${a.dryRun ? 'Simulé' : 'Dépensé'}</span><b>◆ ${fmt(plan.spent)}</b></div>
+                 <div><span>Budget max</span><b>${a.budgetCap > 0 ? `◆ ${fmt(a.budgetCap)}` : 'aucun'}</b></div>
+                 <div><span>Prix unitaire max</span><b>${a.maxUnit > 0 ? `◆ ${fmt(a.maxUnit)}` : 'aucun'}</b></div>
+                 <div><span>Chakra</span><b>${chakra == null ? '—' : `◆ ${fmt(chakra)}`}</b></div>
+                 <div><span>Total onglet</span><b>◆ ${fmt(a.totalSpent)}</b></div>`
+              : `<div><span>Cartes prévues</span><b>${fmt(preview.count)}</b></div>
+                 <div><span>Coût estimé</span><b>◆ ${fmt(preview.total)}</b></div>
+                 <div><span>Budget max</span><b>${a.budgetCap > 0 ? `◆ ${fmt(a.budgetCap)}` : 'aucun'}</b></div>
+                 <div><span>Prix unitaire max</span><b>${a.maxUnit > 0 ? `◆ ${fmt(a.maxUnit)}` : 'aucun'}</b></div>
+                 <div><span>Chakra</span><b>${chakra == null ? '—' : `◆ ${fmt(chakra)}`}</b></div>
+                 <div><span>Après achat</span><b>${
+                   chakra == null ? '—' : `◆ ${fmt(Math.max(0, chakra - preview.total))}`
+                 }</b></div>`
+          }
+        </div>
+
+        <div class="kp-filters">
+          <label class="kp-filter">
+            <span>Budget max (◆, 0 = aucun)</span>
+            <input class="kp-input" type="number" min="0" step="50" data-autobuy-cap value="${a.budgetCap}" ${
+              running ? 'disabled' : ''
+            }>
+          </label>
+          <label class="kp-filter">
+            <span>Prix unitaire max (◆, 0 = aucun)</span>
+            <input class="kp-input" type="number" min="0" step="10" data-autobuy-unit value="${a.maxUnit}" ${
+              running ? 'disabled' : ''
+            }>
+          </label>
+        </div>
+
+        ${
+          a.dryRun
+            ? ''
+            : `<label class="kp-check" style="margin:6px 0">
+                 <input type="checkbox" data-autobuy-real-confirm ${plan.confirmReal ? 'checked' : ''} ${
+                   running ? 'disabled' : ''
+                 }>
+                 Je confirme vouloir dépenser du chakra réel, dans la limite du plafond ci-dessus.
+               </label>`
+        }
+
+        ${
+          plan.finished
+            ? `<details class="kp-autobuy-rules">
+                 <summary>${a.dryRun ? 'File simulée' : 'File restante'} · ${plural(
+                   preview.count,
+                   'carte'
+                 )} (déplier)</summary>`
+            : ''
+        }
+        <div class="kp-plan kp-autobuy-plan-list">
+          ${
+            preview.items.length
+              ? preview.items
+                  .slice(0, 120)
+                  .map(
+                    (item, index) =>
+                      `<div class="kp-plan-row kp-cplt-plan-row">
+                         <div class="kp-name">#${index + 1} ${esc(item.name)}
+                           <small>${esc(item.series)}${
+                             item.useful ? ` · +${item.gainPct.toFixed(2)} % Éveil` : ' · préparation'
+                           }</small></div>
+                         <div class="kp-net">◆ ${fmt(item.price)}</div>
+                       </div>`
+                  )
+                  .join('')
+              : '<div class="kp-muted">Aucune carte dans la file.</div>'
+          }
+          ${
+            preview.count > 120
+              ? `<div class="kp-muted">… et ${fmt(preview.count - 120)} autre(s) carte(s) dans la file.</div>`
+              : ''
+          }
+        </div>
+        ${plan.finished ? '</details>' : ''}
+        ${
+          preview.reason === 'limit'
+            ? `<div class="kp-hint">File plafonnée à ${fmt(preview.maxItems)} cartes par passe : le classement est
+                 recalculé après chaque achat, la suite reste disponible au prochain lancement.</div>`
+            : ''
+        }
+        ${
+          plan.failed.length
+            ? `<div class="kp-hint">Écartées : ${plan.failed
+                .slice(-8)
+                .map((item) => `${esc(item.name)} (${esc(item.code || 'erreur')})`)
+                .join(' · ')}</div>`
+            : ''
+        }
+        ${
+          a.log.length
+            ? `<div class="kp-log">${a.log
+                .slice(-12)
+                .map(
+                  (entry) =>
+                    `<div class="is-${entry.kind}">${entry.at ? `${nowTime(entry.at)} · ` : ''}${esc(entry.text)}</div>`
+                )
+                .join('')}</div>`
+            : ''
+        }
+      </div>
+      <div class="kp-modal-foot">
+        <button class="kp-btn is-ghost" type="button" data-act="autobuy-close" ${running ? 'disabled' : ''}>${
+          plan.finished ? 'Fermer' : 'Annuler'
+        }</button>
+        ${
+          running
+            ? `<button class="kp-btn is-danger" type="button" data-act="autobuy-stop">Arrêter la file</button>`
+            : plan.finished
+              ? `<button class="kp-btn is-primary" type="button" data-act="autobuy-close">Terminé</button>`
+              : `<button class="kp-btn is-primary" type="button" data-act="autobuy-confirm" ${
+                  blocked || needRealConfirm ? 'disabled' : ''
+                }>
+                   ${a.dryRun ? 'Lancer la simulation' : 'Acheter réellement'} · ${plural(preview.count, 'carte')} ·
+                   ◆ ${fmt(preview.total)}
+                 </button>`
+        }
+      </div>
+    `;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Render                                                              */
   /* ------------------------------------------------------------------ */
 
@@ -7583,7 +8892,11 @@
     // Les onglets denses (Vente, Recyclage, Completion, Stat) gardent un peu plus de largeur.
     ui.panel.classList.toggle(
       'is-wide',
-      state.tab === 'sell' || state.tab === 'recycle' || state.tab === 'completion' || state.tab === 'stat'
+      state.tab === 'sell' ||
+        state.tab === 'recycle' ||
+        state.tab === 'completion' ||
+        state.tab === 'autobuy' ||
+        state.tab === 'stat'
     );
     // +Duel : l'application occupe toute la hauteur (pas de stats ni d'onglets au-dessus).
     ui.panel.classList.toggle('is-duel', duelState().mode === 'duel');
@@ -8288,6 +9601,7 @@
       ['recycle', 'Recyclage'],
       ['market', 'Marché'],
       ['completion', 'Completion'],
+      ['autobuy', state.autobuy.plan.running ? 'Auto-Achat ●' : 'Auto-Achat'],
       ['cards', '%Drop'],
       ['auto', 'Auto-Open'],
       ['stat', 'Stat'],
@@ -8340,6 +9654,7 @@
       recycle: viewRecycle,
       market: viewMarket,
       completion: viewCompletion,
+      autobuy: viewAutobuy,
       cards: viewCards,
       auto: viewAuto,
       stat: viewStat,
@@ -9302,6 +10617,522 @@
   }
 
   /* COMPLETION:END */
+
+  /* AUTOBUY:BEGIN — logique pure de l'onglet Auto-Achat, testée par
+   * test/verify-autobuy.mjs. Le bloc s'appuie sur les helpers COMPLETION
+   * (index, quantités, offres, garde-fou d'achat) et ne touche jamais au DOM,
+   * au réseau ni au stockage.
+   *
+   * Objectif : l'Éveil de Kyara n'est pas une liste de personnages à réunir.
+   * C'est un tirage aléatoire de cartes numérotées dans les boosters, réservé
+   * aux comptes ayant fait au moins une Renaissance. Le seul levier achetable
+   * est donc la Renaissance : ses prérequis de rareté (cartes différentes)
+   * sont lus sur `/api/me/renaissance`, jamais devinés. Voir
+   * docs/AUTO-ACHAT-EVEIL.md. */
+
+  /** Tris de la file d'achats ; « Priorité Éveil » reste le mode recommandé. */
+  const AUTOBUY_SORTS = [
+    ['eveil', 'Priorité Éveil (recommandé)'],
+    ['price_asc', 'Prix croissant'],
+    ['price_desc', 'Prix décroissant'],
+    ['rarity', 'Rareté'],
+    ['series', 'Série'],
+    ['sales_desc', 'Ventes sur 7 j ↓'],
+    ['ratio', 'Rapport progression / prix'],
+    ['series_pct', 'Complétion de la série ↓'],
+    ['newest', 'Date d’apparition de l’annonce']
+  ];
+
+  const AUTOBUY_SORT_KEYS = AUTOBUY_SORTS.map(([key]) => key);
+
+  /** Prérequis de la Renaissance qui se comptent en cartes différentes. */
+  const AUTOBUY_CARD_REQUIREMENTS = [
+    { key: 'C', rarity: 'C', label: 'Communes' },
+    { key: 'U', rarity: 'U', label: 'Peu communes' },
+    { key: 'R', rarity: 'R', label: 'Rares' },
+    { key: 'E', rarity: 'E', label: 'Épiques' },
+    { key: 'legendaries', rarity: 'L', label: 'Légendaires différentes' },
+    { key: 'mythics', rarity: 'M', label: 'Mythiques différentes' }
+  ];
+
+  /** Prérequis non achetables (compte, attente, séquestre, boosters). */
+  const AUTOBUY_OTHER_REQUIREMENTS = [
+    ['boosters', 'Boosters ouverts dans ce cycle'],
+    ['wait', 'Jours depuis la dernière Renaissance'],
+    ['escrow', 'Aucune carte en vente ni en échange'],
+    ['discord', 'Compte relié à Discord'],
+    ['trust', 'Compte de confiance'],
+    ['ban', 'Pas de bannissement en cours']
+  ];
+
+  const AUTOBUY_FIXED_OTHER_KEYS = new Set(['escrow', 'discord', 'trust', 'ban']);
+  const AUTOBUY_STOP_CODES = [
+    'chakra',
+    'rate_limited',
+    'pass_required',
+    'market_locked',
+    'guest_limit',
+    'renaissance_required',
+    'eveil_locked'
+  ];
+  const AUTOBUY_SKIP_CODES = ['listing_closed', 'own_listing', 'price_changed', 'wrong_card', 'unit_cap'];
+  const AUTOBUY_PLAN_MAX = 400;
+  const AUTOBUY_MAX_OFFERS = 12;
+  const AUTOBUY_RARITY_RANK = { C: 1, U: 2, R: 3, E: 4, L: 5, M: 6 };
+
+  function autobuyRequirementLabel(key) {
+    const card = AUTOBUY_CARD_REQUIREMENTS.find((item) => item.key === key);
+    if (card) return card.label;
+    const other = AUTOBUY_OTHER_REQUIREMENTS.find(([value]) => value === key);
+    return other ? other[1] : String(key ?? '');
+  }
+
+  /**
+   * Normalise `/api/me/renaissance` sans rien inventer. Le serveur fournit
+   * `requirements[].have/need` ; le pourcentage reprend exactement sa formule
+   * (une condition `ok` compte 1, les conditions de compte non remplies 0, les
+   * autres au prorata). Une réponse vide reste vide : `active === false`.
+   */
+  function autobuyStatusFrom(raw) {
+    const source = raw && typeof raw === 'object' ? raw : null;
+    const list = Array.isArray(source?.requirements) ? source.requirements : [];
+    const requirements = [];
+    for (const item of list) {
+      const key = String(item?.key ?? '').trim();
+      if (!key) continue;
+      const card = AUTOBUY_CARD_REQUIREMENTS.find((entry) => entry.key === key);
+      const other = AUTOBUY_OTHER_REQUIREMENTS.find(([value]) => value === key);
+      // Une clé inconnue reste comptée (dénominateur du site) mais n'est pas
+      // achetable : on ne peut pas deviner à quelle rareté elle correspond.
+      const need = completionNum(item?.need) ?? 0;
+      const have = completionNum(item?.have) ?? 0;
+      const ok = item?.ok === true || (need > 0 && have >= need);
+      requirements.push({
+        key,
+        kind: card ? 'card' : 'other',
+        rarity: card?.rarity ?? null,
+        label: card?.label ?? other?.[1] ?? autobuyRequirementLabel(key),
+        have,
+        need,
+        ok
+      });
+    }
+    const status = {
+      raw: source,
+      requirements,
+      active: requirements.length > 0,
+      level: completionNum(source?.level) ?? 0,
+      next: completionNum(source?.next),
+      renown: completionNum(source?.renown),
+      eligible: source?.eligible === true,
+      enabled: source?.enabled !== false,
+      waitUntil: source?.waitUntil ?? null
+    };
+    autobuyDeriveStatus(status);
+    return status;
+  }
+
+  /** Recalcule les champs dérivés après une normalisation ou un achat simulé. */
+  function autobuyDeriveStatus(status) {
+    const reqs = Array.isArray(status?.requirements) ? status.requirements : [];
+    let score = 0;
+    for (const req of reqs) {
+      if (req.ok) {
+        score += 1;
+      } else if (AUTOBUY_FIXED_OTHER_KEYS.has(req.key)) {
+        // Condition de compte non remplie : ne compte pas, comme sur le site.
+        score += 0;
+      } else if (req.need > 0) {
+        score += Math.min(1, req.have / req.need);
+      }
+    }
+    status.pct = reqs.length ? Math.round((score / reqs.length) * 100) : null;
+    status.conditionsMet = reqs.filter((req) => req.ok).length;
+    status.conditionsTotal = reqs.length;
+
+    const gaps = {};
+    let remaining = 0;
+    let cardScore = 0;
+    let cardCount = 0;
+    for (const req of reqs) {
+      if (req.kind !== 'card') continue;
+      cardCount += 1;
+      const gap = Math.max(0, req.need - req.have);
+      remaining += gap;
+      cardScore += req.need > 0 ? Math.min(1, req.have / req.need) : req.ok ? 1 : 0;
+      gaps[req.rarity] = {
+        key: req.key,
+        rarity: req.rarity,
+        label: req.label,
+        have: req.have,
+        need: req.need,
+        gap,
+        ok: req.ok || gap === 0,
+        // Part du pourcentage officiel gagnée par une carte de cette rareté.
+        gainPct: req.need > 0 && reqs.length ? 100 / (reqs.length * req.need) : 0
+      };
+    }
+    status.gaps = gaps;
+    status.remaining = cardCount ? remaining : null;
+    status.cardRequirements = cardCount;
+    status.cardPct = cardCount ? Math.round((cardScore / cardCount) * 100) : null;
+    return status;
+  }
+
+  /** Copie du statut après l'achat d'une carte (progression immédiate). */
+  function autobuyStatusPurchase(status, rarity, count = 1) {
+    if (!status?.active) return status;
+    const card = AUTOBUY_CARD_REQUIREMENTS.find((entry) => entry.rarity === rarity);
+    if (!card) return status;
+    const delta = Math.max(0, Math.floor(Number(count) || 0));
+    if (!delta) return status;
+    const requirements = status.requirements.map((req) => {
+      if (req.key !== card.key) return { ...req };
+      const have = Math.min(req.need, req.have + delta);
+      return { ...req, have, ok: req.need > 0 ? have >= req.need : req.ok };
+    });
+    const next = { ...status, requirements };
+    autobuyDeriveStatus(next);
+    return next;
+  }
+
+  /** Annonce achetable + ventes 7 j, sans jamais retenir la nôtre. */
+  function autobuyListingOffer(listing, options = {}) {
+    const base = completionListingOffer(listing, options);
+    if (!base) return null;
+    const sellerId = listing?.seller?.id ?? listing?.sellerId ?? listing?.userId ?? null;
+    if (
+      options.userId != null &&
+      sellerId != null &&
+      String(sellerId) === String(options.userId)
+    ) {
+      return null;
+    }
+    const prices = listing?.prices && typeof listing.prices === 'object' ? listing.prices : {};
+    const sales7d =
+      completionNum(prices.sales7d) ?? completionNum(listing?.sales7d) ?? completionNum(listing?.sales7);
+    return {
+      ...base,
+      sales7d,
+      median7d: completionNum(prices.median7d) ?? completionNum(listing?.median7d),
+      sellerId: sellerId == null ? '' : String(sellerId),
+      createdAt: base.createdAt ?? listing?.createdAt ?? null
+    };
+  }
+
+  /** Regroupe les annonces par carte, les moins chères d'abord. */
+  function autobuyMergeOffers(target, listings, options = {}) {
+    const map = target instanceof Map ? target : new Map();
+    for (const listing of Array.isArray(listings) ? listings : []) {
+      const offer = autobuyListingOffer(listing, options);
+      if (!offer || !offer.listingId) continue;
+      const id = offer.characterId;
+      const list = map.get(id) ?? [];
+      if (list.some((entry) => entry.listingId === offer.listingId)) continue;
+      list.push(offer);
+      list.sort(
+        (a, b) =>
+          a.price - b.price ||
+          (Date.parse(a.createdAt ?? '') || 0) - (Date.parse(b.createdAt ?? '') || 0)
+      );
+      map.set(id, list.slice(0, AUTOBUY_MAX_OFFERS));
+    }
+    return map;
+  }
+
+  /**
+   * Lignes des cartes manquantes du catalogue. Une carte n'est « utile à
+   * l'Éveil » que si sa rareté a encore un déficit dans le statut Renaissance ;
+   * les doublons ne comptent pas, une carte possédée sort donc de la liste.
+   */
+  function autobuyBuildRows({ index, progress, owned, status, offers }) {
+    const qtys = owned instanceof Map ? owned : completionOwnedMap(owned);
+    const byCard = index?.byCard instanceof Map ? index.byCard : new Map();
+    const offerMap = offers instanceof Map ? offers : new Map();
+    const seriesMap = new Map();
+    for (const row of Array.isArray(progress?.rows) ? progress.rows : []) seriesMap.set(row.name, row);
+    const rows = [];
+    for (const card of byCard.values()) {
+      const qty = qtys.get(card.id) ?? 0;
+      if (qty > 0) continue;
+      const entry = offerMap.get(card.id);
+      const list = Array.isArray(entry) ? entry : entry?.best ? [entry.best] : [];
+      const best = list[0] ?? null;
+      const seriesRow = seriesMap.get(card.series) ?? null;
+      const gap = status?.active ? status.gaps?.[card.rarity] ?? null : null;
+      const useful = Boolean(gap && gap.gap > 0);
+      let sales7d = null;
+      for (const offer of list) {
+        if (offer.sales7d != null && (sales7d == null || offer.sales7d > sales7d)) sales7d = offer.sales7d;
+      }
+      rows.push({
+        id: card.id,
+        name: card.name,
+        rarity: card.rarity,
+        series: card.series,
+        image: card.image,
+        useful,
+        gainPct: useful ? gap.gainPct : 0,
+        gap: gap?.gap ?? null,
+        price: best?.price ?? null,
+        best,
+        offers: list,
+        count: list.length,
+        sales7d,
+        createdAt: best?.createdAt ?? null,
+        seriesPct: seriesRow?.pct ?? 0,
+        seriesMissing: seriesRow?.missing ?? null,
+        seriesOwned: seriesRow?.owned ?? null,
+        seriesTotal: seriesRow?.total ?? null
+      });
+    }
+    return rows;
+  }
+
+  /** Filtres locaux, communs au rafraîchissement et à la navigation. */
+  function autobuyFilterRows(rows, filter, options = {}) {
+    const f = filter && typeof filter === 'object' ? filter : {};
+    const q = String(f.query ?? '').trim().toLowerCase();
+    const series = String(f.series ?? '').trim().toLowerCase();
+    const maxPrice = completionNum(f.maxPrice);
+    const hasStatus = options.hasStatus === true;
+    return (Array.isArray(rows) ? rows : []).filter((row) => {
+      if (f.rarity && f.rarity !== 'all' && row.rarity !== f.rarity) return false;
+      if (series && !String(row.series).toLowerCase().includes(series)) return false;
+      if (q && !`${row.name} ${row.series}`.toLowerCase().includes(q)) return false;
+      if (maxPrice != null && maxPrice > 0 && (row.price == null || row.price > maxPrice)) return false;
+      if (f.dispoOnly && !row.best) return false;
+      if (f.hideL && row.rarity === 'L') return false;
+      if (f.hideM && row.rarity === 'M') return false;
+      if (f.incompleteOnly && row.seriesPct >= 100) return false;
+      if (f.eveilOnly && hasStatus && !row.useful) return false;
+      return true;
+    });
+  }
+
+  /** Tris de la file ; « Priorité Éveil » exige un statut Renaissance lisible. */
+  function autobuySortRows(rows, sort, options = {}) {
+    const list = [...(Array.isArray(rows) ? rows : [])];
+    let key = AUTOBUY_SORT_KEYS.includes(String(sort)) ? String(sort) : 'eveil';
+    if (key === 'eveil' && options.hasStatus !== true) key = 'series_pct';
+    const byName = (a, b) => String(a.name).localeCompare(String(b.name), 'fr');
+    const priceOrLast = (row) => (row.price == null ? Number.MAX_SAFE_INTEGER : row.price);
+    const salesOrLast = (row) => (row.sales7d == null ? -1 : row.sales7d);
+    const createdOf = (row) => {
+      const value = Date.parse(row.createdAt ?? '');
+      return Number.isFinite(value) ? value : -1;
+    };
+    const ratioOf = (row) => {
+      if (row.price == null || row.price <= 0) return -1;
+      const gain = row.useful ? row.gainPct : 100 - (row.seriesPct ?? 0);
+      return gain / row.price;
+    };
+    const usefulFirst = (a, b) => Number(b.useful === true) - Number(a.useful === true);
+    const comparators = {
+      eveil: (a, b) =>
+        usefulFirst(a, b) ||
+        b.gainPct - a.gainPct ||
+        ratioOf(b) - ratioOf(a) ||
+        priceOrLast(a) - priceOrLast(b) ||
+        (a.seriesMissing ?? Number.MAX_SAFE_INTEGER) - (b.seriesMissing ?? Number.MAX_SAFE_INTEGER) ||
+        byName(a, b),
+      price_asc: (a, b) => priceOrLast(a) - priceOrLast(b) || usefulFirst(a, b) || byName(a, b),
+      price_desc: (a, b) => {
+        if (a.price == null || b.price == null) {
+          if (a.price == null && b.price == null) return byName(a, b);
+          return a.price == null ? 1 : -1;
+        }
+        return b.price - a.price || usefulFirst(a, b) || byName(a, b);
+      },
+      rarity: (a, b) =>
+        (AUTOBUY_RARITY_RANK[b.rarity] ?? 0) - (AUTOBUY_RARITY_RANK[a.rarity] ?? 0) ||
+        usefulFirst(a, b) ||
+        priceOrLast(a) - priceOrLast(b) ||
+        byName(a, b),
+      series: (a, b) =>
+        String(a.series).localeCompare(String(b.series), 'fr') || usefulFirst(a, b) || byName(a, b),
+      sales_desc: (a, b) => salesOrLast(b) - salesOrLast(a) || usefulFirst(a, b) || byName(a, b),
+      ratio: (a, b) =>
+        ratioOf(b) - ratioOf(a) || usefulFirst(a, b) || priceOrLast(a) - priceOrLast(b) || byName(a, b),
+      series_pct: (a, b) =>
+        (b.seriesPct ?? 0) - (a.seriesPct ?? 0) ||
+        (a.seriesMissing ?? Number.MAX_SAFE_INTEGER) - (b.seriesMissing ?? Number.MAX_SAFE_INTEGER) ||
+        usefulFirst(a, b) ||
+        byName(a, b),
+      newest: (a, b) => createdOf(b) - createdOf(a) || usefulFirst(a, b) || byName(a, b)
+    };
+    return list.sort(comparators[key]);
+  }
+
+  /**
+   * Coût des cartes réellement nécessaires, au prix le plus bas connu et dans
+   * la limite du déficit de chaque rareté. Les cartes sans annonce ne sont
+   * jamais valorisées : `partial` dit combien du déficit reste sans prix.
+   */
+  function autobuyEstimateCost(rows, status) {
+    const list = Array.isArray(rows) ? rows : [];
+    let count = 0;
+    let total = 0;
+    let wanted = 0;
+    if (status?.active) {
+      const present = new Set(list.map((row) => row.rarity));
+      for (const gap of Object.values(status.gaps ?? {})) {
+        if (!gap || gap.gap <= 0) continue;
+        // Le périmètre suit les filtres : masquer une rareté retire aussi son
+        // déficit du coût estimé, au lieu de le compter comme « sans annonce ».
+        if (!present.has(gap.rarity)) continue;
+        wanted += gap.gap;
+        const offers = list
+          .filter((row) => row.rarity === gap.rarity && row.useful && row.best)
+          .sort((a, b) => a.price - b.price)
+          .slice(0, gap.gap);
+        for (const row of offers) {
+          count += 1;
+          total += row.price;
+        }
+      }
+    } else {
+      for (const row of list) {
+        if (!row.best) continue;
+        count += 1;
+        total += row.price;
+      }
+    }
+    return {
+      count,
+      total,
+      wanted: status?.active ? wanted : null,
+      partial: status?.active ? Math.max(0, wanted - count) : null
+    };
+  }
+
+  /**
+   * File d'achats : une carte au plus, dans l'ordre reçu, sans jamais dépasser
+   * le déficit par rareté, le prix unitaire, le plafond de dépense ni le solde.
+   * `reason` explique l'arrêt (`cap`, `chakra`, `done`, `empty`, `limit`).
+   */
+  function autobuyPlan(rows, options = {}) {
+    const status = options.status ?? null;
+    const gaps = {};
+    if (status?.active) {
+      for (const [rarity, gap] of Object.entries(status.gaps ?? {})) gaps[rarity] = gap.gap;
+    }
+    const cap = completionNum(options.cap) ?? 0;
+    const maxUnit = completionNum(options.maxUnit) ?? 0;
+    const chakra = completionNum(options.chakra);
+    const maxItems = Math.max(1, Math.round(completionNum(options.maxItems) ?? AUTOBUY_PLAN_MAX));
+    const items = [];
+    const seen = new Set();
+    let total = 0;
+    let reason = null;
+    let skippedByBudget = 0;
+    let skippedByChakra = 0;
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (!row?.best || row.price == null) continue;
+      if (status?.active && !row.useful) continue;
+      if (status?.active && (gaps[row.rarity] ?? 0) <= 0) continue;
+      if (seen.has(row.id)) continue;
+      if (maxUnit > 0 && row.price > maxUnit) continue;
+      if (cap > 0 && total + row.price > cap) {
+        // La première carte peut être trop chère sans que le budget soit
+        // « atteint » : on l'écarte et on cherche une carte qui rentre.
+        if (!items.length) {
+          skippedByBudget += 1;
+          continue;
+        }
+        reason = 'cap';
+        break;
+      }
+      if (chakra != null && total + row.price > chakra) {
+        if (!items.length) {
+          skippedByChakra += 1;
+          continue;
+        }
+        reason = 'chakra';
+        break;
+      }
+      if (items.length >= maxItems) {
+        reason = 'limit';
+        break;
+      }
+      seen.add(row.id);
+      total += row.price;
+      if (status?.active) gaps[row.rarity] -= 1;
+      items.push({
+        characterId: row.id,
+        listingId: row.best.listingId,
+        name: row.name,
+        series: row.series,
+        rarity: row.rarity,
+        price: row.price,
+        auction: row.best.auction === true,
+        endsAt: row.best.endsAt ?? null,
+        gainPct: row.useful ? row.gainPct : 0,
+        useful: row.useful === true
+      });
+    }
+    const gapsLeft = status?.active
+      ? Object.values(gaps).reduce((sum, value) => sum + Math.max(0, value), 0)
+      : null;
+    if (!reason) {
+      if (!items.length) reason = skippedByBudget ? 'cap' : skippedByChakra ? 'chakra' : 'empty';
+      else if (status?.active && gapsLeft === 0) reason = 'done';
+    }
+    return { items, count: items.length, total, reason, gapsLeft, maxItems, skippedByBudget };
+  }
+
+  /** Contrôle de fraîcheur juste avant l'achat, carte et plafond compris. */
+  function autobuyGuard(item, listing, options = {}) {
+    const base = completionBuyGuard(item, listing, options);
+    if (!base.ok) return base;
+    const actualId = String(listing?.characterId ?? listing?.character?.id ?? '');
+    if (item?.characterId != null && actualId && actualId !== String(item.characterId)) {
+      return { ok: false, code: 'wrong_card' };
+    }
+    const sellerId = listing?.seller?.id ?? listing?.sellerId ?? listing?.userId ?? null;
+    if (options.userId != null && sellerId != null && String(sellerId) === String(options.userId)) {
+      return { ok: false, code: 'own_listing' };
+    }
+    const maxUnit = completionNum(options.maxUnit);
+    if (maxUnit != null && maxUnit > 0 && base.price > maxUnit) {
+      return { ok: false, code: 'unit_cap', price: base.price, expected: maxUnit };
+    }
+    return base;
+  }
+
+  /** Décision après erreur : arrêt bloquant, carte ignorée, ou erreur inconnue. */
+  function autobuyBuyOutcome(code) {
+    const key = String(code ?? '').trim();
+    if (!key) return 'ok';
+    if (AUTOBUY_STOP_CODES.includes(key)) return 'stop';
+    if (AUTOBUY_SKIP_CODES.includes(key)) return 'skip';
+    // Toute erreur non répertoriée arrête la file : on ne dépense pas à l'aveugle.
+    return 'error';
+  }
+
+  function autobuyFailureText(code, guard) {
+    const table = {
+      listing_closed: 'annonce terminée, vendue ou retirée',
+      own_listing: 'c’est ta propre annonce',
+      price_changed:
+        guard?.price != null && guard?.expected != null
+          ? `prix passé de ◆ ${guard.expected} à ◆ ${guard.price}`
+          : 'prix modifié',
+      wrong_card: 'l’annonce ne correspond pas à la carte attendue',
+      unit_cap:
+        guard?.price != null ? `prix ◆ ${guard.price} au-dessus du plafond unitaire` : 'plafond unitaire dépassé',
+      chakra: 'pas assez de chakra',
+      rate_limited: 'trop d’actions d’un coup, patiente quelques secondes',
+      pass_required: 'laissez-passer expiré : ouvre un booster sur le site puis réessaie',
+      market_locked: 'le marché n’est pas débloqué sur ce compte',
+      guest_limit: 'compte invité : connecte-toi avec Discord',
+      renaissance_required: 'une Renaissance est requise avant cet achat',
+      eveil_locked: 'l’Éveil n’est pas encore accessible à ce compte'
+    };
+    return table[String(code ?? '')] || String(code ?? '') || 'erreur inconnue';
+  }
+
+  /* AUTOBUY:END */
 
   /* ------------------------------------------------------------------ */
   /* Statistiques : collecte et stockage                                 */
@@ -15087,6 +16918,12 @@
   function renderModal() {
     if (!ui) return;
 
+    // La confirmation d'auto-achat prime : elle porte une dépense et son Arrêter.
+    if (state.autobuy.plan.open) {
+      renderAutobuyPlan();
+      return;
+    }
+
     // Le panier de complétion prime sur la fiche : c'est lui qui porte les achats.
     if (state.completion.plan.open) {
       renderCompletionPlan();
@@ -15518,6 +17355,15 @@
         // Quitter Completion arrête une relecture de marché en cours : aucune
         // requête ne doit continuer en arrière-plan.
         if (state.tab !== 'completion' && state.completion.scan.running) state.completion.scan.stop = true;
+        // Quitter Auto-Achat arrête sa lecture de marché, mais jamais une file
+        // d'achats en cours : elle doit pouvoir finir et reste arrêtable au retour.
+        if (state.tab !== 'autobuy' && state.autobuy.scan.running) state.autobuy.scan.stop = true;
+        if (state.tab !== 'autobuy' && state.autobuy.plan.open && !state.autobuy.plan.running) {
+          state.autobuy.plan.open = false;
+        }
+        if (state.tab === 'autobuy' && !state.autobuy.statusAt && !state.autobuy.statusLoading) {
+          autobuyEnsureStatus();
+        }
         if (state.tab !== 'recycle' && state.recycle.open && !state.recycle.running) {
           state.recycle.open = false;
           state.recycle.plan = [];
@@ -15659,6 +17505,101 @@
           };
           render();
         }
+        break;
+      /* ---- Onglet Auto-Achat ---- */
+      case 'autobuy-refresh': {
+        if (state.autobuy.scan.running) break;
+        (async () => {
+          await autobuyEnsureStatus(true);
+          await autobuyScanMarket();
+        })();
+        break;
+      }
+      case 'autobuy-scan-stop':
+        if (state.autobuy.scan.running) state.autobuy.scan.stop = true;
+        break;
+      case 'autobuy-start':
+        autobuyPrepare();
+        break;
+      case 'autobuy-confirm':
+        autobuyRun();
+        break;
+      case 'autobuy-stop':
+        if (state.autobuy.plan.running) {
+          state.autobuy.plan.stop = true;
+          render();
+        }
+        break;
+      case 'autobuy-close':
+        if (!state.autobuy.plan.running) {
+          state.autobuy.plan.open = false;
+          state.autobuy.plan.items = [];
+          state.autobuy.plan.rows = [];
+          render();
+        }
+        break;
+      case 'autobuy-expand': {
+        const id = String(el.getAttribute('data-id') || '');
+        const set = state.autobuy.expanded;
+        if (set.has(id)) set.delete(id);
+        else set.add(id);
+        render();
+        break;
+      }
+      case 'autobuy-rarity':
+        state.autobuy.filter.rarity = el.getAttribute('data-rarity') || 'all';
+        state.autobuy.filter.limit = 40;
+        persistAutobuySoon();
+        render();
+        break;
+      case 'autobuy-flag': {
+        const a = state.autobuy;
+        const flag = String(el.getAttribute('data-flag') || '');
+        if (!['dispoOnly', 'incompleteOnly', 'hideL', 'hideM', 'eveilOnly', 'includeAuctions'].includes(flag)) break;
+        if (flag === 'eveilOnly' && !a.status?.active) {
+          notify('Le filtre « Éveil uniquement » attend le statut de la Renaissance.');
+          break;
+        }
+        a.filter[flag] = !a.filter[flag];
+        a.filter.limit = 40;
+        if (flag === 'includeAuctions') {
+          a.market = new Map();
+          a.marketAt = 0;
+          notify(
+            a.filter.includeAuctions
+              ? 'Enchères incluses : seules celles avec achat immédiat seront achetées. Relis le marché.'
+              : 'Enchères exclues : prix fixe uniquement. Relis le marché.'
+          );
+        }
+        persistAutobuySoon();
+        render();
+        break;
+      }
+      case 'autobuy-more':
+        state.autobuy.filter.limit += 40;
+        render();
+        break;
+      case 'autobuy-reset-filters':
+        state.autobuy.filter = {
+          ...state.autobuy.filter,
+          query: '',
+          rarity: 'all',
+          series: '',
+          maxPrice: 0,
+          dispoOnly: false,
+          incompleteOnly: false,
+          hideL: false,
+          hideM: false,
+          eveilOnly: true,
+          limit: 40
+        };
+        persistAutobuySoon();
+        render();
+        break;
+      case 'autobuy-log-clear':
+        state.autobuy.log = [];
+        persistAutobuyNow();
+        render();
         break;
       case 'open-site':
         window.open('https://kyara.games/', '_blank', 'noopener');
@@ -16207,6 +18148,45 @@
     const target = event.target;
     if (!target || typeof target.closest !== 'function') return;
 
+    // --- Onglet Auto-Achat : tri, plafonds, simulation, confirmation réelle ---
+    const autobuySort = target.closest('[data-autobuy-sort]');
+    if (autobuySort) {
+      const value = String(autobuySort.value);
+      state.autobuy.filter.sort = AUTOBUY_SORT_KEYS.includes(value) ? value : 'eveil';
+      state.autobuy.filter.limit = 40;
+      persistAutobuySoon();
+      render();
+      return;
+    }
+
+    const autobuyCap = target.closest('[data-autobuy-cap]');
+    const autobuyUnit = target.closest('[data-autobuy-unit]');
+    if (autobuyCap || autobuyUnit) {
+      if (state.autobuy.plan.running) return;
+      const cap = autobuyCap ? autobuyCap.value : state.autobuy.budgetCap;
+      const unit = autobuyUnit ? autobuyUnit.value : state.autobuy.maxUnit;
+      autobuySetCaps(cap, unit);
+      render();
+      return;
+    }
+
+    const autobuyDryRun = target.closest('[data-autobuy-dryrun]');
+    if (autobuyDryRun) {
+      if (state.autobuy.plan.running) return;
+      state.autobuy.dryRun = Boolean(autobuyDryRun.checked);
+      state.autobuy.plan.confirmReal = false;
+      persistAutobuySoon();
+      render();
+      return;
+    }
+
+    const autobuyRealConfirm = target.closest('[data-autobuy-real-confirm]');
+    if (autobuyRealConfirm) {
+      state.autobuy.plan.confirmReal = Boolean(autobuyRealConfirm.checked);
+      render();
+      return;
+    }
+
     // --- Onglet Completion : filtres, sélection, plafond de budget ---
     const completionMin = target.closest('[data-completion-min]');
     if (completionMin) {
@@ -16673,6 +18653,42 @@
       return;
     }
 
+    // --- Onglet Auto-Achat : recherche locale différée, focus restauré ---
+    const autobuySeries = target.closest('[data-role="autobuy-series"]');
+    const autobuySearch = target.closest('[data-role="autobuy-search"]');
+    const autobuyMaxPrice = target.closest('[data-role="autobuy-max-price"]');
+    if (autobuySeries || autobuySearch || autobuyMaxPrice) {
+      const a = state.autobuy;
+      if (autobuySeries) a.filter.series = autobuySeries.value;
+      if (autobuySearch) a.filter.query = autobuySearch.value;
+      if (autobuyMaxPrice) a.filter.maxPrice = Math.max(0, Math.round(Number(autobuyMaxPrice.value) || 0));
+      a.filter.limit = 40;
+      persistAutobuySoon();
+      const role = autobuySeries
+        ? 'autobuy-series'
+        : autobuySearch
+          ? 'autobuy-search'
+          : 'autobuy-max-price';
+      const restore = () => {
+        const again = qs(`[data-role="${role}"]`);
+        if (!again) return;
+        again.focus();
+        const pos = again.value.length;
+        try {
+          again.setSelectionRange(pos, pos);
+        } catch {
+          /* type=number/search peut refuser */
+        }
+      };
+      if (autobuyRenderTimer) clearTimeout(autobuyRenderTimer);
+      autobuyRenderTimer = setTimeout(() => {
+        autobuyRenderTimer = null;
+        render();
+        restore();
+      }, 180);
+      return;
+    }
+
     const completionSearch = target.closest('[data-completion-search]');
     if (completionSearch) {
       state.completion.filter.query = completionSearch.value;
@@ -16773,6 +18789,7 @@
   let sellSearchTimer = null;
   let sellRenderTimer = null;
   let recycleRenderTimer = null;
+  let autobuyRenderTimer = null;
 
   async function copyText(text) {
     try {
@@ -16824,6 +18841,12 @@
       loadProfile,
       resetProfile,
       autoRefreshTick,
+      autobuyEnsureStatus,
+      autobuyScanMarket,
+      autobuyPrepare,
+      autobuyRun,
+      autobuyRebuild,
+      persistAutobuyNow,
       checkRemoteVersion,
       updateAndReload,
       resumeAutoOpenIfNeeded,

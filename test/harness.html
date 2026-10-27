@@ -136,13 +136,13 @@
       // grandes pour passer la taille minimale par défaut (5), dont plusieurs
       // cartes absentes de la collection simulée.
       CHARACTERS.push(
-        { id: 770001, name: 'Kakashi Hatake', rarity: 'E', series: 'Naruto', image: '' },
-        { id: 770002, name: 'Sakura Haruno', rarity: 'R', series: 'Naruto', image: '' },
-        { id: 770003, name: 'Sasuke Uchiwa', rarity: 'E', series: 'Naruto', image: '' },
-        { id: 770004, name: 'Itachi Uchiwa', rarity: 'L', series: 'Naruto', image: '' },
-        { id: 880001, name: 'Roronoa Zoro', rarity: 'E', series: 'ONE PIECE', image: '' },
-        { id: 880002, name: 'Sanji Vinsmoke', rarity: 'R', series: 'ONE PIECE', image: '' },
-        { id: 880003, name: 'Nami', rarity: 'C', series: 'ONE PIECE', image: '' }
+        { id: 770001, name: 'Kakashi Hatake', rarity: 'E', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 770002, name: 'Sakura Haruno', rarity: 'R', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 770003, name: 'Sasuke Uchiwa', rarity: 'E', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 770004, name: 'Itachi Uchiwa', rarity: 'L', series: 'Naruto', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 880001, name: 'Roronoa Zoro', rarity: 'E', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 880002, name: 'Sanji Vinsmoke', rarity: 'R', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 880003, name: 'Nami', rarity: 'C', series: 'ONE PIECE', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' }
       );
 
       // Joueurs simulés pour l'onglet Stat global (données publiques).
@@ -175,6 +175,21 @@
         45627: { median7d: 140, median30d: 150, sales7d: 9, sales30d: 28 },
         45628: { median7d: 60, median30d: 55, sales7d: 6, sales30d: 18 }
       };
+
+      // Cartes dédiées à l'onglet Auto-Achat : plusieurs raretés et séries,
+      // toutes absentes de la collection simulée ci-dessous.
+      CHARACTERS.push(
+        { id: 770010, name: 'Shikamaru Nara', rarity: 'C', series: 'Auto-Achat · Konoha', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 770011, name: 'Hinata Hyûga', rarity: 'C', series: 'Auto-Achat · Konoha', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 770012, name: 'Rock Lee', rarity: 'U', series: 'Auto-Achat · Konoha', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 770013, name: 'Gaara', rarity: 'R', series: 'Auto-Achat · Konoha', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 880010, name: 'Trafalgar Law', rarity: 'C', series: 'Auto-Achat · Grand Line', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 880011, name: 'Nico Robin', rarity: 'U', series: 'Auto-Achat · Grand Line', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 880012, name: 'Brook', rarity: 'R', series: 'Auto-Achat · Grand Line', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 999010, name: 'Ichigo Kurosaki', rarity: 'E', series: 'Auto-Achat · Karakura', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 999011, name: 'Rukia Kuchiki', rarity: 'C', series: 'Auto-Achat · Karakura', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' },
+        { id: 999012, name: 'Sosuke Aizen', rarity: 'L', series: 'Auto-Achat · Karakura', image: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png' }
+      );
 
       const COLLECTION = [
         { characterId: 127691, qty: 2, listable: 1 },
@@ -216,21 +231,64 @@
       };
       // Annonces d'autres joueurs sur des cartes manquantes de la collection
       // simulée, pour l'onglet Completion (jamais comptées dans MES annonces).
+      const otherListing = (id, characterId, price, options = {}) => ({
+        id,
+        characterId,
+        character: CHARACTERS.find((c) => Number(c.id) === Number(characterId)),
+        type: options.auction ? 'auction' : 'fixed',
+        price,
+        buyoutPrice: options.buyoutPrice ?? null,
+        status: options.status ?? 'active',
+        qty: 1,
+        seller: { id: options.seller ?? 'p-2', pseudo: options.pseudo ?? 'Pharysse' },
+        createdAt: options.createdAt ?? new Date(Date.now() - 3 * 3600e3).toISOString(),
+        endsAt: options.endsAt ?? new Date(Date.now() + 10 * 3600e3).toISOString(),
+        prices: {
+          median7d: options.median7d ?? price,
+          median30d: options.median30d ?? price,
+          sales7d: options.sales7d ?? 0
+        }
+      });
+      // Onglet Completion : annonces strictement réservées à ses séries, pour
+      // que ses compteurs historiques ne bougent pas.
       const OTHER_LISTINGS = [
-        { id: 'cplt-1', characterId: 770001, character: CHARACTERS.find((c) => c.id === 770001), type: 'fixed', price: 40, status: 'active', qty: 1, seller: { id: 'p-2', pseudo: 'Pharysse' }, endsAt: new Date(Date.now() + 10 * 3600e3).toISOString() },
-        { id: 'cplt-2', characterId: 770002, character: CHARACTERS.find((c) => c.id === 770002), type: 'fixed', price: 12, status: 'active', qty: 1, seller: { id: 'p-3', pseudo: 'Waldox' }, endsAt: new Date(Date.now() + 5 * 3600e3).toISOString() },
-        { id: 'cplt-3', characterId: 880001, character: CHARACTERS.find((c) => c.id === 880001), type: 'auction', price: 15, buyoutPrice: 25, bidCount: 0, status: 'active', qty: 1, seller: { id: 'p-1', pseudo: 'Ratek' }, endsAt: new Date(Date.now() + 7 * 3600e3).toISOString() }
+        otherListing('cplt-1', 770001, 40, { sales7d: 6 }),
+        otherListing('cplt-2', 770002, 12, { sales7d: 14 }),
+        otherListing('cplt-3', 880001, 15, { auction: true, buyoutPrice: 25, sales7d: 3 })
+      ];
+      // Onglet Auto-Achat : marché séparé, servi uniquement aux requêtes qui
+      // portent un filtre `rarity` (l'onglet Completion n'en envoie pas).
+      const AUTOBUY_LISTINGS = [
+        otherListing('ab-1', 770010, 6, { sales7d: 9, seller: 'p-3', pseudo: 'Waldox' }),
+        otherListing('ab-2', 770010, 9, { sales7d: 9, seller: 'p-4', pseudo: 'fayura' }),
+        otherListing('ab-3', 770011, 4, { sales7d: 21, seller: 'p-5', pseudo: 'Menkoy' }),
+        otherListing('ab-4', 770012, 7, { sales7d: 5, seller: 'p-6', pseudo: 'SHADOW-2' }),
+        otherListing('ab-5', 770013, 18, { sales7d: 2, seller: 'p-1', pseudo: 'Ratek' }),
+        otherListing('ab-6', 880010, 3, { sales7d: 33, seller: 'p-2', pseudo: 'Pharysse' }),
+        otherListing('ab-7', 880011, 11, { sales7d: 8, seller: 'p-3', pseudo: 'Waldox' }),
+        otherListing('ab-8', 880012, 22, { sales7d: 1, seller: 'p-4', pseudo: 'fayura' }),
+        otherListing('ab-9', 999010, 35, { sales7d: 4, seller: 'p-5', pseudo: 'Menkoy' }),
+        otherListing('ab-10', 999011, 5, { sales7d: 17, seller: 'p-6', pseudo: 'SHADOW-2' }),
+        otherListing('ab-11', 999012, 120, { sales7d: 2, seller: 'p-1', pseudo: 'Ratek' }),
+        // Annonces qui doivent être ignorées par l'auto-achat.
+        otherListing('ab-sold', 770003, 55, { status: 'sold', sales7d: 1 }),
+        otherListing('ab-expired', 770004, 100, { endsAt: new Date(Date.now() - 3600e3).toISOString(), sales7d: 1 }),
+        otherListing('ab-mine', 770001, 1, { seller: 'u-axel', pseudo: 'Axel', sales7d: 6 })
       ];
       // Accès direct pour les tests du graphique de profit (vente confirmée).
       window.__marketState = MARKET_STATE;
       // Annonces des autres joueurs (onglet Completion) : jamais dans MES annonces.
       window.__otherListings = OTHER_LISTINGS;
+      window.__autobuyListings = AUTOBUY_LISTINGS;
 
       const CONFIG = {
         catalogSize: 6736,
         freePacks: { max: 10 },
         recycle: { C: 1, U: 1, R: 3, E: 10, L: 40, M: 150 },
-        pity: { threshold: 250, rarity: 'M' }
+        pity: { threshold: 250, rarity: 'M' },
+        renaissanceOpen: !new URLSearchParams(location.search).has('rnclosed'),
+        eveilOpen: true,
+        eveilRevealAt: '2026-11-03T20:00:00.000Z'
       };
 
       const json = (data) => new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -272,6 +330,39 @@
             nextFreeAt: new Date(Date.now() + (window.__nextFreeMin ?? 10) * 60000).toISOString(),
             pity: 120
           });
+        }
+
+        if (path === '/api/me/renaissance') {
+          if (window.__renaissanceClosed || new URLSearchParams(location.search).has('rnclosed')) {
+            return new Response(JSON.stringify({ code: 'renaissance_closed', message: 'La Renaissance n’est pas ouverte.' }), {
+              status: 503,
+              headers: { 'content-type': 'application/json' }
+            });
+          }
+          window.__renaissance =
+            window.__renaissance ?? {
+              enabled: true,
+              level: 0,
+              next: 1,
+              renown: 812,
+              eligible: false,
+              waitUntil: null,
+              requirements: [
+                { key: 'C', have: 5, need: 8, ok: false },
+                { key: 'U', have: 2, need: 5, ok: false },
+                { key: 'R', have: 1, need: 4, ok: false },
+                { key: 'E', have: 2, need: 4, ok: false },
+                { key: 'legendaries', have: 1, need: 2, ok: false },
+                { key: 'mythics', have: 0, need: 1, ok: false },
+                { key: 'boosters', have: 12, need: 50, ok: false },
+                { key: 'wait', have: 3, need: 7, ok: false },
+                { key: 'discord', have: 1, need: 0, ok: true },
+                { key: 'escrow', have: 0, need: 0, ok: false },
+                { key: 'trust', have: 1, need: 0, ok: true },
+                { key: 'ban', have: 0, need: 0, ok: true }
+              ]
+            };
+          return json(window.__renaissance);
         }
 
         if (url.includes('/api/me/collection/prices')) {
@@ -608,7 +699,7 @@
           String(init?.method || 'GET').toUpperCase() === 'POST'
         ) {
           const id = decodeURIComponent(path.split('/api/market/listings/')[1].split('/buy')[0]);
-          const all = [...MARKET_STATE.listings, ...OTHER_LISTINGS];
+          const all = [...MARKET_STATE.listings, ...OTHER_LISTINGS, ...AUTOBUY_LISTINGS];
           const target = all.find((item) => item.id === id);
           const index = target ? MARKET_STATE.listings.indexOf(target) : -1;
           const otherIndex = target ? OTHER_LISTINGS.indexOf(target) : -1;
@@ -640,6 +731,16 @@
             MARKET_STATE.collection.push({ characterId: Number(listing.characterId), qty: 1, listable: 1, locked: 0 });
           }
           (window.__bought = window.__bought || []).push({ id, characterId: listing.characterId, price });
+          // Le statut Renaissance simulé suit l'achat, comme sur le site.
+          if (window.__renaissance) {
+            const card = CHARACTERS.find((item) => Number(item.id) === Number(listing.characterId));
+            const keyByRarity = { C: 'C', U: 'U', R: 'R', E: 'E', L: 'legendaries', M: 'mythics' };
+            const req = window.__renaissance.requirements.find((item) => item.key === keyByRarity[card?.rarity]);
+            if (req) {
+              req.have = Math.min(req.need, Number(req.have || 0) + 1);
+              req.ok = req.need > 0 ? req.have >= req.need : req.ok;
+            }
+          }
           return json({
             user: { id: 'u-axel', chakra: window.__chakra },
             listing: { ...listing, status: 'sold' }
@@ -649,7 +750,7 @@
         // Une annonce seule (contrôle de fraîcheur avant achat).
         if (/\/api\/market\/listings\/[^/]+$/.test(path) && String(init?.method || 'GET').toUpperCase() === 'GET') {
           const id = decodeURIComponent(path.split('/api/market/listings/')[1]);
-          const listing = [...MARKET_STATE.listings, ...OTHER_LISTINGS].find((item) => item.id === id);
+          const listing = [...MARKET_STATE.listings, ...OTHER_LISTINGS, ...AUTOBUY_LISTINGS].find((item) => item.id === id);
           return json(listing ? { ...listing } : {});
         }
 
@@ -733,6 +834,7 @@
           const params = new URL(url, location.href).searchParams;
           const id = params.get('characterId');
           const series = params.get('series');
+          const rarity = params.get('rarity');
           const missingOnly = params.get('missing') === '1';
           // Onglet Completion : filtre par série et par cartes manquantes, sur
           // l'état réel du marché simulé (une annonce achetée disparaît).
@@ -741,10 +843,14 @@
               MARKET_STATE.collection.filter((row) => Number(row.qty ?? 0) > 0).map((row) => Number(row.characterId))
             );
             const typeFilter = params.get('type');
-            const items = [...MARKET_STATE.listings, ...OTHER_LISTINGS].filter((item) => {
+            const pool = rarity
+              ? [...MARKET_STATE.listings, ...OTHER_LISTINGS, ...AUTOBUY_LISTINGS]
+              : [...MARKET_STATE.listings, ...OTHER_LISTINGS];
+            const items = pool.filter((item) => {
               const card = CHARACTERS.find((c) => Number(c.id) === Number(item.characterId)) || item.character || null;
               if (item.status && item.status !== 'active') return false;
               if (series && String(card?.series ?? '') !== series) return false;
+              if (rarity && String(card?.rarity ?? '') !== rarity) return false;
               if (typeFilter === 'fixed' && item.type !== 'fixed') return false;
               if (typeFilter === 'auction' && item.type !== 'auction') return false;
               if (missingOnly && owned.has(Number(item.characterId))) return false;
@@ -771,7 +877,7 @@
           }
           // Recherche marché : on filtre comme le ferait le serveur.
           const q = (params.get('q') || '').toLowerCase();
-          const rarity = params.get('rarity');
+          const rarityFilter = params.get('rarity');
           const type = params.get('type');
           const pool = [
             { id: 'a', characterId: 10668, character: CHARACTERS[1], type: 'auction', price: 1, buyoutPrice: 9, prices: PRICES[10668] },
@@ -782,7 +888,7 @@
           const items = pool.filter(
             (item) =>
               (!q || `${item.character.name} ${item.character.series}`.toLowerCase().includes(q)) &&
-              (!rarity || item.character.rarity === rarity) &&
+              (!rarityFilter || item.character.rarity === rarityFilter) &&
               (!type || item.type === type)
           );
           return json({ items, total: items.length });
