@@ -144,6 +144,35 @@ l'interface). Les textes de `description.md` ne mentionnent ni l'auto-open ni la
 
 Le même zip est accepté tel quel sur <https://partner.microsoft.com/dashboard/microsoftedge/>.
 
+## Notes de version à coller dans le Store (2.8.1)
+
+```text
+Completion — filtre « Légendaire » / « Mythique » : ces raretés sont retirées de toute l'analyse
+(progression, pourcentages, cartes manquantes, recherches de marché) sans toucher à la collection.
+Réglage conservé d'une session à l'autre, périmètre affiché, état vide explicite.
+
+Completion — « ↻ Rafraîchir » sur chaque série : relit uniquement les annonces de cette série,
+retire immédiatement celles qui ont été vendues ou annulées, affiche l'heure de la dernière lecture
+et signale les annonces disparues. Filtres et position de la page conservés ; 5 s minimum entre
+deux rafraîchissements d'une même série.
+
+Mise à jour — les boutons « Recharger les fichiers locaux » (Debug et popup) ne prétendent plus
+télécharger une version : ils relisent le code déjà installé. Debug affiche la version réellement
+publiée sur le magasin, celle du dépôt GitHub et un bouton « Vérifier les mises à jour ».
+```
+
+Instructions d'envoi (2.8.1) :
+
+1. `npm run build:chrome` → `web-ext-artifacts/kyareeh-plus-2.8.1-chrome.zip` (25 fichiers, MV3,
+   `minimum_chrome_version` 116, version 2.8.1 vérifiée dans le manifeste).
+2. <https://chrome.google.com/webstore/devconsole> → l'élément Kyareeh+ → **Package** →
+   **Charger un nouveau package** → le zip.
+3. **Notes de version** : coller le bloc ci-dessus. **Confidentialité** : rien ne change
+   (aucune permission ajoutée depuis la publication précédente).
+4. **Envoyer pour examen**. Chrome vérifie la mise à jour puis l'installe au redémarrage du
+   navigateur ; le numéro affiché dans `chrome://extensions` doit passer à **2.8.1**.
+
+
 ## Différences de comportement Firefox / Chrome
 
 - **Mise à jour** : Chrome Web Store met à jour automatiquement l'extension publiée. Le
