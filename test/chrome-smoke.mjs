@@ -1824,7 +1824,7 @@ async function visualPass() {
       sessionId,
       `(() => {
          const root = document.querySelector('#kyara-plus-root').shadowRoot;
-         root.querySelector('.kp-cplt-row[data-series="Naruto"] [data-act="completion-open"]').click();
+         root.querySelector('.kp-cplt-row[data-series="Naruto"]').click();
          return true;
        })()`
     );
@@ -1962,6 +1962,280 @@ async function visualPass() {
       completionAfter.series.includes('Naruto'),
       JSON.stringify(completionAfter.series)
     );
+
+    /* --- Rafraîchissement d'une seule série --- */
+    const cplt = async (js) => evaluate(cdp, sessionId, js);
+    // Le lot précédent laisse sa modale ouverte : on la ferme avant de continuer.
+    await cplt(`(() => {
+         const c = window.__kyaraPlus.state.completion;
+         c.plan.open = false;
+         c.plan.items = [];
+         c.detail = null;
+         document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-modal').hidden = true;
+         window.__kyaraPlus.render();
+         return true;
+       })()`);
+    await sleep(250);
+    await cplt(`(() => {
+         window.__otherListings.push({
+           id: 'cplt-9',
+           characterId: 770003,
+           type: 'fixed',
+           price: 30,
+           status: 'active',
+           qty: 1,
+           seller: { id: 'p-4', pseudo: 'fayura' },
+           endsAt: new Date(Date.now() + 6 * 3600e3).toISOString()
+         });
+         window.__kyaraPlus.state.completion.seriesAt.clear();
+         return true;
+       })()`);
+    const seriesRequestsBefore = await cplt('window.__otherListings.length');
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('.kp-cplt-row[data-series="Naruto"] [data-act="completion-series-refresh"]').click();
+         return true;
+       })()`);
+    await waitFor(
+      () =>
+        cplt(`(() => {
+             const root = document.querySelector('#kyara-plus-root').shadowRoot;
+             const row = root.querySelector('.kp-cplt-row[data-series="Naruto"]');
+             return /1 en vente/.test(row?.querySelector('.kp-cplt-market')?.innerText || '');
+           })()`),
+      { label: 'rafraîchissement de la série Naruto' }
+    );
+    const refreshed = await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const row = root.querySelector('.kp-cplt-row[data-series="Naruto"]');
+         return {
+           market: row?.querySelector('.kp-cplt-market')?.innerText || '',
+           note: row?.querySelector('.kp-cplt-note')?.innerText || '',
+           when: /relu à/.test(row?.querySelector('.kp-cplt-market')?.innerText || ''),
+           others: window.__otherListings.length
+         };
+       })()`);
+    check('rafraîchissement : annonce de la série prise en compte', /1 en vente/.test(refreshed.market), refreshed.market.replace(/\n/g, ' | '));
+    check('rafraîchissement : heure de dernière lecture affichée', refreshed.when === true);
+    check(
+      'rafraîchissement : une seule série relue (aucune annonce créée ou retirée)',
+      refreshed.others === seriesRequestsBefore,
+      `${refreshed.others} / ${seriesRequestsBefore}`
+    );
+
+    // L'annonce disparaît entre l'aperçu et la confirmation : le contrôle pré-achat la refuse.
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('.kp-cplt-row[data-series="Naruto"]').click();
+         return true;
+       })()`);
+    await waitFor(() => cplt(`!document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-modal').hidden`), {
+      label: 'fiche série rouverte'
+    });
+    const guardedDetail = await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const card = root.querySelector('#kp-modal-card');
+         return {
+           cards: card.querySelectorAll('.kp-cplt-card').length,
+           checked: card.querySelectorAll('input[data-completion-pick]:checked').length,
+           button: card.querySelector('[data-act="completion-start"]')?.textContent.trim() || ''
+         };
+       })()`);
+    check('fiche : 2 manquants listés après l’achat précédent', guardedDetail.cards === 2, `${guardedDetail.cards} carte(s)`);
+    check('fiche : l’annonce fraîche est cochée', guardedDetail.checked === 1, `${guardedDetail.checked} cochée(s)`);
+    check('fiche : total du panier à jour', /1 carte/.test(guardedDetail.button) && /30/.test(guardedDetail.button), guardedDetail.button);
+
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="completion-start"]').click();
+         return true;
+       })()`);
+    await sleep(400);
+    await cplt(`(() => {
+         const i = window.__otherListings.findIndex((l) => l.id === 'cplt-9');
+         if (i >= 0) window.__otherListings.splice(i, 1);
+         window.__chakra = 1000;
+         return true;
+       })()`);
+    const boughtBefore = await cplt(`(window.__bought || []).length`);
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="completion-buy"]').click();
+         return true;
+       })()`);
+    // Le lot dure ~1,4 s (une carte, un contrôle de fraîcheur puis l'achat refusé).
+    await sleep(3000);
+    const planState = await cplt(`(() => {
+         const p = window.__kyaraPlus.state.completion.plan;
+         const card = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-modal-card');
+         return {
+           running: p.running,
+           finished: p.finished,
+           done: p.done,
+           bought: p.bought,
+           failed: p.failed,
+           log: p.log,
+           modal: card?.innerText || '',
+           chakra: window.__chakra,
+           boughtApi: (window.__bought || []).length
+         };
+       })()`);
+    check('achat : lot terminé après le contrôle de fraîcheur', planState.finished === true, JSON.stringify(planState).slice(0, 400));
+    check(
+      'achat : annonce retirée entre-temps non achetée',
+      planState.bought === 0 && planState.boughtApi === boughtBefore,
+      JSON.stringify(planState.failed)
+    );
+    check('achat : aucun chakra débité', planState.chakra === 1000, String(planState.chakra));
+    check(
+      'achat : motif explicite dans le journal',
+      /annonce terminée/.test(planState.log.map((l) => l.text).join(' | ')),
+      planState.log.map((l) => l.text).join(' | ')
+    );
+    // Fermeture par l'état : la modale laisse alors la vue Completion libre.
+    await cplt(`(() => {
+         const c = window.__kyaraPlus.state.completion;
+         c.plan.open = false;
+         c.plan.items = [];
+         c.detail = null;
+         window.__kyaraPlus.render();
+         return true;
+       })()`);
+    await sleep(400);
+
+    // Anti-spam : un rafraîchissement juste après une lecture réussie est refusé.
+    await cplt(`window.__kyaraPlus.state.completion.seriesAt.clear()`);
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('.kp-cplt-row[data-series="Naruto"] [data-act="completion-series-refresh"]').click();
+         return true;
+       })()`);
+    await waitFor(
+      () => cplt(`Boolean(document.querySelector('#kyara-plus-root').shadowRoot.querySelector('.kp-cplt-row[data-series="Naruto"] .kp-cplt-note'))`),
+      { label: 'premier rafraîchissement terminé' }
+    );
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('.kp-cplt-row[data-series="Naruto"] [data-act="completion-series-refresh"]').click();
+         return true;
+       })()`);
+    await sleep(600);
+    const throttled = await cplt(`window.__kyaraPlus.state.notice`);
+    check('rafraîchissement : appel répété refusé (anti-spam)', /déjà relues/.test(String(throttled)), String(throttled));
+
+    /* --- Filtre de raretés --- */
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="completion-hide-rarity"][data-rarity="L"]').click();
+         return true;
+       })()`);
+    await sleep(450);
+    const filtered = await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const row = root.querySelector('.kp-cplt-row[data-series="Naruto"]');
+         const state = window.__kyaraPlus.state.completion;
+         const seriesRow = (state.progress?.rows || []).find((r) => r.name === 'Naruto');
+         return {
+           text: row?.innerText || '',
+           rows: [...root.querySelectorAll('.kp-cplt-row')].map((el) => el.getAttribute('data-series')),
+           view: (root.querySelector('#kp-view')?.innerText || '').slice(0, 400),
+           tab: window.__kyaraPlus.state.tab,
+           hint: root.querySelector('#kp-view')?.innerText || '',
+           pressed: root.querySelector('[data-act="completion-hide-rarity"][data-rarity="L"]')?.getAttribute('aria-pressed'),
+           chips: root.querySelectorAll('[data-act="completion-hide-rarity"]').length,
+           missingIds: seriesRow?.missingIds || [],
+           hiddenMissing: seriesRow?.hiddenMissing ?? 0,
+           totals: { missing: state.totals?.missing, hidden: state.totals?.hiddenMissing, hide: state.totals?.hideRarities }
+         };
+       })()`);
+    check('filtre : deux boutons de rareté', filtered.chips === 2, `${filtered.chips}`);
+    check(
+      'filtre L : progression recalculée sans les légendaires (3/4, 1 manquante)',
+      /3\/4/.test(filtered.text) && /1 manquante/.test(filtered.text),
+      JSON.stringify({ text: filtered.text, rows: filtered.rows, tab: filtered.tab, missing: filtered.missingIds, hide: filtered.totals.hide, view: filtered.view })
+    );
+    check('filtre L : bouton marqué comme actif', filtered.pressed === 'true', String(filtered.pressed));
+    check(
+      'filtre L : périmètre annoncé dans la vue',
+      /hors légendaire/.test(filtered.hint) && /masquée/.test(filtered.hint),
+      filtered.hint.split('\n').find((line) => /hors légendaire/.test(line)) || ''
+    );
+    check(
+      'filtre L : la carte légendaire sort des manquants et du marché',
+      !filtered.missingIds.includes('770004') && filtered.hiddenMissing === 1 && filtered.totals.hide.includes('L'),
+      JSON.stringify({ ids: filtered.missingIds, hidden: filtered.hiddenMissing, hide: filtered.totals.hide })
+    );
+
+    // La fiche ne propose plus que les manquants visibles.
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('.kp-cplt-row[data-series="Naruto"]').click();
+         return true;
+       })()`);
+    await waitFor(() => cplt(`!document.querySelector('#kyara-plus-root').shadowRoot.querySelector('#kp-modal').hidden`), {
+      label: 'fiche filtrée ouverte'
+    });
+    const filteredDetail = await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const card = root.querySelector('#kp-modal-card');
+         return {
+           cards: card.querySelectorAll('.kp-cplt-card').length,
+           checked: card.querySelectorAll('input[data-completion-pick]:checked').length
+         };
+       })()`);
+    check('filtre L : la carte légendaire sort de la fiche', filteredDetail.cards === 1, `${filteredDetail.cards} carte(s)`);
+    check('filtre L : plus rien de coché sans annonce', filteredDetail.checked === 0, `${filteredDetail.checked}`);
+    await cplt(`(() => {
+         const c = window.__kyaraPlus.state.completion;
+         c.detail = null;
+         c.picks = new Map();
+         window.__kyaraPlus.render();
+         return true;
+       })()`);
+    await sleep(300);
+
+    await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         root.querySelector('[data-act="completion-hide-rarity-reset"]').click();
+         return true;
+       })()`);
+    await sleep(450);
+    const restored = await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const row = root.querySelector('.kp-cplt-row[data-series="Naruto"]');
+         return { text: row?.innerText || '', active: root.querySelectorAll('[data-act="completion-hide-rarity"].is-on').length };
+       })()`);
+    check(
+      'filtre : réaffichage complet revient à 4/6',
+      /4\/6/.test(restored.text) && /2 manquantes/.test(restored.text) && restored.active === 0,
+      restored.text.replace(/\n/g, ' | ')
+    );
+
+    console.log('\n— Mises à jour : boutons et diagnostic (harness) —');
+    await cplt(`(() => { window.__kyaraPlus.setTab('debug'); return true; })()`);
+    await sleep(700);
+    const debugView = await cplt(`(() => {
+         const root = document.querySelector('#kyara-plus-root').shadowRoot;
+         const text = root.querySelector('#kp-view')?.innerText || '';
+         const reload = root.querySelector('[data-act="reload-ext"]');
+         return {
+           hasUpdateButton: Boolean(root.querySelector('[data-act="update-check"]')),
+           reloadLabel: (reload?.textContent || '').trim(),
+           reloadTitle: reload?.getAttribute('title') || '',
+           sections: /mises à jour/i.test(text),
+           explains: /ne télécharge aucune version/.test(text),
+           amo: /Publiée sur/.test(text)
+         };
+       })()`);
+    check('mise à jour : bouton de vérification présent', debugView.hasUpdateButton);
+    check(
+      'mise à jour : le rechargement annonce les fichiers locaux',
+      /locaux/i.test(debugView.reloadLabel) && /Ne télécharge rien/.test(debugView.reloadTitle),
+      `${debugView.reloadLabel} — ${debugView.reloadTitle}`
+    );
+    check('mise à jour : section dédiée dans Debug', debugView.sections);
+    check('mise à jour : le bouton n’est plus présenté comme un téléchargement', debugView.explains);
+    check('mise à jour : version publiée sur le magasin affichée', debugView.amo);
 
     check('Aucune exception JS pendant le rendu', cdp.exceptions.length === 0, cdp.exceptions.join(' | '));
   } finally {

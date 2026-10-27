@@ -66,6 +66,8 @@
   const COMPLETION_MAX_PAGES = 3;
   // Garde-fou : nombre de séries relues en une passe (≈ 0,4 s par série).
   const COMPLETION_SCAN_MAX = 150;
+  // Délai minimal entre deux rafraîchissements d'une même série (anti-spam marché).
+  const COMPLETION_SERIES_MIN_GAP = 5 * 1000;
   // Les comptes suivis sont relus au bout de 12 h (ou à la demande).
   const STAT_CACHE_MS = 12 * 3600 * 1000;
   const STAT_MAX_ACCOUNTS = 20;
@@ -325,12 +327,19 @@
         minSize: 5,
         dispoOnly: false,
         includeAuctions: false,
+        // Raretés retirées de l'analyse (affichage + marché + pourcentages).
+        hideRare: { L: false, M: false },
         sort: 'closest',
         limit: 40
       },
       budgetCap: 0,
       detail: null,
       picks: new Map(),
+      // Rafraîchissement série par série : horodatage, état de chargement,
+      // dernière note affichée (annonce disparue, erreur discrète).
+      seriesAt: new Map(),
+      seriesBusy: new Set(),
+      seriesNote: new Map(),
       plan: {
         open: false,
         items: [],
@@ -372,7 +381,17 @@
     manifestVersion: null,
     diskVersion: null,
     manifestOutdated: false,
-    update: { checking: false, version: null, error: null, checkedAt: 0 },
+    // `update.version` = version du dépôt GitHub (informatif) ;
+    // `update.store` = version réellement publiée sur le magasin (AMO).
+    update: {
+      checking: false,
+      version: null,
+      error: null,
+      checkedAt: 0,
+      store: { checking: false, version: null, fileStatus: '', channel: '', at: 0, error: null },
+      engineCheck: null,
+      lastCheck: null
+    },
     selfProfile: null,
     selfProfileTried: null,
     packs: null,
@@ -665,7 +684,7 @@
   }
 
   function reloadExtension() {
-    notify('Rechargement de l’extension…');
+    notify('Rechargement des fichiers locaux…');
 
     const fail = (reason) => {
       notify(`${reason} ${RELOAD_HINT}`);
@@ -750,6 +769,105 @@
       u.checking = false;
       render();
     }
+  }
+
+  /**
+   * Version **publiée sur le magasin** (AMO), lue par le script de fond.
+   * C'est la seule qui compte pour une mise à jour : le dépôt GitHub peut être
+   * en avance sans que rien ne soit servi aux navigateurs.
+   */
+  async function checkStoreVersion(force = false) {
+    const s = state.update.store;
+    if (s.checking) return;
+    s.checking = true;
+    s.error = null;
+    render();
+    try {
+      const ask = ext.runtime.sendMessage({ type: 'kp-store-version', force: Boolean(force) });
+      const res = await Promise.resolve(ask);
+      if (!res || !res.ok) throw new Error(res?.error || 'réponse vide');
+      s.version = res.version || null;
+      s.fileStatus = String(res.fileStatus || '');
+      s.channel = String(res.channel || '');
+      s.at = Number(res.at) || Date.now();
+    } catch (err) {
+      s.error = `Magasin injoignable (${String(err?.message || err)})`;
+    } finally {
+      s.checking = false;
+      render();
+    }
+  }
+
+  /** Statut lisible du fichier publié sur AMO. */
+  function storeStatusLabel(status) {
+    const key = String(status || '');
+    if (key === 'public') return 'publiée et servie';
+    if (key === 'unreviewed' || key === 'pending') return 'en relecture : pas encore servie';
+    if (key === 'disabled') return 'désactivée par le magasin';
+    if (key === 'beta' || key === 'alpha') return `canal ${key}`;
+    return key || 'statut inconnu';
+  }
+
+  /**
+   * Vérification de mise à jour, côté extension :
+   *  1. le magasin (AMO) pour la version publiée ;
+   *  2. la recherche de mise à jour du navigateur, quand elle existe (Chrome/Edge) ;
+   *  3. le dépôt GitHub, pour information.
+   * On ne promet jamais de téléchargement : Firefox décide seul quand installer.
+   */
+  async function checkForUpdates() {
+    const u = state.update;
+    u.lastCheck = { at: Date.now(), kind: 'info', text: 'Vérification en cours…' };
+    render();
+    await checkStoreVersion(true);
+    await checkRemoteVersion(true);
+
+    let engine = null;
+    try {
+      engine = await Promise.resolve(ext.runtime.sendMessage({ type: 'kp-update-check' }));
+    } catch {
+      engine = null;
+    }
+    u.engineCheck = engine || null;
+
+    const store = u.store.version;
+    const installed = state.version;
+    const storeNewer = store && isNewerVersion(store, installed);
+    const engineStatus = String(engine?.status || '');
+
+    if (engine?.supported && engineStatus === 'update_available') {
+      u.lastCheck = {
+        at: Date.now(),
+        kind: 'good',
+        text: `${BROWSER_NAME} a trouvé la version ${engine.version || store || 'suivante'} : elle s'installe au prochain redémarrage du navigateur.`
+      };
+    } else if (engine?.supported && engineStatus === 'throttled') {
+      u.lastCheck = {
+        at: Date.now(),
+        kind: 'info',
+        text: `${BROWSER_NAME} limite la fréquence des recherches : réessaie dans quelques minutes.`
+      };
+    } else if (storeNewer) {
+      u.lastCheck = {
+        at: Date.now(),
+        kind: 'info',
+        text: IS_GECKO
+          ? `Version ${store} publiée sur AMO (tu as ${installed}). ${BROWSER_NAME} l'installera à sa prochaine vérification (24 h max) — pour forcer : about:addons → ⚙ → « Vérifier les mises à jour ».`
+          : `Version ${store} publiée sur le magasin (tu as ${installed}). Chrome installe au redémarrage après l'avoir téléchargée.`
+      };
+    } else if (store) {
+      u.lastCheck = {
+        at: Date.now(),
+        kind: 'good',
+        text: `À jour : version ${installed} installée, ${store} publiée sur AMO.`
+      };
+    } else if (u.store.error) {
+      u.lastCheck = { at: Date.now(), kind: 'bad', text: u.store.error };
+    } else {
+      u.lastCheck = { at: Date.now(), kind: 'info', text: 'Magasin injoignable : vérification impossible.' };
+    }
+    render();
+    notify(u.lastCheck.text);
   }
 
   /**
@@ -1167,8 +1285,10 @@
     // L'anti-AFK lit le DOM du site : il n'a de sens que dans l'onglet kyara.games.
     if (!IS_PANEL) installAntiAfk();
     startAutoWatchdog();
-    // Vérifie une fois au démarrage si une version plus récente existe sur GitHub.
+    // Vérifie une fois au démarrage si une version plus récente existe sur GitHub
+    // (informatif) et ce que le magasin publie réellement (AMO).
     setTimeout(() => checkRemoteVersion(), 2500);
+    setTimeout(() => checkStoreVersion(), 3200);
     // Reprise de l'auto-open s'il tournait avant un rechargement de page.
     setTimeout(() => resumeAutoOpenIfNeeded(), 1500);
   }
@@ -6571,11 +6691,29 @@
   function completionRebuild() {
     const c = state.completion;
     c.index = completionIndex([...state.characters.values()]);
-    c.progress = completionProgress(c.index, state.collection, { minSize: c.filter.minSize });
+    c.progress = completionProgress(c.index, state.collection, {
+      minSize: c.filter.minSize,
+      hideRarities: completionHiddenRarities()
+    });
     c.rows = c.progress.rows;
     c.totals = c.progress.totals;
     completionApplyMarket(c.rows, c.market);
     return c.progress;
+  }
+
+  /** Raretés retirées de l'analyse, dans l'ordre d'affichage du site. */
+  function completionHiddenRarities() {
+    const hide = state.completion.filter.hideRare ?? {};
+    return RARITY_ORDER.filter((code) => hide[code] === true);
+  }
+
+  /** Phrase de périmètre : « hors légendaires et mythiques ». */
+  function completionScopeLabel(hide = completionHiddenRarities()) {
+    if (!hide.length) return '';
+    const names = hide.map((code) => rarityInfo(code).label.toLowerCase());
+    return names.length > 1
+      ? `hors ${names.slice(0, -1).join(', ')} et ${names[names.length - 1]}`
+      : `hors ${names[0]}`;
   }
 
   /** Lignes affichées : séries incomplètes uniquement, puis filtres et tri. */
@@ -6600,6 +6738,9 @@
     c.filter.dispoOnly = filter.dispoOnly === true;
     c.filter.includeAuctions = filter.includeAuctions === true;
     c.filter.sort = COMPLETION_SORT_KEYS.includes(String(filter.sort)) ? String(filter.sort) : 'closest';
+    // Raretés masquées : conservées d'une session à l'autre.
+    const hideRare = filter.hideRare && typeof filter.hideRare === 'object' ? filter.hideRare : {};
+    c.filter.hideRare = { L: hideRare.L === true, M: hideRare.M === true };
     c.budgetCap = Math.max(0, Math.round(Number(source.budgetCap) || 0));
   }
 
@@ -6623,6 +6764,7 @@
         minSize: c.filter.minSize,
         dispoOnly: c.filter.dispoOnly,
         includeAuctions: c.filter.includeAuctions,
+        hideRare: { L: c.filter.hideRare.L === true, M: c.filter.hideRare.M === true },
         sort: c.filter.sort
       },
       budgetCap: c.budgetCap
@@ -6661,19 +6803,25 @@
     const marketAt = c.marketAt ? `marché relu à ${nowTime(c.marketAt)}` : 'marché pas encore relu';
     const catalogAt = state.characters.size ? `${fmt(state.characters.size)} cartes au catalogue` : 'catalogue absent';
     const auctions = c.filter.includeAuctions;
+    const hidden = completionHiddenRarities();
+    const scope = completionScopeLabel(hidden);
+    const hiddenByRarity = totals.hiddenByRarity ?? {};
+    const allHidden = totals.missing === 0 && totals.hiddenMissing > 0;
 
     return `
       <div class="kp-grid">
-        <div class="kp-card-stat"><span>Séries complètes</span><b>${fmt(totals.complete)}</b><small>sur ${plural(totals.series, 'série')}</small></div>
+        <div class="kp-card-stat"><span>Séries complètes</span><b>${fmt(totals.complete)}</b><small>sur ${plural(totals.series, 'série')}${scope ? ` · ${esc(scope)}` : ''}</small></div>
         <div class="kp-card-stat"><span>Séries incomplètes</span><b>${fmt(totals.incomplete)}</b><small>${fmt(totals.visible)} affichée(s) avec ce filtre</small></div>
-        <div class="kp-card-stat"><span>Cartes manquantes</span><b>${fmt(totals.missing)}</b><small>${fmt(totals.owned)} / ${fmt(totals.cards)} possédées</small></div>
+        <div class="kp-card-stat"><span>Cartes manquantes</span><b>${fmt(totals.missing)}</b><small>${fmt(totals.owned)} / ${fmt(totals.cards)} possédées${scope ? ` · ${esc(scope)}` : ''}</small></div>
         <div class="kp-card-stat"><span>Manquants en vente</span><b>${fmt(dispoTotal)}</b><small>${c.marketAt ? `coût connu ◆ ${fmt(costTotal)}` : 'à relire'}</small></div>
       </div>
 
       <div class="kp-hero" style="margin-top:10px">
-        <div class="kp-hero-label">Complétion du catalogue</div>
+        <div class="kp-hero-label">Complétion ${scope ? `(${esc(scope)})` : 'du catalogue'}</div>
         <div class="kp-hero-value">${pct.toLocaleString('fr-FR')} %</div>
-        <div class="kp-hero-sub">${plural(totals.owned, 'carte')} possédée(s) sur ${fmt(totals.cards)} · ${catalogAt}</div>
+        <div class="kp-hero-sub">
+          ${plural(totals.owned, 'carte')} possédée(s) sur ${fmt(totals.cards)}${scope ? ` (${plural(totals.hiddenCards, 'carte')} masquée(s))` : ''} · ${catalogAt}
+        </div>
         <div class="kp-progress">
           <div class="kp-progress-bar"><i style="width:${Math.max(1, pct)}%"></i></div>
           <div class="kp-progress-row">
@@ -6732,34 +6880,44 @@
         </button>
       </div>
 
+      <div class="kp-chips kp-chips-rarity" role="group" aria-label="Masquer des raretés de l’analyse">
+        <span class="kp-chip-label">Masquer de l’analyse :</span>
+        ${['L', 'M']
+          .map((code) => {
+            const info = rarityInfo(code);
+            const on = c.filter.hideRare?.[code] === true;
+            return `<button class="kp-chip ${on ? 'is-on' : ''}" type="button" data-act="completion-hide-rarity" data-rarity="${code}"
+              aria-pressed="${on}"
+              title="${on ? `Réafficher les ${info.label.toLowerCase()}s` : `Masquer les ${info.label.toLowerCase()}s (affichage, marché et pourcentages)`}">
+              <span class="kp-rar" style="--rc:${info.color}">${esc(info.label)}</span>
+              ${on ? `masquées · ${fmt(hiddenByRarity[code] ?? 0)}` : `${fmt(hiddenByRarity[code] ?? 0)} carte(s)`}
+            </button>`;
+          })
+          .join('')}
+        ${
+          hidden.length
+            ? `<button class="kp-chip" type="button" data-act="completion-hide-rarity-reset" title="Réafficher toutes les raretés">
+                 Tout réafficher
+               </button>`
+            : ''
+        }
+      </div>
+      ${
+        hidden.length
+          ? `<div class="kp-alert" style="margin-top:6px">
+               Analyse <b>${esc(scope)}</b> : ${plural(totals.hiddenCards, 'carte')} du catalogue et
+               ${plural(totals.hiddenMissing, 'manquante')} ne sont ni comptées, ni cherchées sur le marché.
+               ${esc(BROWSER_NAME)} et ta collection ne sont pas modifiés.
+             </div>`
+          : ''
+      }
+
       ${
         shown.length
           ? `<div class="kp-section">
                <div class="kp-section-title">Séries incomplètes <span class="kp-muted">${fmt(rows.length)} au total</span></div>
                <div class="kp-cplt-list">${shown
-                 .map(
-                   (row) => `
-                 <div class="kp-cplt-row ${row.dispo ? 'has-dispo' : ''}" data-act="completion-series" data-series="${esc(
-                   row.name
-                 )}" title="Voir les cartes manquantes de ${esc(row.name)}">
-                   <div class="kp-cplt-head">
-                     <b>${esc(row.name)}</b>
-                     <small>${fmt(row.owned)}/${fmt(row.total)} · ${plural(row.missing, 'manquante')}${
-                       row.auctions ? ` · ${fmt(row.auctions)} enchère(s)` : ''
-                     }</small>
-                   </div>
-                   <div class="kp-cplt-bar"><i style="width:${Math.max(1.5, row.pct)}%"></i></div>
-                   <div class="kp-cplt-pct">${row.pct.toLocaleString('fr-FR')} %</div>
-                   <div class="kp-cplt-market">${
-                     row.dispo
-                       ? `<b>${fmt(row.dispo)}</b> en vente${row.costKnown ? ` · ◆ ${fmt(row.cost)}` : ''}`
-                       : '<span class="kp-muted">—</span>'
-                   }</div>
-                   <button class="kp-btn" type="button" data-act="completion-open" data-series="${esc(row.name)}" ${
-                     row.dispo ? '' : 'disabled'
-                   }>Préparer</button>
-                 </div>`
-                 )
+                 .map((row) => completionRowHtml(row))
                  .join('')}</div>
                ${
                  rows.length > shown.length
@@ -6771,19 +6929,81 @@
                }
              </div>`
           : `<div class="kp-empty">
-               <b>Aucune série incomplète avec ce filtre</b>
-               ${totals.incomplete ? 'Élargis la taille minimale ou vide la recherche.' : 'Toutes les séries du catalogue sont complètes.'}
+               <b>${
+                 allHidden
+                   ? 'Toutes les cartes manquantes restantes sont masquées'
+                   : 'Aucune série incomplète avec ce filtre'
+               }</b>
+               ${
+                 allHidden
+                   ? `Il ne manque que des cartes ${esc(completionScopeLabel(hidden))} (${plural(
+                       totals.hiddenMissing,
+                       'carte'
+                     )}). Réaffiche ces raretés pour les revoir.`
+                   : totals.incomplete
+                     ? 'Élargis la taille minimale ou vide la recherche.'
+                     : 'Toutes les séries du catalogue sont complètes.'
+               }
+               ${
+                 allHidden || (totals.incomplete && hidden.length)
+                   ? `<div style="margin-top:14px">
+                        <button class="kp-btn is-primary" type="button" data-act="completion-hide-rarity-reset">Réafficher toutes les raretés</button>
+                      </div>`
+                   : ''
+               }
              </div>`
       }
 
       <div class="kp-hint">
         Périmètre : catalogue du site (${catalogAt}, cartes « héritage » exclues) comparé à ta collection ;
-        une carte compte dès que tu en possèdes au moins un exemplaire. Le marché n'est lu que sur les
-        ${fmt(COMPLETION_MAX_PAGES * 50)} annonces les moins chères de chaque série incomplète, et seulement
-        quand tu cliques sur « Relire le marché » (aucune lecture en arrière-plan).
+        une carte compte dès que tu en possèdes au moins un exemplaire.
+        ${hidden.length ? `Raretés masquées : ${esc(hidden.map((code) => rarityInfo(code).label).join(', '))}.` : ''}
+        Le marché n'est lu que sur les ${fmt(COMPLETION_MAX_PAGES * 50)} annonces les moins chères de chaque série
+        incomplète, seulement quand tu cliques sur « Relire le marché » ou sur « ↻ Rafraîchir » d'une série
+        (aucune lecture en arrière-plan).
         ${c.filter.minSize ? `Les séries de moins de ${fmt(c.filter.minSize)} cartes sont masquées.` : ''}
       </div>
     `;
+  }
+
+  /** Une ligne de série : progression, disponibilité, rafraîchissement, préparation. */
+  function completionRowHtml(row) {
+    const c = state.completion;
+    const busy = c.seriesBusy.has(row.name);
+    const lastAt = c.seriesAt.get(row.name) ?? 0;
+    const note = c.seriesNote.get(row.name) ?? null;
+    return `
+      <div class="kp-cplt-row ${row.dispo ? 'has-dispo' : ''} ${busy ? 'is-busy' : ''}" data-act="completion-series" data-series="${esc(
+        row.name
+      )}" title="Voir les cartes manquantes de ${esc(row.name)}">
+        <div class="kp-cplt-head">
+          <b>${esc(row.name)}</b>
+          <small>${fmt(row.owned)}/${fmt(row.total)} · ${plural(row.missing, 'manquante')}${
+            row.auctions ? ` · ${fmt(row.auctions)} enchère(s)` : ''
+          }${row.hiddenMissing ? ` · ${fmt(row.hiddenMissing)} masquée(s)` : ''}</small>
+        </div>
+        <div class="kp-cplt-bar"><i style="width:${Math.max(1.5, row.pct)}%"></i></div>
+        <div class="kp-cplt-pct">${row.pct.toLocaleString('fr-FR')} %</div>
+        <div class="kp-cplt-market">${
+          row.dispo
+            ? `<b>${fmt(row.dispo)}</b> en vente${row.costKnown ? ` · ◆ ${fmt(row.cost)}` : ''}`
+            : '<span class="kp-muted">—</span>'
+        }${lastAt ? `<small class="kp-cplt-when">relu à ${nowTime(lastAt)}</small>` : ''}</div>
+        <button class="kp-btn kp-cplt-refresh" type="button" data-act="completion-series-refresh" data-series="${esc(
+          row.name
+        )}" ${busy ? 'disabled' : ''}
+          aria-label="Rafraîchir les ventes de ${esc(row.name)}" title="Rafraîchir les ventes de cette série uniquement">
+          ${busy ? '<span class="kp-spinner"></span>' : '↻'} Rafraîchir
+        </button>
+        <button class="kp-btn" type="button" data-act="completion-open" data-series="${esc(row.name)}" ${
+          row.dispo ? '' : 'disabled'
+        }>Préparer</button>
+        ${
+          note
+            ? `<div class="kp-cplt-note is-${note.kind}">${esc(note.text)}</div>`
+            : ''
+        }
+      </div>`;
   }
 
   /** Ligne de série ouverte (la fiche travaille sur la même source que la liste). */
@@ -6885,6 +7105,16 @@
             ? `<div class="kp-alert" style="margin-top:8px">
                  Marché pas encore relu : clique sur « Relire le marché » dans l'onglet Completion
                  pour connaître les prix et les annonces de cette série.
+               </div>`
+            : ''
+        }
+
+        ${
+          row.hiddenMissing
+            ? `<div class="kp-hint">
+                 ${plural(row.hiddenMissing, 'carte')} manquante(s) de cette série sont masquées par le filtre
+                 de raretés (${esc(completionScopeLabel())}) : elles n'apparaissent ni ici, ni dans les
+                 recherches de marché, et ne comptent pas dans le pourcentage.
                </div>`
             : ''
         }
@@ -7075,7 +7305,7 @@
     if (scan.running) return;
     const progress = completionRebuild();
     const target = completionSortRows(
-      progress.rows.filter((row) => row.missing > 0 && row.total >= c.filter.minSize),
+      progress.rows.filter((row) => row.missing > 0 && (row.catalogTotal ?? row.total) >= c.filter.minSize),
       'closest'
     ).slice(0, COMPLETION_SCAN_MAX);
     if (!target.length) {
@@ -7104,6 +7334,8 @@
         });
         scan.done += 1;
         c.marketAt = Date.now();
+        c.seriesAt.set(row.name, Date.now());
+        c.seriesNote.delete(row.name);
         if (scan.done % 3 === 0 || scan.done === scan.total) {
           completionApplyMarket(c.rows, c.market);
           render();
@@ -7114,6 +7346,79 @@
       scan.running = false;
       c.marketAt = Date.now();
       completionApplyMarket(c.rows, c.market);
+      render();
+    }
+  }
+
+  /**
+   * Rafraîchit les ventes d'**une seule** série : mêmes requêtes que la relecture
+   * globale, mais limitées à cette série. Les annonces de la série sont d'abord
+   * retirées du cache, puis remplacées par la réponse fraîche : une annonce
+   * vendue, annulée ou expirée disparaît donc immédiatement de la fiche.
+   * Les filtres, l'onglet et le défilement ne bougent pas (le rendu les conserve).
+   */
+  async function refreshCompletionSeries(name) {
+    const c = state.completion;
+    const key = String(name ?? '');
+    const row = (c.progress?.rows ?? c.rows ?? []).find((item) => item.name === key);
+    if (!row) return;
+    if (c.seriesBusy.has(key)) return;
+    if (c.scan.running) {
+      notify('Relecture globale en cours : attends la fin, ou arrête-la.');
+      return;
+    }
+    const last = c.seriesAt.get(key) ?? 0;
+    if (last && Date.now() - last < COMPLETION_SERIES_MIN_GAP) {
+      notify(`Ventes de « ${key} » déjà relues il y a ${Math.max(1, Math.round((Date.now() - last) / 1000))} s.`);
+      return;
+    }
+
+    c.seriesBusy.add(key);
+    c.seriesNote.delete(key);
+    render();
+    try {
+      const listings = await completionFetchSeries(key);
+      // Ce que la série proposait avant cette lecture (pour signaler les disparitions).
+      const before = new Set(
+        row.missingIds.filter((id) => c.market.get(String(id))?.best).map((id) => String(id))
+      );
+      // Purge de toutes les cartes de la série (y compris les raretés masquées),
+      // puis fusion de la réponse : aucune annonce périmée ne survit.
+      for (const id of row.cards ?? row.missingIds) c.market.delete(String(id));
+      completionMergeMarket(c.market, listings, {
+        includeAuctions: c.filter.includeAuctions,
+        now: Date.now()
+      });
+      const lost = [...before].filter((id) => !c.market.get(id)?.best);
+      const still = row.missingIds.filter((id) => c.market.get(String(id))?.best).length;
+      c.seriesAt.set(key, Date.now());
+      c.marketAt = Date.now();
+      completionApplyMarket(c.rows, c.market);
+      if (lost.length) {
+        c.seriesNote.set(key, {
+          kind: 'warn',
+          text: `${plural(lost.length, 'annonce')} disparue(s) depuis la dernière lecture · ${fmt(
+            still
+          )} encore en vente sur ${fmt(row.missing)} manquante(s)`,
+          at: Date.now()
+        });
+      } else {
+        c.seriesNote.set(key, {
+          kind: still ? 'good' : 'info',
+          text: still
+            ? `${plural(still, 'annonce')} à jour · relu à ${nowTime()}`
+            : `aucune annonce en vente pour cette série · relu à ${nowTime()}`,
+          at: Date.now()
+        });
+      }
+    } catch (err) {
+      c.seriesNote.set(key, {
+        kind: 'bad',
+        text: `Rafraîchissement impossible : ${friendlyError(err)}`,
+        at: Date.now()
+      });
+    } finally {
+      c.seriesBusy.delete(key);
       render();
     }
   }
@@ -7343,16 +7648,33 @@
       return;
     }
 
-    // 1) Une version plus récente existe sur GitHub : information seule, sans
-    //    bouton de téléchargement (la mise à jour se fait hors extension).
+    // 1) Une version plus récente est **publiée sur le magasin** : c'est la seule
+    //    qui déclenche une vraie mise à jour. Le dépôt GitHub, lui, est informatif.
+    const storeVersion = state.update.store?.version;
+    if (storeVersion && isNewerVersion(storeVersion, state.version)) {
+      ui.banner.hidden = false;
+      ui.banner.classList.remove('is-stale');
+      ui.banner.innerHTML = `
+        <span class="kp-banner-text">
+          Version <b>v${esc(storeVersion)}</b> publiée sur ${IS_GECKO ? 'AMO' : 'le magasin'} (tu as v${esc(state.version)}).
+          ${IS_GECKO ? 'Mise à jour automatique à la prochaine vérification du navigateur.' : 'Installation au prochain redémarrage.'}
+        </span>
+        <button class="kp-btn" type="button" data-act="update-check">Vérifier</button>
+      `;
+      return;
+    }
+
+    // 2) Le dépôt GitHub est en avance : information seule, sans téléchargement
+    //    (rien n'est servi aux navigateurs tant que le magasin n'a pas la version).
     const remote = state.update.version;
     if (remote && isNewerVersion(remote, state.version)) {
       ui.banner.hidden = false;
       ui.banner.classList.remove('is-stale');
       ui.banner.innerHTML = `
         <span class="kp-banner-text">
-          Version <b>v${esc(remote)}</b> disponible (tu as v${esc(state.version)}).
+          Dépôt GitHub : v${esc(remote)} (tu as v${esc(state.version)}) — en attente de publication sur le magasin.
         </span>
+        <button class="kp-btn" type="button" data-act="update-check">Vérifier</button>
       `;
       return;
     }
@@ -8643,35 +8965,77 @@
     return out;
   }
 
+  /** Raretés masquées de l'analyse (L, M…) : toujours comparées en majuscules. */
+  function completionRarityFilter(list) {
+    const out = new Set();
+    for (const code of Array.isArray(list) ? list : []) {
+      const key = String(code ?? '').trim().toUpperCase();
+      if (key) out.add(key);
+    }
+    return out;
+  }
+
   /**
    * Progression de chaque série : une carte est possédée dès que sa quantité
    * est supérieure à zéro. Les doublons et les exemplaires déjà en vente ne
    * comptent jamais une complétion de plus.
+   *
+   * `options.hideRarities` (ex. `['L', 'M']`) retire ces raretés de **toute**
+   * l'analyse : total de la série, cartes possédées, manquantes, pourcentage et
+   * compteurs globaux. L'inventaire réel n'est jamais modifié. Une série dont
+   * toutes les cartes sont masquées sort de la liste, et les cartes masquées
+   * restent comptées à part (`hiddenTotal`, `hiddenMissing`) pour pouvoir dire
+   * explicitement pourquoi un manque n'apparaît plus.
    */
   function completionProgress(index, owned, options = {}) {
     const qtys = completionOwnedMap(owned);
+    const hidden = completionRarityFilter(options.hideRarities);
+    const byCard = index?.byCard instanceof Map ? index.byCard : new Map();
     const rows = [];
     let complete = 0;
     let incomplete = 0;
     let cardsOwned = 0;
+    let hiddenCards = 0;
+    let hiddenMissing = 0;
+    const hiddenByRarity = {};
     const series = index?.series instanceof Map ? index.series : new Map();
     for (const entry of series.values()) {
       let has = 0;
       let copies = 0;
+      let total = 0;
+      let seriesHidden = 0;
+      let seriesHiddenMissing = 0;
       const missingIds = [];
       for (const id of entry.cards) {
         const qty = qtys.get(id) ?? 0;
+        const rarity = String(byCard.get(id)?.rarity ?? '').toUpperCase();
+        if (hidden.size && hidden.has(rarity)) {
+          // Masquée : ni comptée, ni recherchée, ni affichée.
+          seriesHidden += 1;
+          if (qty <= 0) seriesHiddenMissing += 1;
+          const key = rarity || '?';
+          hiddenByRarity[key] = (hiddenByRarity[key] ?? 0) + 1;
+          continue;
+        }
+        total += 1;
         copies += qty;
         if (qty > 0) has += 1;
         else missingIds.push(id);
       }
-      const total = entry.total;
+      hiddenCards += seriesHidden;
+      hiddenMissing += seriesHiddenMissing;
+      // Série entièrement masquée : elle ne peut ni être complète ni incomplète.
+      if (!total) continue;
       if (total - has > 0) incomplete += 1;
       else complete += 1;
       cardsOwned += has;
       rows.push({
         name: entry.name,
         total,
+        // Taille réelle dans le catalogue : le seuil de taille minimale porte
+        // sur elle, pas sur le total filtré — masquer les légendaires ne doit
+        // pas faire disparaître une série de la liste.
+        catalogTotal: entry.total,
         owned: has,
         missing: Math.max(0, total - has),
         pct: total ? Math.round((has / total) * 1000) / 10 : 0,
@@ -8679,6 +9043,8 @@
         copies,
         byRarity: entry.byRarity,
         cards: entry.cards,
+        hiddenTotal: seriesHidden,
+        hiddenMissing: seriesHiddenMissing,
         // Remplis par `completionApplyMarket` quand le marché a été relu.
         dispo: 0,
         dispoIds: [],
@@ -8692,8 +9058,8 @@
       completionNum(options.minSize) == null
         ? COMPLETION_DEFAULT_MIN
         : Math.max(1, Math.round(Number(options.minSize)));
-    const visible = rows.filter((row) => row.total >= minSize && row.missing > 0);
-    const totalCards = index?.cards ?? rows.reduce((sum, row) => sum + row.total, 0);
+    const visible = rows.filter((row) => (row.catalogTotal ?? row.total) >= minSize && row.missing > 0);
+    const totalCards = rows.reduce((sum, row) => sum + row.total, 0);
     return {
       rows,
       visible,
@@ -8705,7 +9071,12 @@
         cards: totalCards,
         owned: cardsOwned,
         missing: Math.max(0, totalCards - cardsOwned),
-        minSize
+        minSize,
+        // Périmètre de l'analyse : raretés retirées et ce qu'elles représentaient.
+        hideRarities: [...hidden],
+        hiddenCards,
+        hiddenMissing,
+        hiddenByRarity
       }
     };
   }
@@ -13614,13 +13985,54 @@
               : 'extension actuellement chargée'
             : 'version chargée indisponible'
         }</small></div>
+
+        <div class="kp-section-title">Mises à jour</div>
+        <div class="kp-card-stat">
+          <span>Publiée sur ${IS_GECKO ? 'AMO' : 'le magasin'}</span>
+          <b>${state.update.store.checking ? '…' : state.update.store.version ? `v${esc(state.update.store.version)}` : '—'}</b>
+          <small>${
+            state.update.store.error
+              ? esc(state.update.store.error)
+              : `${esc(storeStatusLabel(state.update.store.fileStatus))}${
+                  state.update.store.at ? ` · lue à ${nowTime(state.update.store.at)}` : ''
+                }`
+          }</small>
+        </div>
+        <div class="kp-card-stat">
+          <span>Dépôt GitHub</span>
+          <b>${state.update.checking ? '…' : state.update.version ? `v${esc(state.update.version)}` : '—'}</b>
+          <small>${
+            state.update.error
+              ? esc(state.update.error)
+              : state.update.version && isNewerVersion(state.update.version, state.version)
+                ? 'en avance sur la version installée (informatif)'
+                : 'informatif : rien n’est installé depuis GitHub'
+          }</small>
+        </div>
         <div class="kp-toolbar">
+          <button class="kp-btn is-primary" type="button" data-act="update-check">Vérifier les mises à jour</button>
           ${
             state.reloadArmed
               ? `<button class="kp-btn is-primary" type="button" data-act="reload-ext">Confirmer le rechargement</button>
                  <button class="kp-btn is-ghost" type="button" data-act="reload-cancel">Annuler</button>`
-              : `<button class="kp-btn" type="button" data-act="reload-ext">Recharger l'extension</button>`
+              : `<button class="kp-btn" type="button" data-act="reload-ext" title="Relit les fichiers déjà installés (dossier ou paquet local). Ne télécharge rien depuis le magasin.">Recharger les fichiers locaux</button>`
           }
+        </div>
+        ${
+          state.update.lastCheck
+            ? `<div class="kp-alert ${state.update.lastCheck.kind === 'bad' ? 'is-bad' : ''}">
+                 ${esc(state.update.lastCheck.text)}
+                 <br><small>Vérifié à ${nowTime(state.update.lastCheck.at)}.</small>
+               </div>`
+            : ''
+        }
+        <div class="kp-hint">
+          « Recharger les fichiers locaux » relit le code déjà présent sur le disque (utile après
+          <code>npm run start</code> ou un rechargement dans <code>about:debugging</code>) : ce bouton
+          <b>ne télécharge aucune version</b>. Une vraie mise à jour vient du magasin :
+          ${IS_GECKO ? 'Firefox vérifie toutes les 24 h environ, et au démarrage.' : 'Chrome vérifie périodiquement puis installe au redémarrage.'}
+          Une extension chargée « à titre temporaire » (<code>about:debugging</code>) ou depuis un dossier
+          décompressé (<code>dist/chrome</code>) ne se met jamais à jour toute seule : il faut réinstaller le paquet signé.
         </div>
         <div class="kp-toolbar">
           <button class="kp-btn" type="button" data-act="copy-diag">Copier le diagnostic</button>
@@ -15071,6 +15483,9 @@
         reloadExtension();
         break;
       }
+      case 'update-check':
+        checkForUpdates();
+        break;
       case 'reload-cancel':
         if (state.reloadTimer) clearTimeout(state.reloadTimer);
         state.reloadTimer = null;
@@ -15168,6 +15583,41 @@
             ? 'Enchères incluses : seules celles avec achat immédiat peuvent être achetées. Relis le marché.'
             : 'Enchères exclues : prix fixe uniquement. Relis le marché.'
         );
+        break;
+      case 'completion-hide-rarity': {
+        const c = state.completion;
+        const code = String(el.getAttribute('data-rarity') || '').toUpperCase();
+        if (code !== 'L' && code !== 'M') break;
+        c.filter.hideRare = { ...c.filter.hideRare, [code]: c.filter.hideRare?.[code] !== true };
+        c.filter.limit = 40;
+        c.market = new Map();
+        c.marketAt = 0;
+        c.seriesAt = new Map();
+        c.seriesNote = new Map();
+        persistCompletionSoon();
+        completionRebuild();
+        notify(
+          c.filter.hideRare[code]
+            ? `${rarityInfo(code).label}s masquées : analyse, pourcentages et marché recalculés sans elles.`
+            : `${rarityInfo(code).label}s réaffichées.`
+        );
+        break;
+      }
+      case 'completion-hide-rarity-reset': {
+        const c = state.completion;
+        c.filter.hideRare = { L: false, M: false };
+        c.filter.limit = 40;
+        c.market = new Map();
+        c.marketAt = 0;
+        c.seriesAt = new Map();
+        c.seriesNote = new Map();
+        persistCompletionSoon();
+        completionRebuild();
+        notify('Toutes les raretés sont réaffichées : relis le marché pour les prix.');
+        break;
+      }
+      case 'completion-series-refresh':
+        refreshCompletionSeries(el.getAttribute('data-series'));
         break;
       case 'completion-pick-all': {
         const row = completionDetailRow();
@@ -15584,12 +16034,6 @@
         notify('Journal vidé.');
         render();
         break;
-      case 'update-check':
-        checkRemoteVersion(true);
-        break;
-      case 'update-now':
-        updateAndReload();
-        break;
       case 'anti-afk-test': {
         if (state.settings.antiAfk === false) {
           notify('Anti-AFK désactivé : coche « Répondre à l’anti-AFK ».');
@@ -15735,6 +16179,14 @@
         const diag = {
           version: VERSION,
           user: state.user ? { id: state.user.id, pseudo: state.user.pseudo } : null,
+          updates: {
+            installed: state.version,
+            loadedByBrowser: state.manifestVersion,
+            store: state.update.store,
+            repo: { version: state.update.version, checkedAt: state.update.checkedAt, error: state.update.error },
+            engineCheck: state.update.engineCheck,
+            lastCheck: state.update.lastCheck
+          },
           bootKeys: state.bootKeys,
           collection: state.collection.slice(0, 2),
           prices: Object.entries(state.prices).slice(0, 2),
@@ -16451,6 +16903,13 @@
       completionSortRows,
       completionPlan,
       completionBuyGuard,
+      completionHiddenRarities,
+      completionRowHtml,
+      refreshCompletionSeries,
+      // Mises à jour (magasin) : utiles au harness
+      checkStoreVersion,
+      checkForUpdates,
+      isNewerVersion,
       // +Duel
       duelState,
       publishDuelProfile

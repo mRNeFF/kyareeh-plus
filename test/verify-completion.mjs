@@ -22,6 +22,7 @@ const api = new Function(`${source.slice(begin, end)}
     COMPLETION_SORT_KEYS,
     COMPLETION_STOP_CODES,
     completionSeriesKey,
+    completionRarityFilter,
     completionIndex,
     completionOwnedMap,
     completionProgress,
@@ -331,6 +332,107 @@ check(
   'achat : prix abaissé non bloquant',
   api.completionBuyGuard({ ...item, price: 40 }, { ...fixedOk, price: 39 }, { now: NOW }).ok === true
 );
+
+/* ------------------------------------------------------------------ */
+/* 11. Filtre de raretés (masquer L / M de l'analyse)                 */
+/* ------------------------------------------------------------------ */
+
+// Catalogue dédié : Naruto a 3 C + 1 L + 1 M ; une série « Que du L » et
+// une série « L possédée » pour vérifier les cas limites.
+const catalogRare = [
+  { id: 1, name: 'A', series: 'Naruto', rarity: 'C' },
+  { id: 2, name: 'B', series: 'Naruto', rarity: 'C' },
+  { id: 3, name: 'C', series: 'Naruto', rarity: 'C' },
+  { id: 4, name: 'D', series: 'Naruto', rarity: 'L' },
+  { id: 5, name: 'E', series: 'Naruto', rarity: 'M' },
+  { id: 10, name: 'F', series: 'Que du L', rarity: 'L' },
+  { id: 11, name: 'G', series: 'Que du L', rarity: 'L' },
+  { id: 12, name: 'H', series: 'L possédée', rarity: 'L' },
+  { id: 13, name: 'I', series: 'L possédée', rarity: 'C' }
+];
+const indexRare = api.completionIndex(catalogRare);
+const ownedRare = [{ characterId: 1, qty: 1 }, { characterId: 4, qty: 1 }, { characterId: 12, qty: 1 }];
+
+check('filtre : normalisation casse/espaces', api.completionRarityFilter([' l ', 'M', '', null]).size === 2);
+check('filtre : liste vide', api.completionRarityFilter().size === 0);
+
+const noFilter = api.completionProgress(indexRare, ownedRare, { minSize: 1 });
+const narutoAll = noFilter.rows.find((row) => row.name === 'Naruto');
+check('sans filtre : Naruto 5 cartes, 2 possédées', narutoAll.total === 5 && narutoAll.owned === 2);
+check('sans filtre : Naruto 3 manquantes', narutoAll.missing === 3);
+check('sans filtre : rien de masqué', noFilter.totals.hiddenCards === 0 && noFilter.totals.hideRarities.length === 0);
+
+const onlyL = api.completionProgress(indexRare, ownedRare, { minSize: 1, hideRarities: ['L'] });
+const narutoL = onlyL.rows.find((row) => row.name === 'Naruto');
+check('L masquées : Naruto 4 cartes', narutoL.total === 4, `total=${narutoL.total}`);
+check('L masquées : Naruto 3 manquantes', narutoL.missing === 3, `missing=${narutoL.missing}`);
+check('L masquées : cartes L hors missingIds', !narutoL.missingIds.includes('4'));
+check('L masquées : manquante M toujours comptée', narutoL.missingIds.includes('5'));
+check('L masquées : pourcentage recalculé', narutoL.pct === 25, `pct=${narutoL.pct}`);
+check('L masquées : compteur par série', narutoL.hiddenTotal === 1 && narutoL.hiddenMissing === 0);
+check('L masquées : total masqué global', onlyL.totals.hiddenCards === 4, `hidden=${onlyL.totals.hiddenCards}`);
+check(
+  'L masquées : manquantes masquées comptées',
+  onlyL.totals.hiddenMissing === 2,
+  `hiddenMissing=${onlyL.totals.hiddenMissing}`
+);
+check('L masquées : compteur par rareté', onlyL.totals.hiddenByRarity.L === 4);
+check('L masquées : périmètre exposé', onlyL.totals.hideRarities.join(',') === 'L');
+check(
+  'L masquées : série entièrement masquée exclue',
+  !onlyL.rows.some((row) => row.name === 'Que du L'),
+  JSON.stringify(onlyL.rows.map((row) => row.name))
+);
+check('L masquées : Naruto compte dans le total des cartes', onlyL.totals.cards === 5, `cards=${onlyL.totals.cards}`);
+check(
+  'L masquées : carte L possédée retirée du total de sa série',
+  onlyL.rows.find((row) => row.name === 'L possédée')?.total === 1
+);
+check('L masquées : cartes possédées recalculées hors L', onlyL.totals.owned === 1, `owned=${onlyL.totals.owned}`);
+check('L masquées : taille catalogue conservée', onlyL.rows.find((row) => row.name === 'Naruto')?.catalogTotal === 5);
+check(
+  'L masquées : une série reste visible malgré le seuil de taille',
+  api
+    .completionProgress(indexRare, ownedRare, { minSize: 5, hideRarities: ['L'] })
+    .visible.some((row) => row.name === 'Naruto'),
+  'Naruto (5 au catalogue, 4 visibles) doit rester listée'
+);
+
+const both = api.completionProgress(indexRare, ownedRare, { minSize: 1, hideRarities: ['L', 'M'] });
+const narutoLM = both.rows.find((row) => row.name === 'Naruto');
+check('L+M masquées : Naruto 3 cartes', narutoLM.total === 3, `total=${narutoLM.total}`);
+check('L+M masquées : Naruto 2 manquantes', narutoLM.missing === 2);
+check('L+M masquées : pourcentage 33,3', narutoLM.pct === 33.3, `pct=${narutoLM.pct}`);
+check('L+M masquées : plus aucune manquante L ni M', !narutoLM.missingIds.includes('4') && !narutoLM.missingIds.includes('5'));
+check('L+M masquées : périmètre ordonné', both.totals.hideRarities.join(',') === 'L,M');
+check('L+M masquées : masquage par rareté ventilé', both.totals.hiddenByRarity.L === 4 && both.totals.hiddenByRarity.M === 1);
+
+// Toutes les manquantes restantes sont masquées : cas de l'état vide.
+const onlyHiddenMissing = api.completionProgress(
+  api.completionIndex([
+    { id: 1, name: 'A', series: 'Solo', rarity: 'C' },
+    { id: 2, name: 'B', series: 'Solo', rarity: 'L' }
+  ]),
+  [{ characterId: 1, qty: 1 }],
+  { minSize: 1, hideRarities: ['L'] }
+);
+check('état vide : série complète après masquage', onlyHiddenMissing.totals.missing === 0);
+check('état vide : manquantes masquées comptées', onlyHiddenMissing.totals.hiddenMissing === 1);
+check('état vide : aucune série incomplète', onlyHiddenMissing.totals.incomplete === 0);
+
+// Une carte masquée n'est jamais proposée à l'achat : le marché ne la voit pas.
+api.completionApplyMarket(
+  both.rows,
+  api.completionMarket(
+    [
+      { id: 'x1', characterId: 4, type: 'fixed', price: 100, status: 'active', endsAt: inHours(4) },
+      { id: 'x2', characterId: 2, type: 'fixed', price: 7, status: 'active', endsAt: inHours(4) }
+    ],
+    { now: NOW }
+  )
+);
+check('marché : annonce d’une carte masquée ignorée', narutoLM.dispo === 1 && narutoLM.dispoIds.join(',') === '2');
+check('marché : coût limité aux cartes visibles', narutoLM.cost === 7);
 
 console.log(`${checks} contrôles · ${failures} échec(s)`);
 if (failures) process.exit(1);

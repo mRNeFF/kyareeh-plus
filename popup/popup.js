@@ -39,8 +39,8 @@ function armReload() {
     if (!armed) return;
     armed = false;
     reloadBtn.classList.remove('is-armed');
-    reloadBtn.textContent = "Mettre à jour l'extension";
-    reloadHint.textContent = 'Relit le dossier local, sans téléchargement.';
+    reloadBtn.textContent = 'Recharger les fichiers locaux';
+    reloadHint.textContent = 'Relit le dossier local, sans téléchargement. Une vraie mise à jour vient du magasin.';
   }, 8000);
 }
 

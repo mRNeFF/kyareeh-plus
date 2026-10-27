@@ -200,9 +200,127 @@ async function reloadAllTabs() {
   return { ok: true, count };
 }
 
+/* ------------------------------------------------------------------ */
+/* Mises à jour : version publiée sur AMO + recherche navigateur        */
+/* ------------------------------------------------------------------ */
+
+// Le magasin est la seule source servie aux utilisateurs : c'est cette version
+// qu'il faut comparer à celle qui tourne, pas le dépôt GitHub.
+const AMO_SLUG = 'kyareeh';
+const STORE_VERSION_KEY = 'kyareeh.storeversion.v1';
+const STORE_VERSION_TTL = 6 * 3600 * 1000;
+
+/**
+ * Dernière version **publiée** sur addons.mozilla.org (API publique, sans clé).
+ * Mise en cache 6 h pour ne pas interroger le magasin à chaque ouverture.
+ * Retourne aussi le statut du fichier : une version en relecture n'est pas
+ * encore servie aux navigateurs.
+ */
+async function storeVersion(force) {
+  const installed = ext.runtime.getManifest().version;
+  if (!force) {
+    try {
+      const cached = (await ext.storage.local.get(STORE_VERSION_KEY))[STORE_VERSION_KEY];
+      if (cached && Date.now() - Number(cached.at || 0) < STORE_VERSION_TTL) {
+        return { ok: true, ...cached, installed, cached: true };
+      }
+    } catch {
+      /* stockage indisponible : on interroge l'API */
+    }
+  }
+  try {
+    const res = await fetch(`https://addons.mozilla.org/api/v5/addons/addon/${AMO_SLUG}/?t=${Date.now()}`, {
+      cache: 'no-store',
+      credentials: 'omit'
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    const record = {
+      at: Date.now(),
+      version: String(json?.current_version?.version ?? ''),
+      fileStatus: String(json?.current_version?.file?.status ?? ''),
+      channel: String(json?.current_version?.channel ?? ''),
+      slug: String(json?.slug ?? AMO_SLUG),
+      guid: String(json?.guid ?? '')
+    };
+    try {
+      await ext.storage.local.set({ [STORE_VERSION_KEY]: record });
+    } catch {
+      /* cache non bloquant */
+    }
+    return { ok: true, ...record, installed, cached: false };
+  } catch (err) {
+    return { ok: false, installed, error: String((err && err.message) || err) };
+  }
+}
+
+/**
+ * Recherche de mise à jour du navigateur, quand l'API existe (Chrome / Edge).
+ * Firefox n'expose pas `requestUpdateCheck` : c'est le service de mise à jour
+ * de Firefox qui vérifie, au plus une fois toutes les 24 h (et au démarrage).
+ */
+function browserUpdateCheck() {
+  const chromeApi = globalThis.chrome && globalThis.chrome.runtime;
+  const request = chromeApi && typeof chromeApi.requestUpdateCheck === 'function' ? chromeApi.requestUpdateCheck : null;
+  if (!request) {
+    return Promise.resolve({
+      ok: true,
+      supported: false,
+      engine: 'firefox',
+      status: 'unsupported',
+      message: 'Firefox vérifie les mises à jour lui-même (toutes les 24 h environ, et au démarrage).'
+    });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (payload) => {
+      if (settled) return;
+      settled = true;
+      resolve(payload);
+    };
+    try {
+      const maybe = request.call(chromeApi, (status, details) => {
+        done({
+          ok: true,
+          supported: true,
+          engine: 'chrome',
+          status: String(status || ''),
+          version: details && details.version ? String(details.version) : null
+        });
+      });
+      if (maybe && typeof maybe.then === 'function') {
+        maybe
+          .then((result) =>
+            done({
+              ok: true,
+              supported: true,
+              engine: 'chrome',
+              status: String(result?.status || ''),
+              version: result?.version ? String(result.version) : null
+            })
+          )
+          .catch((err) => done({ ok: false, supported: true, engine: 'chrome', error: String((err && err.message) || err) }));
+      }
+    } catch (err) {
+      done({ ok: false, supported: true, engine: 'chrome', error: String((err && err.message) || err) });
+    }
+    setTimeout(() => done({ ok: false, supported: true, engine: 'chrome', status: 'timeout' }), 5000);
+  });
+}
+
 try {
   ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || typeof msg !== 'object') return;
+
+    if (msg.type === 'kp-store-version') {
+      storeVersion(Boolean(msg.force)).then(sendResponse);
+      return true;
+    }
+
+    if (msg.type === 'kp-update-check') {
+      browserUpdateCheck().then(sendResponse);
+      return true;
+    }
 
     if (msg.type === 'kp-reload-extension') {
       const tabId = sender && sender.tab ? sender.tab.id : null;

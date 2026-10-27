@@ -5308,3 +5308,76 @@ img.kp-avatar {
   width: 100%;
   margin-top: 6px;
 }
+
+/* Completion : filtre de raretés et rafraîchissement par série */
+.kp-chips-rarity {
+  align-items: center;
+  margin-top: 6px;
+}
+
+.kp-chip-label {
+  color: var(--kp-muted);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kp-chips-rarity .kp-chip {
+  gap: 6px;
+}
+
+.kp-chips-rarity .kp-chip.is-on {
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.kp-cplt-row {
+  grid-template-columns: minmax(0, 1.5fr) minmax(40px, 1fr) 42px minmax(72px, auto) auto auto;
+}
+
+.kp-cplt-row.is-busy {
+  border-color: rgba(255, 176, 32, 0.45);
+}
+
+.kp-cplt-when {
+  display: block;
+  margin-top: 2px;
+  color: var(--kp-muted);
+  font-size: 8.5px;
+}
+
+.kp-cplt-refresh {
+  padding: 4px 8px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.kp-cplt-row .kp-spinner {
+  width: 9px;
+  height: 9px;
+}
+
+.kp-cplt-note {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.kp-cplt-note.is-warn {
+  background: rgba(251, 191, 36, 0.12);
+  color: #ffd9a0;
+}
+
+.kp-cplt-note.is-bad {
+  background: rgba(248, 113, 113, 0.12);
+  color: #ffc4c4;
+}
+
+.kp-cplt-note.is-good,
+.kp-cplt-note.is-info {
+  color: var(--kp-muted);
+}

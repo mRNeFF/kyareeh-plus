@@ -4,7 +4,7 @@ Extension **Firefox et Chrome / Edge** pour [kyara.games](https://kyara.games) :
 
 > Projet de fan, non affilié à Kyara. À utiliser dans le respect des règles du jeu.
 
-## Fonctionnalités (v2.8.0)
+## Fonctionnalités (v2.8.1)
 
 - **Valeur estimée du compte en chakra** : somme des cartes au prix médian du marché, avec fourchette basse/haute et pourcentage de cartes valorisées.
 - **En-tête de profil** : avatar Discord, pseudo, titre, rang et points, lien direct vers ta page sur kyara.games.
@@ -25,7 +25,7 @@ Extension **Firefox et Chrome / Edge** pour [kyara.games](https://kyara.games) :
 - **Profit des ventes automatiques** : en bas de **Vente auto**, **profit net généré heure par heure** avec un menu **1 jour / 7 jours / Total**. Chaque point est le **gain de la tranche**, pas un cumul : la courbe monte quand une heure rapporte plus et redescend quand la suivante rapporte moins. **Seules les ventes automatiques sont comptées** : une vente faite à la main reste dans le journal mais est exclue de la courbe, et le nombre de ventes manuelles exclues est indiqué. Une entrée ancienne sans origine enregistrée n’est **jamais classée d’office en manuel** : elle reste `unknown` et est exclue (le journal l’indique). **Au survol**, l’infobulle donne la date, le gain de la tranche et le détail des ventes. Trois indicateurs : **profit net**, **ventes automatiques** et **meilleure heure**. Journal **local** (le site ne fournit aucun historique) : seules les ventes confirmées via Kyareeh+ sont comptées, **une seule fois** par annonce, recalculées à chaque chargement. Profit = encaissé − frais − taxe ; le **coût d’acquisition n’est pas fourni par le site**, il n’est donc ni inventé ni déduit.
 - **Son global et fenêtre Global** : en-tête permanent (logo, nom, onglets, son, rechargement, fermeture, détachement). Le **son** et l’**onglet actif** sont **synchronisés entre les onglets Global** ; **+Duel** utilise le même volume/mute. Le bouton **Détacher** ouvre une **page d’extension autonome** (`panel/panel.html`) **sans le site web**, depuis +Tools comme depuis +Duel. Cette page relit les données via un **onglet kyara.games resté ouvert** (relais background) ; sans onglet du site, elle affiche l’interface mais les données restent indisponibles. Le rechargement rafraîchit tous les onglets Global.
 - **Mise en enchère** : au lieu du prix fixe, mise à prix calculée à *médiane − X %* (réglable par lot, 15 % par défaut), avec achat immédiat facultatif à *+ Y %*.
-- **Onglet Completion (nouveau)** : liste **uniquement les séries incomplètes** du catalogue (6 736 cartes, 1 154 séries ; les cartes « héritage » sont exclues) avec, pour chacune, le nombre de cartes possédées, les manquantes, une **barre de progression**, le nombre de manquants **réellement en vente** et le **coût connu** pour terminer la série. Filtres : recherche, **taille minimale de série**, tri (plus proche d'être complétée, manquants, manquant le moins cher, coût, meilleur rapport complétion/prix, nom). Une **fiche par série** montre chaque carte manquante avec son prix d'achat immédiat, le nombre d'annonces et une case à cocher ; le pied de fiche prépare un **panier** avec total, **plafond de budget** et comparaison au chakra disponible. L'achat est **réel** (`POST /api/market/listings/:id/buy`) mais toujours **explicite** : rien n'est acheté sans une confirmation, chaque annonce est **relue juste avant son achat** (état, échéance, prix, propriétaire), un prix qui monte arrête cette carte, un `chakra` / `rate_limited` / `pass_required` arrête le lot, et la collection est relue une seule fois en fin de lot. **Les enchères sont exclues par défaut** ; une case les inclut, et seulement celles qui ont un **achat immédiat** (on ne mise jamais à ta place). Le marché n'est lu **qu'à la demande** (bouton « Relire le marché »), série par série, sur les **150 annonces les moins chères** de chaque série : aucune lecture en arrière-plan, aucune requête par carte.
+- **Onglet Completion (nouveau)** : liste **uniquement les séries incomplètes** du catalogue (6 736 cartes, 1 154 séries ; les cartes « héritage » sont exclues) avec, pour chacune, le nombre de cartes possédées, les manquantes, une **barre de progression**, le nombre de manquants **réellement en vente** et le **coût connu** pour terminer la série. Filtres : recherche, **taille minimale de série**, tri (plus proche d'être complétée, manquants, manquant le moins cher, coût, meilleur rapport complétion/prix, nom). **Filtre de raretés** : deux boutons « Légendaire » et « Mythique » retirent ces raretés de **toute** l'analyse — progression, pourcentages, liste des manquants et recherches de marché — sans jamais toucher à l'inventaire ; le périmètre est rappelé dans la vue et un état vide explicite s'affiche si toutes les manquantes restantes sont masquées. **Rafraîchir une série** : chaque ligne a son bouton `↻ Rafraîchir` qui relit **uniquement** les annonces de cette série (les annonces vendues, annulées ou expirées disparaissent immédiatement, l'heure du dernier rafraîchissement est affichée, les disparitions sont signalées, les appels répétés sont bloqués 5 s). Une **fiche par série** montre chaque carte manquante avec son prix d'achat immédiat, le nombre d'annonces et une case à cocher ; le pied de fiche prépare un **panier** avec total, **plafond de budget** et comparaison au chakra disponible. L'achat est **réel** (`POST /api/market/listings/:id/buy`) mais toujours **explicite** : rien n'est acheté sans une confirmation, chaque annonce est **relue juste avant son achat** (état, échéance, prix, propriétaire), un prix qui monte arrête cette carte, un `chakra` / `rate_limited` / `pass_required` arrête le lot, et la collection est relue une seule fois en fin de lot. **Les enchères sont exclues par défaut** ; une case les inclut, et seulement celles qui ont un **achat immédiat** (on ne mise jamais à ta place). Le marché n'est lu **qu'à la demande** (bouton « Relire le marché » ou « ↻ Rafraîchir » d'une série), sur les **150 annonces les moins chères** de chaque série : aucune lecture en arrière-plan, aucune requête par carte.
 - **Marché** : deux vues internes. **Marché global** : recherche serveur (nom, rareté, type, pagination réelle via `total`), une ligne par carte avec le **prix fixe le plus bas**, l'**enchère la plus basse** et l'**achat immédiat**, dépliant des autres ventes (vendeur, mise, temps restant), mini-courbe et nombre d'exemplaires possédés. **Bons plans** : scan configurable (tri prix croissant/décroissant/plus récentes/fin proche, jusqu'à 20 pages de 50 annonces, seuil de remise réglable, filtre prix fixe/enchères), classé par économie réelle par rapport à la médiane 7 jours. Plus de doublon « Marché global » dans Vente.
 - **%Drop (nouvel onglet)** : en tête, la *chasse à la carte* — probabilité exacte par booster, pour **tous** les boosters disponibles (pool réel, vedettes et pack doré inclus), nombre de boosters attendus, coût moyen et chance d'au moins une sur 100 boosters. Une fois la carte choisie, seule cette carte reste affichée. En dessous, l'espérance de chakra par booster (retour en %) et les prix moyens par rareté.
 - **Mes annonces** : seules les annonces actives sont listées, avec type, mises et temps restant.
@@ -74,15 +74,37 @@ est dans [`CHROME.md`](CHROME.md).
 
 ### Installé depuis AMO (cas normal)
 
-Rien à faire. Firefox télécharge la nouvelle version en arrière-plan et l'active au redémarrage.
+Rien à faire : Firefox interroge AMO **tout seul**, au plus une fois toutes les 24 h et au démarrage,
+puis installe la nouvelle version au redémarrage suivant. Une version **soumise** mais encore en
+relecture n'est pas servie : c'est la cause n° 1 d'un « ça ne se met pas à jour ».
+
+Pour forcer la vérification : `about:addons` → engrenage ⚙ → **Vérifier les mises à jour**.
+`about:support` → section **Extensions** indique la version réellement installée.
+
+### Vérifier depuis l'extension
+
+Panneau → **Debug** → section **Mises à jour** :
+
+- **Publiée sur AMO** : version réellement servie par le magasin, avec son statut (`publiée`, `en relecture`…) ;
+- **Dépôt GitHub** : version du dépôt, **informative** — rien ne s'installe depuis GitHub ;
+- **Vérifier les mises à jour** : interroge le magasin, et sur Chrome/Edge demande aussi une recherche
+  au navigateur (`runtime.requestUpdateCheck`).
+
+Le bouton **Recharger les fichiers locaux** (ex-« Recharger l'extension ») **ne télécharge rien** :
+il relit le code déjà présent sur le disque. C'est utile en développement, jamais pour passer à une
+version publiée.
 
 ### Chargé depuis le dossier (développement)
 
 1. `git pull`
-2. Panneau → **Debug** → **Recharger l'extension** → **Confirmer** (ou icône de la barre d'outils → **Mettre à jour l'extension**).
+2. Panneau → **Debug** → **Recharger les fichiers locaux** → **Confirmer** (ou icône de la barre d'outils → **Mettre à jour l'extension**).
 3. La page se rafraîchit toute seule et le nouveau code est actif.
 
 Le bouton envoie un message au **script de fond** (`background/background.js`), seul contexte autorisé à appeler `runtime.reload()`. Ce script **rafraîchit l'onglet avant** de recharger l'extension : après `runtime.reload()`, le content script est détruit, donc un `location.reload()` lancé depuis la page ne s'exécuterait jamais (c'était le bug qui faisait croire que la mise à jour ne fonctionnait pas).
+
+Une extension chargée « à titre temporaire » (`about:debugging`) ou depuis `dist/chrome` décompressé
+**ne se met jamais à jour toute seule** : ce n'est pas un défaut de l'extension, c'est le mode de
+chargement. Pour recevoir les mises à jour, il faut le paquet signé (AMO, ou Chrome Web Store).
 
 ### Si la version ne change pas (dev)
 
