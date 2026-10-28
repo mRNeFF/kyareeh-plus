@@ -385,8 +385,6 @@
       scan: { running: false, done: 0, total: 0, error: '', stop: false },
       budgetCap: 0,
       maxUnit: 0,
-      // Simulation par défaut : aucune dépense réelle sans geste explicite.
-      dryRun: true,
       // Cumul des achats réels effectués depuis cet onglet (jamais masqué).
       totalSpent: 0,
       expanded: new Set(),
@@ -403,10 +401,7 @@
         spent: 0,
         failed: [],
         finished: false,
-        stopped: null,
-        confirmReal: false,
-        simOwned: null,
-        simStatus: null
+        stopped: null
       }
     },
     settings: { ...DEFAULT_SETTINGS },
@@ -7632,7 +7627,6 @@
       },
       budgetCap: a.budgetCap,
       maxUnit: a.maxUnit,
-      dryRun: a.dryRun,
       totalSpent: a.totalSpent,
       log: a.log.slice(-80)
     };
@@ -7659,7 +7653,6 @@
     a.filter.limit = 40;
     a.budgetCap = Math.max(0, Math.round(Number(source.budgetCap) || 0));
     a.maxUnit = Math.max(0, Math.round(Number(source.maxUnit) || 0));
-    a.dryRun = source.dryRun !== false;
     a.totalSpent = Math.max(0, Math.round(Number(source.totalSpent) || 0));
     a.log = Array.isArray(source.log)
       ? source.log
@@ -7916,9 +7909,6 @@
       failed: [],
       finished: false,
       stopped: null,
-      confirmReal: false,
-      simOwned: null,
-      simStatus: null,
       startedAt: 0,
       done: 0,
       reason: queue.reason
@@ -7956,39 +7946,33 @@
     }
   }
 
+  /** Délai volontaire entre deux achats (4 s) : laisse le site encaisser. */
+  const AUTOBUY_BUY_DELAY = 4000;
+
   /**
-   * File d'achats réelle ou simulée. Une carte à la fois, file et classement
-   * recalculés avant chaque achat, garde-fou de prix juste avant la dépense.
+   * File d'achats réelle. Une carte à la fois, file et classement recalculés
+   * avant chaque achat, garde-fou de prix juste avant la dépense, puis 4 s
+   * avant l'achat suivant.
    */
   async function autobuyRun() {
     const a = state.autobuy;
     const plan = a.plan;
     if (plan.running || plan.starting) return;
-    if (!a.dryRun && a.budgetCap <= 0) {
-      notify('Définis un plafond de budget supérieur à 0 avant tout achat réel.');
+    const preview = autobuyPlan(plan.rows ?? [], {
+      status: a.status,
+      cap: a.budgetCap,
+      maxUnit: a.maxUnit,
+      chakra: toNum(state.user?.chakra)
+    });
+    if (!preview.count) {
+      notify(
+        preview.reason === 'cap'
+          ? `Aucune carte ne rentre dans le plafond ◆ ${fmt(a.budgetCap)}.`
+          : preview.reason === 'chakra'
+            ? 'Chakra insuffisant pour la première carte.'
+            : 'Aucune annonce éligible.'
+      );
       return;
-    }
-    if (!a.dryRun && !plan.confirmReal) {
-      notify('Coche la confirmation de dépense réelle avant de lancer.');
-      return;
-    }
-    if (!a.dryRun) {
-      const preview = autobuyPlan(plan.rows ?? [], {
-        status: a.status,
-        cap: a.budgetCap,
-        maxUnit: a.maxUnit,
-        chakra: toNum(state.user?.chakra)
-      });
-      if (!preview.count) {
-        notify(
-          preview.reason === 'cap'
-            ? `Aucune carte ne rentre dans le plafond ◆ ${fmt(a.budgetCap)}.`
-            : preview.reason === 'chakra'
-              ? 'Chakra insuffisant pour la première carte.'
-              : 'Aucune annonce éligible.'
-        );
-        return;
-      }
     }
     plan.running = true;
     plan.starting = false;
@@ -8000,19 +7984,12 @@
     plan.done = 0;
     plan.startedAt = Date.now();
     plan.stopped = null;
-    plan.simOwned = completionOwnedMap(state.collection);
-    plan.simStatus = a.status;
-    // La simulation travaille sur une copie du marché : une annonce simulée ne
-    // disparaît jamais du cache réel, sinon on ne pourrait pas relancer l'essai.
-    plan.simMarket = a.dryRun
-      ? new Map([...a.market].map(([id, list]) => [id, list.map((offer) => ({ ...offer }))]))
-      : null;
     plan.boughtIds = new Set();
     autobuyLog(
       'info',
-      `${a.dryRun ? 'Simulation' : 'Achat réel'} démarré · plafond ${
-        a.budgetCap > 0 ? `◆ ${fmt(a.budgetCap)}` : 'aucun'
-      } · prix unitaire ${a.maxUnit > 0 ? `◆ ${fmt(a.maxUnit)}` : 'aucun'}`
+      `Achat réel démarré · plafond ${a.budgetCap > 0 ? `◆ ${fmt(a.budgetCap)}` : 'aucun'} · prix unitaire ${
+        a.maxUnit > 0 ? `◆ ${fmt(a.maxUnit)}` : 'aucun'
+      } · délai ${AUTOBUY_BUY_DELAY / 1000} s entre deux achats`
     );
     render();
 
@@ -8023,12 +8000,9 @@
           autobuyLog('info', 'Arrêt demandé : file stoppée avant le prochain achat.');
           break;
         }
-        const status = a.dryRun ? plan.simStatus : a.status;
-        const owned = a.dryRun ? plan.simOwned : state.collection;
-        const offers = a.dryRun ? plan.simMarket : a.market;
-        const data = autobuyRebuild({ status, owned, offers });
+        const data = autobuyRebuild({ status: a.status, owned: state.collection, offers: a.market });
         const next = autobuyPlan(data.sorted, {
-          status,
+          status: a.status,
           cap: a.budgetCap,
           maxUnit: a.maxUnit,
           chakra: toNum(state.user?.chakra),
@@ -8045,7 +8019,7 @@
         const item = next.items[0];
         if (plan.boughtIds.has(String(item.characterId))) {
           // Ceinture et bretelles : une carte déjà achetée ne repasse jamais.
-          autobuyRemoveOffer(item.characterId, item.listingId, offers);
+          autobuyRemoveOffer(item.characterId, item.listingId, a.market);
           continue;
         }
         if (a.budgetCap > 0 && plan.spent + item.price > a.budgetCap) {
@@ -8068,7 +8042,7 @@
         } catch (err) {
           const code = String(err?.code || '');
           if (code === 'listing_closed' || Number(err?.status) === 404) {
-            autobuyRemoveOffer(item.characterId, item.listingId, offers);
+            autobuyRemoveOffer(item.characterId, item.listingId, a.market);
             autobuyLog('info', `${item.name} · annonce disparue avant l’achat, carte ignorée.`);
             plan.failed.push({ name: item.name, code: 'listing_closed' });
             plan.done += 1;
@@ -8085,7 +8059,7 @@
           { now: Date.now(), userId: state.user?.id, maxUnit: a.maxUnit }
         );
         if (!check.ok) {
-          autobuyRemoveOffer(item.characterId, item.listingId, offers);
+          autobuyRemoveOffer(item.characterId, item.listingId, a.market);
           plan.failed.push({ name: item.name, code: check.code });
           plan.done += 1;
           autobuyLog(
@@ -8100,20 +8074,6 @@
         if (plan.stop) {
           plan.stopped = 'stop';
           break;
-        }
-
-        if (a.dryRun) {
-          plan.bought += 1;
-          plan.spent += check.price;
-          plan.done += 1;
-          plan.boughtIds.add(String(item.characterId));
-          if (plan.simOwned) plan.simOwned.set(String(item.characterId), 1);
-          plan.simStatus = autobuyStatusPurchase(plan.simStatus, item.rarity, 1);
-          autobuyRemoveOffer(item.characterId, item.listingId, offers);
-          autobuyLog('ok', `${item.name} · simulée ◆ ${fmt(check.price)} (aucun chakra dépensé).`);
-          render();
-          await autobuyWait(500, plan);
-          continue;
         }
 
         try {
@@ -8131,7 +8091,7 @@
           autobuyMarkOwned(item.characterId);
           a.status = autobuyStatusPurchase(a.status, item.rarity, 1);
           a.totalSpent += check.price;
-          autobuyRemoveOffer(item.characterId, item.listingId, offers);
+          autobuyRemoveOffer(item.characterId, item.listingId, a.market);
           autobuyLog('ok', `${item.name} · achetée ◆ ${fmt(check.price)} (total onglet ◆ ${fmt(a.totalSpent)}).`);
           persistAutobuySoon();
         } catch (err) {
@@ -8145,7 +8105,7 @@
             break;
           }
           if (outcome === 'skip') {
-            autobuyRemoveOffer(item.characterId, item.listingId, offers);
+            autobuyRemoveOffer(item.characterId, item.listingId, a.market);
             plan.done += 1;
             render();
             continue;
@@ -8154,7 +8114,8 @@
           break;
         }
         render();
-        await autobuyWait(1400, plan);
+        // 4 s entre deux achats : le site et l'anti-rafale respirent.
+        await autobuyWait(AUTOBUY_BUY_DELAY, plan);
       }
     } finally {
       plan.running = false;
@@ -8167,14 +8128,14 @@
       await autobuyEnsureStatus(true).catch(() => null);
       // La file affichée après coup doit refléter la collection réelle, pas
       // les lignes figées avant les achats (sinon une carte achetée réapparaît).
-      if (plan.open && !a.dryRun) plan.rows = autobuyRebuild().sorted;
+      if (plan.open) plan.rows = autobuyRebuild().sorted;
     }
     render();
     notify(
       plan.bought
-        ? `Auto-achat ${a.dryRun ? '(simulation) ' : ''}: ${plural(plan.bought, 'carte')} achetée(s) · ◆ ${fmt(
-            plan.spent
-          )}${a.dryRun ? ' simulés' : ''}${plan.failed.length ? ` · ${plural(plan.failed.length, 'échec')}` : ''}`
+        ? `Auto-achat : ${plural(plan.bought, 'carte')} achetée(s) · ◆ ${fmt(plan.spent)}${
+            plan.failed.length ? ` · ${plural(plan.failed.length, 'échec')}` : ''
+          }`
         : 'Auto-achat : aucun achat effectué'
     );
     persistAutobuySoon();
@@ -8383,13 +8344,13 @@
            <div class="kp-autosell-head">
              <div class="kp-autosell-title">
                <span class="kp-autosell-dot"></span>
-               <div><b>Auto-achat ${a.dryRun ? 'en simulation' : 'en cours'}</b>
-                 <small>${a.dryRun ? 'aucun chakra dépensé' : `dépense réelle · total ◆ ${fmt(a.plan.spent)}`}</small>
+               <div><b>Auto-achat en cours</b>
+                 <small>dépense réelle · délai 4 s entre deux achats · total ◆ ${fmt(a.plan.spent)}</small>
                </div>
              </div>
              <div class="kp-autosell-stats">
                <span><b>${fmt(a.plan.bought)}</b> achetée(s)</span>
-               <span><b>◆ ${fmt(a.plan.spent)}</b> ${a.dryRun ? 'simulés' : 'dépensés'}</span>
+               <span><b>◆ ${fmt(a.plan.spent)}</b> dépensés</span>
                <span><b>${remaining == null ? '—' : fmt(remaining)}</b> restante(s)</span>
              </div>
              <button class="kp-btn is-danger" type="button" data-act="autobuy-stop">Arrêter</button>
@@ -8514,10 +8475,9 @@
             running ? 'disabled' : ''
           }>
         </label>
-        <label class="kp-check">
-          <input type="checkbox" data-autobuy-dryrun ${a.dryRun ? 'checked' : ''} ${running ? 'disabled' : ''}>
-          Simulation <em>${a.dryRun ? '· aucun achat réel' : '· achats réels'}</em>
-        </label>
+        <div class="kp-hint" style="align-self:end">
+          Achats réels · <b>4 s</b> entre deux cartes · confirmation explicite avant de lancer.
+        </div>
       </div>
 
       <div class="kp-filters kp-filters-4">
@@ -8659,7 +8619,7 @@
       }
       <div class="kp-hint">
         Dépensé depuis cet onglet (cumul réel) : <b>◆ ${fmt(a.totalSpent)}</b>.
-        ${a.dryRun ? 'La simulation n’ajoute rien à ce cumul.' : ''}
+        Chaque achat est séparé du suivant par <b>4 s</b>.
         Aucune dépense ne dépasse le plafond ni le prix unitaire configurés ; le bouton Arrêter reste disponible
         pendant toute la file.
       </div>
@@ -8680,8 +8640,6 @@
     const running = plan.running;
     const chakra = toNum(state.user?.chakra);
     const blocked = !preview.count;
-    const needCap = !a.dryRun && a.budgetCap <= 0;
-    const needRealConfirm = !a.dryRun && (!plan.confirmReal || needCap);
 
     ui.modal.hidden = false;
     ui.modalCard.classList.add('is-wide');
@@ -8695,27 +8653,21 @@
         <div class="kp-alert ${blocked ? 'is-bad' : ''}">
           <b>${
             running
-              ? a.dryRun
-                ? 'Simulation en cours — aucun chakra dépensé'
-                : 'Achat réel en cours — total dépensé visible ci-dessous'
+              ? 'Achat réel en cours — total dépensé visible ci-dessous'
               : plan.finished && plan.bought
-                ? `Terminé — ${fmt(plan.bought)} carte(s) · ◆ ${fmt(plan.spent)} ${a.dryRun ? 'simulés' : 'dépensés'}`
+                ? `Terminé — ${fmt(plan.bought)} carte(s) · ◆ ${fmt(plan.spent)} dépensés`
                 : blocked
                   ? 'Aucun achat possible en l’état'
-                  : a.dryRun
-                    ? 'Simulation : aucun chakra ne sera dépensé'
-                    : needCap
-                      ? 'Achat réel bloqué : définis un plafond de budget supérieur à 0'
-                      : 'Dépense réelle : vérifie le total et le plafond'
+                  : 'Dépense réelle : vérifie le total et le plafond'
           }</b><br>
           ${
             running
-              ? `${fmt(plan.bought)} carte(s) · ◆ ${fmt(plan.spent)} ${a.dryRun ? 'simulés' : 'dépensés'} ·
+              ? `${fmt(plan.bought)} carte(s) · ◆ ${fmt(plan.spent)} dépensés ·
                  ${plan.failed.length ? `${fmt(plan.failed.length)} échec(s) · ` : ''}arrêt toujours possible.`
               : plan.finished && plan.bought
-                ? `Progression ${a.dryRun ? 'simulée' : 'réelle'} : ${
-                    (a.dryRun ? plan.simStatus : a.status)?.pct ?? '—'
-                  } % · ${fmt(plan.failed.length)} carte(s) ignorée(s) · raison d’arrêt : ${esc(
+                ? `Progression réelle : ${a.status?.pct ?? '—'} % · ${fmt(
+                    plan.failed.length
+                  )} carte(s) ignorée(s) · raison d’arrêt : ${esc(
                     plan.stopped === 'cap'
                       ? 'plafond atteint'
                       : plan.stopped === 'chakra'
@@ -8735,7 +8687,7 @@
                       ? 'Le chakra disponible ne couvre pas la première carte.'
                       : 'Aucune annonce éligible avec ces filtres.'
                   : `Une carte à la fois. Chaque annonce est relue juste avant l’achat : prix modifié ou annonce
-                     disparue = carte ignorée, sans dépasser le budget.`
+                     disparue = carte ignorée, sans dépasser le budget. Puis 4 s avant l’achat suivant.`
           }
         </div>
 
@@ -8743,7 +8695,7 @@
           ${
             plan.finished
               ? `<div><span>Achetées</span><b>${fmt(plan.bought)}</b></div>
-                 <div><span>${a.dryRun ? 'Simulé' : 'Dépensé'}</span><b>◆ ${fmt(plan.spent)}</b></div>
+                 <div><span>Dépensé</span><b>◆ ${fmt(plan.spent)}</b></div>
                  <div><span>Budget max</span><b>${a.budgetCap > 0 ? `◆ ${fmt(a.budgetCap)}` : 'aucun'}</b></div>
                  <div><span>Prix unitaire max</span><b>${a.maxUnit > 0 ? `◆ ${fmt(a.maxUnit)}` : 'aucun'}</b></div>
                  <div><span>Chakra</span><b>${chakra == null ? '—' : `◆ ${fmt(chakra)}`}</b></div>
@@ -8775,23 +8727,9 @@
         </div>
 
         ${
-          a.dryRun
-            ? ''
-            : `<label class="kp-check" style="margin:6px 0">
-                 <input type="checkbox" data-autobuy-real-confirm ${plan.confirmReal ? 'checked' : ''} ${
-                   running ? 'disabled' : ''
-                 }>
-                 Je confirme vouloir dépenser du chakra réel, dans la limite du plafond ci-dessus.
-               </label>`
-        }
-
-        ${
           plan.finished
             ? `<details class="kp-autobuy-rules">
-                 <summary>${a.dryRun ? 'File simulée' : 'File restante'} · ${plural(
-                   preview.count,
-                   'carte'
-                 )} (déplier)</summary>`
+                 <summary>File restante · ${plural(preview.count, 'carte')} (déplier)</summary>`
             : ''
         }
         <div class="kp-plan kp-autobuy-plan-list">
@@ -8855,10 +8793,9 @@
             : plan.finished
               ? `<button class="kp-btn is-primary" type="button" data-act="autobuy-close">Terminé</button>`
               : `<button class="kp-btn is-primary" type="button" data-act="autobuy-confirm" ${
-                  blocked || needRealConfirm ? 'disabled' : ''
+                  blocked ? 'disabled' : ''
                 }>
-                   ${a.dryRun ? 'Lancer la simulation' : 'Acheter réellement'} · ${plural(preview.count, 'carte')} ·
-                   ◆ ${fmt(preview.total)}
+                   Acheter réellement · ${plural(preview.count, 'carte')} · ◆ ${fmt(preview.total)}
                  </button>`
         }
       </div>
@@ -18166,23 +18103,6 @@
       const cap = autobuyCap ? autobuyCap.value : state.autobuy.budgetCap;
       const unit = autobuyUnit ? autobuyUnit.value : state.autobuy.maxUnit;
       autobuySetCaps(cap, unit);
-      render();
-      return;
-    }
-
-    const autobuyDryRun = target.closest('[data-autobuy-dryrun]');
-    if (autobuyDryRun) {
-      if (state.autobuy.plan.running) return;
-      state.autobuy.dryRun = Boolean(autobuyDryRun.checked);
-      state.autobuy.plan.confirmReal = false;
-      persistAutobuySoon();
-      render();
-      return;
-    }
-
-    const autobuyRealConfirm = target.closest('[data-autobuy-real-confirm]');
-    if (autobuyRealConfirm) {
-      state.autobuy.plan.confirmReal = Boolean(autobuyRealConfirm.checked);
       render();
       return;
     }

@@ -286,15 +286,14 @@ async function main() {
     await shot(page, '06-annonces-disponibles.png');
 
     /* ------------------------------------------------------------------ */
-    /* 3. Confirmation, simulation, arrêt                                  */
+    /* 3. Confirmation et arrêt immédiat                                   */
     /* ------------------------------------------------------------------ */
-    console.log('\n3. Confirmation, simulation et arrêt');
+    console.log('\n3. Confirmation et arrêt immédiat');
     await page.ev(`(() => {
       const a = window.__kyaraPlus.state.autobuy;
       Object.assign(a.filter, { rarity: 'all', sort: 'eveil', maxPrice: 0, hideL: false, dispoOnly: false, series: '', query: '' });
-      a.budgetCap = 0;
-      a.maxUnit = 0;
-      a.dryRun = true;
+      a.budgetCap = 100;
+      a.maxUnit = 50;
       window.__kyaraPlus.render();
       return true;
     })()`);
@@ -310,106 +309,56 @@ async function main() {
     check('confirmation : coût estimé', modalText.includes('Coût estimé'));
     check('confirmation : budget max', modalText.includes('Budget max'));
     check('confirmation : prix unitaire max', modalText.includes('Prix unitaire max'));
-    check('confirmation : simulation', modalText.includes('Simulation'));
+    check('confirmation : achat réel', modalText.includes('Acheter réellement'));
     await shot(page, '07-confirmation-budget.png');
-
-    // Achat réel : plafond obligatoire et confirmation explicite.
-    await page.ev(`(() => {
-      const a = window.__kyaraPlus.state.autobuy;
-      a.dryRun = false;
-      a.budgetCap = 100;
-      a.maxUnit = 50;
-      a.plan.confirmReal = false;
-      window.__kyaraPlus.render();
-      return true;
-    })()`);
-    await sleep(500);
-    const realModal = await page.ev(
-      "document.querySelector('#kyara-plus-root').shadowRoot.querySelector('.kp-modal')?.textContent || ''"
-    );
-    check('achat réel : case de confirmation présente', realModal.includes('Je confirme vouloir dépenser'));
     const confirmDisabled = await page.ev(
       "document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act=\"autobuy-confirm\"]')?.disabled"
     );
-    check('achat réel bloqué sans confirmation', confirmDisabled === true);
-    await shot(page, '08-confirmation-achat-reel.png');
+    check('confirmation : bouton actif', confirmDisabled === false);
+    await page.ev(`(() => {
+      const body = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('.kp-modal-body');
+      if (body) body.scrollTop = body.scrollHeight;
+      return true;
+    })()`);
+    await sleep(250);
+    await shot(page, '08-confirmation-file.png');
 
-    // Retour simulation pour ne pas dépenser dans ce scénario.
-    await page.ev(`(() => {
-      const a = window.__kyaraPlus.state.autobuy;
-      a.dryRun = true;
-      a.budgetCap = 0;
-      a.maxUnit = 0;
-      a.plan.confirmReal = false;
-      window.__kyaraPlus.render();
-      return true;
-    })()`);
-    await sleep(500);
-    await page.ev(
-      "document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act=\"autobuy-confirm\"]').click(); true"
-    );
-    for (let i = 0; i < 50; i += 1) {
-      if (!(await page.ev('window.__kyaraPlus.state.autobuy.plan.running'))) break;
-      await sleep(250);
-    }
-    const sim = await page.ev(`(() => {
-      const p = window.__kyaraPlus.state.autobuy.plan;
-      return { bought: p.bought, spent: p.spent, stopped: p.stopped, finished: p.finished, log: window.__kyaraPlus.state.autobuy.log.length };
-    })()`);
-    check('simulation : cartes achetées', sim.bought > 0, String(sim.bought));
-    const simChakra = await page.ev('window.__kyaraPlus.state.user.chakra');
-    const simReal = await page.ev('Boolean(window.__bought)');
-    check(
-      'simulation : aucune dépense réelle',
-      sim.spent > 0 && Number(simChakra) === 12345 && simReal === false,
-      `chakra=${simChakra}`
-    );
-    check('simulation : journal alimenté', sim.log >= sim.bought, String(sim.log));
-    check('simulation : terminée', sim.finished === true);
-    await scrollModalBottom(page);
-    await shot(page, '09-journal-simulation.png');
-
-    // Arrêt immédiat : nouvelle file, puis clic sur Arrêter.
-    await page.ev(`(() => {
-      const root = document.querySelector('#kyara-plus-root').shadowRoot;
-      root.querySelector('[data-act="autobuy-close"]')?.click();
-      return true;
-    })()`);
-    await sleep(400);
-    await page.ev(`(() => {
-      const a = window.__kyaraPlus.state.autobuy;
-      a.dryRun = true;
-      a.budgetCap = 0;
-      a.maxUnit = 0;
-      window.__kyaraPlus.render();
-      window.__kyaraPlus.autobuyPrepare();
-      return true;
-    })()`);
-    await sleep(500);
+    // Achat réel puis arrêt manuel (le harnais débite réellement son chakra fictif).
     await page.ev(
       "document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act=\"autobuy-confirm\"]').click(); true"
     );
     await sleep(1200);
+    const beforeStop = await page.ev('window.__kyaraPlus.state.autobuy.plan.bought');
+    check('achat : au moins une carte avant arrêt', beforeStop >= 1, String(beforeStop));
     await page.ev(
       "document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act=\"autobuy-stop\"]').click(); true"
     );
-    for (let i = 0; i < 40; i += 1) {
+    for (let i = 0; i < 60; i += 1) {
       if (!(await page.ev('window.__kyaraPlus.state.autobuy.plan.running'))) break;
       await sleep(200);
     }
     const stopped = await page.ev(`(() => {
       const p = window.__kyaraPlus.state.autobuy.plan;
-      return { bought: p.bought, stopped: p.stopped, running: p.running, finished: p.finished };
+      return { bought: p.bought, stopped: p.stopped, running: p.running, finished: p.finished, log: window.__kyaraPlus.state.autobuy.log.length };
     })()`);
     check('arrêt : file stoppée', stopped.running === false && stopped.finished === true);
     check('arrêt : raison manuelle', stopped.stopped === 'stop', String(stopped.stopped));
     check('arrêt : achats partiels', stopped.bought < 11, String(stopped.bought));
+    check('arrêt : journal alimenté', stopped.log >= stopped.bought, String(stopped.log));
+    await page.ev(`(() => {
+      const root = document.querySelector('#kyara-plus-root').shadowRoot;
+      const body = root.querySelector('.kp-modal-body');
+      if (body) body.scrollTop = body.scrollHeight;
+      const log = root.querySelector('.kp-modal .kp-log');
+      if (log) log.scrollTop = log.scrollHeight;
+      return true;
+    })()`);
+    await sleep(250);
+    await shot(page, '09-journal-achats.png');
     await page.ev(`(() => {
       const root = document.querySelector('#kyara-plus-root').shadowRoot;
       const body = root.querySelector('.kp-modal-body');
       if (body) body.scrollTop = 0;
-      const log = root.querySelector('.kp-modal .kp-log');
-      if (log) log.scrollTop = log.scrollHeight;
       return true;
     })()`);
     await sleep(250);
@@ -469,10 +418,8 @@ async function main() {
     }
     await real.ev(`(() => {
       const a = window.__kyaraPlus.state.autobuy;
-      a.dryRun = false;
       a.budgetCap = 100;
       a.maxUnit = 50;
-      a.plan.confirmReal = false;
       a.log = [];
       a.totalSpent = 0;
       window.__kyaraPlus.render();
@@ -480,28 +427,29 @@ async function main() {
       return true;
     })()`);
     await sleep(600);
-    await real.ev(`(() => {
-      const c = document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-autobuy-real-confirm]');
-      if (!c) return false;
-      c.checked = true;
-      c.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    })()`);
-    await sleep(300);
+    const realStartedAt = Date.now();
     await real.ev(
       "document.querySelector('#kyara-plus-root').shadowRoot.querySelector('[data-act=\"autobuy-confirm\"]').click(); true"
     );
     await sleep(2600);
     await shot(real, '12-execution-en-cours.png');
-    for (let i = 0; i < 140; i += 1) {
+    for (let i = 0; i < 220; i += 1) {
       if (await real.ev('window.__kyaraPlus.state.autobuy.plan.finished')) break;
       await sleep(250);
     }
+    const realElapsed = Date.now() - realStartedAt;
     const bought = (await real.ev('window.__bought || []')) ?? [];
     const spent = bought.reduce((sum, item) => sum + Number(item.price || 0), 0);
     const chakraLeft = await real.ev('window.__chakra');
     const boughtIds = bought.map((item) => String(item.characterId));
     check('achat réel : au moins une carte', bought.length > 0, String(bought.length));
+    check(
+      'achat réel : délai de 4 s entre les cartes',
+      realElapsed >= Math.max(0, bought.length - 1) * 3800,
+      `${realElapsed} ms pour ${bought.length} carte(s)`
+    );
+    const logText = await real.ev('window.__kyaraPlus.state.autobuy.log.map((e) => e.text).join(" | ")');
+    check('achat réel : journal annonce le délai', String(logText).includes('délai 4 s'));
     check('achat réel : plafond respecté', spent <= 100, `${spent} ≤ 100`);
     check('achat réel : prix unitaire respecté', bought.every((item) => Number(item.price) <= 50));
     check('achat réel : aucun doublon', new Set(boughtIds).size === boughtIds.length);

@@ -104,7 +104,8 @@ Clés observées dans le code du site :
 - Classe, filtre, chiffre le coût, propose une file d'achats **une carte à la fois**, avec
   relecture de l'annonce et recalcul du classement avant chaque achat.
 - Plafond de dépense et prix unitaire maximum **persistés**, bouton **Arrêter** permanent.
-- Mode **simulation par défaut** ; le mode réel exige une case de confirmation supplémentaire.
+- **Achats réels** uniquement, avec **4 s entre deux achats** et une confirmation explicite
+  avant de lancer la file.
 - Journal horodaté des achats, erreurs et cartes ignorées, persisté (80 entrées).
 
 ### Ne fait pas
@@ -126,8 +127,8 @@ Clés observées dans le code du site :
 4. Une erreur inconnue arrête la file (aucune dépense à l'aveugle).
 5. Le total dépensé est affiché en permanence : bandeau d'exécution, confirmation, journal,
    pied de l'onglet. Le cumul de l'onglet est persisté.
-6. La simulation n'écrit ni chakra, ni collection réelle ; elle met à jour une progression
-   simulée séparée pour vérifier le comportement.
+6. Chaque achat réel est espacé du suivant par **4 secondes** ; aucun mode simulation n'est
+   proposé dans l'onglet.
 
 ## 5. Limites techniques
 
@@ -147,9 +148,9 @@ Clés observées dans le code du site :
 
 - `node test/verify-autobuy.mjs` : 117 contrôles purs (statut, déficits, filtres, tris, file,
   plafonds, garde-fous, fusion d'annonces).
-- `node scripts/autobuy-shots.mjs` : 44 contrôles navigateur (lecture du marché, simulation,
-  achat réel avec plafond, arrêt immédiat, persistance des filtres/tri après navigation et
-  rechargement) + 12 captures dans `../_shots/autobuy`.
+- `node scripts/autobuy-shots.mjs` : contrôles navigateur (lecture du marché, achat réel avec
+  plafond, arrêt immédiat, persistance des filtres/tri après navigation et rechargement)
+  + captures dans `../_shots/autobuy`.
 - `node test/verify-completion.mjs`, `verify-autosell.mjs`, `verify-recycle.mjs`,
   `verify-analysis.mjs` : aucune régression.
 
